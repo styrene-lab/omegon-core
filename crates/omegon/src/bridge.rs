@@ -152,6 +152,17 @@ pub struct SubprocessBridge {
 }
 
 impl SubprocessBridge {
+    /// Send a graceful shutdown message to the bridge subprocess.
+    /// The bridge JS exits cleanly on receiving this, which is better
+    /// than relying on kill_on_drop's SIGKILL.
+    pub async fn shutdown(&self) {
+        let _ = self.send_request("shutdown", serde_json::json!({})).await;
+        // Give the bridge 500ms to exit cleanly before kill_on_drop fires
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+impl SubprocessBridge {
     /// Spawn the Node.js bridge subprocess.
     pub async fn spawn(bridge_script: &Path, node_path: &str) -> anyhow::Result<Self> {
         let mut child = Command::new(node_path)

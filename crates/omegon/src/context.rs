@@ -31,10 +31,7 @@ struct ActiveInjection {
 }
 
 impl ContextManager {
-    pub fn new(base_prompt: String, mut providers: Vec<Box<dyn ContextProvider>>) -> Self {
-        // Always include the built-in session HUD
-        providers.push(Box::new(SessionHud));
-
+    pub fn new(base_prompt: String, providers: Vec<Box<dyn ContextProvider>>) -> Self {
         Self {
             base_prompt,
             providers,
@@ -180,23 +177,6 @@ impl ContextManager {
         }
 
         prompt
-    }
-}
-
-// ─── Built-in context providers ─────────────────────────────────────────────
-
-/// Session HUD — provides ambient state awareness to the agent.
-///
-/// This is a no-op provider; the actual HUD is built directly by
-/// ContextManager since it needs access to ConversationState.
-/// This struct exists so the provider list can be iterated uniformly.
-struct SessionHud;
-
-impl ContextProvider for SessionHud {
-    fn provide_context(&self, _signals: &ContextSignals<'_>) -> Option<ContextInjection> {
-        // HUD is built directly by ContextManager::build_session_hud
-        // because it needs ConversationState which isn't in ContextSignals.
-        None
     }
 }
 

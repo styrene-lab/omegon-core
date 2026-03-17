@@ -310,6 +310,15 @@ async fn consume_llm_stream(
 
     let _ = events.send(AgentEvent::MessageEnd);
 
+    // Detect incomplete streams — if we never got a Done event, the bridge
+    // probably died. An empty message with no text and no tool calls is
+    // almost certainly a dropped connection, not a valid LLM response.
+    if final_raw == Value::Null && text_parts.is_empty() && tool_calls.is_empty() {
+        anyhow::bail!(
+            "LLM stream ended without a completion event — the bridge may have crashed"
+        );
+    }
+
     // Clean up empty trailing parts
     while text_parts.last().is_some_and(|s| s.is_empty()) {
         text_parts.pop();
@@ -333,31 +342,12 @@ async fn consume_llm_stream(
     })
 }
 
-/// Dispatch tool calls — parallel for read-only tools, sequential for mutations.
+/// Dispatch tool calls to their providers.
 ///
-/// Independent tool calls (read, bash without side effects) run concurrently.
-/// Mutation tools (edit, write) run sequentially to preserve ordering.
-/// Results are always returned in the original call order.
+/// Currently sequential. True parallel dispatch requires `Arc<dyn ToolProvider>`
+/// which we'll add when the trait bound is relaxed in Phase 1.
+/// The `is_readonly_tool` classification is preserved for that future.
 async fn dispatch_tools(
-    tools: &[Box<dyn ToolProvider>],
-    tool_index: &HashMap<String, usize>,
-    tool_calls: &[ToolCall],
-    events: &broadcast::Sender<AgentEvent>,
-    cancel: CancellationToken,
-) -> Vec<ToolResultEntry> {
-    // If only one tool call or all are mutations, just run sequentially
-    let all_readonly = tool_calls.iter().all(|c| is_readonly_tool(&c.name));
-
-    if tool_calls.len() <= 1 || !all_readonly {
-        return dispatch_sequential(tools, tool_index, tool_calls, events, cancel).await;
-    }
-
-    // All read-only — dispatch in parallel
-    dispatch_parallel(tools, tool_index, tool_calls, events, cancel).await
-}
-
-/// Sequential dispatch — one tool at a time.
-async fn dispatch_sequential(
     tools: &[Box<dyn ToolProvider>],
     tool_index: &HashMap<String, usize>,
     tool_calls: &[ToolCall],
@@ -367,64 +357,34 @@ async fn dispatch_sequential(
     let mut results = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
-        let entry = execute_single_tool(tools, tool_index, call, events, cancel.clone()).await;
-        results.push(entry);
-    }
-
-    results
-}
-
-/// Parallel dispatch — all tools run concurrently, results returned in order.
-async fn dispatch_parallel(
-    tools: &[Box<dyn ToolProvider>],
-    tool_index: &HashMap<String, usize>,
-    tool_calls: &[ToolCall],
-    events: &broadcast::Sender<AgentEvent>,
-    cancel: CancellationToken,
-) -> Vec<ToolResultEntry> {
-    use tokio::task::JoinSet;
-
-    // Emit all ToolStart events first
-    for call in tool_calls {
         let _ = events.send(AgentEvent::ToolStart {
             id: call.id.clone(),
             name: call.name.clone(),
             args: call.arguments.clone(),
         });
-    }
 
-    // Spawn all tool executions concurrently
-    let mut set = JoinSet::new();
-    for (idx, call) in tool_calls.iter().enumerate() {
-        let call_id = call.id.clone();
-        let call_name = call.name.clone();
-        let call_args = call.arguments.clone();
-        let cancel = cancel.clone();
-
-        let provider_idx = tool_index.get(&call.name).copied();
-
-        // We need to extract the execute future outside of spawn
-        // because tools is borrowed, not owned. Build the result inline.
-        let (result, is_error) = match provider_idx {
-            Some(pi) => match tools[pi]
-                .execute(&call_name, &call_id, call_args.clone(), cancel)
-                .await
-            {
-                Ok(r) => (r, false),
-                Err(e) => (
-                    omegon_traits::ToolResult {
-                        content: vec![ContentBlock::Text {
-                            text: e.to_string(),
-                        }],
-                        details: Value::Null,
-                    },
-                    true,
-                ),
-            },
+        let (result, is_error) = match tool_index.get(&call.name) {
+            Some(&provider_idx) => {
+                match tools[provider_idx]
+                    .execute(&call.name, &call.id, call.arguments.clone(), cancel.clone())
+                    .await
+                {
+                    Ok(result) => (result, false),
+                    Err(e) => (
+                        omegon_traits::ToolResult {
+                            content: vec![ContentBlock::Text {
+                                text: e.to_string(),
+                            }],
+                            details: Value::Null,
+                        },
+                        true,
+                    ),
+                }
+            }
             None => (
                 omegon_traits::ToolResult {
                     content: vec![ContentBlock::Text {
-                        text: format!("Tool '{}' not found", call_name),
+                        text: format!("Tool '{}' not found", call.name),
                     }],
                     details: Value::Null,
                 },
@@ -432,95 +392,28 @@ async fn dispatch_parallel(
             ),
         };
 
-        let entry = ToolResultEntry {
-            call_id: call_id.clone(),
-            tool_name: call_name.clone(),
-            content: result.content.clone(),
-            is_error,
-        };
-
         let _ = events.send(AgentEvent::ToolEnd {
-            id: call_id,
-            result,
+            id: call.id.clone(),
+            result: result.clone(),
             is_error,
         });
 
-        // We can't easily spawn because ToolProvider isn't 'static.
-        // For now, collect results inline (they're already awaited above).
-        // True parallel dispatch would require Arc<dyn ToolProvider>.
-        // This preserves the architecture for when we make that change.
-        set.spawn(async move { (idx, entry) });
+        results.push(ToolResultEntry {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            content: result.content,
+            is_error,
+        });
     }
 
-    // Collect results, sort by original index
-    let mut indexed_results: Vec<(usize, ToolResultEntry)> = Vec::with_capacity(tool_calls.len());
-    while let Some(Ok((idx, entry))) = set.join_next().await {
-        indexed_results.push((idx, entry));
-    }
-    indexed_results.sort_by_key(|(idx, _)| *idx);
-    indexed_results.into_iter().map(|(_, e)| e).collect()
+    results
 }
 
-/// Execute a single tool call with event emission.
-async fn execute_single_tool(
-    tools: &[Box<dyn ToolProvider>],
-    tool_index: &HashMap<String, usize>,
-    call: &ToolCall,
-    events: &broadcast::Sender<AgentEvent>,
-    cancel: CancellationToken,
-) -> ToolResultEntry {
-    let _ = events.send(AgentEvent::ToolStart {
-        id: call.id.clone(),
-        name: call.name.clone(),
-        args: call.arguments.clone(),
-    });
-
-    let (result, is_error) = match tool_index.get(&call.name) {
-        Some(&provider_idx) => {
-            match tools[provider_idx]
-                .execute(&call.name, &call.id, call.arguments.clone(), cancel)
-                .await
-            {
-                Ok(result) => (result, false),
-                Err(e) => (
-                    omegon_traits::ToolResult {
-                        content: vec![ContentBlock::Text {
-                            text: e.to_string(),
-                        }],
-                        details: Value::Null,
-                    },
-                    true,
-                ),
-            }
-        }
-        None => (
-            omegon_traits::ToolResult {
-                content: vec![ContentBlock::Text {
-                    text: format!("Tool '{}' not found", call.name),
-                }],
-                details: Value::Null,
-            },
-            true,
-        ),
-    };
-
-    let _ = events.send(AgentEvent::ToolEnd {
-        id: call.id.clone(),
-        result: result.clone(),
-        is_error,
-    });
-
-    ToolResultEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        content: result.content,
-        is_error,
-    }
-}
-
-/// Is this tool read-only (safe to run in parallel)?
+/// Is this tool read-only (safe to run in parallel when we add Arc<dyn ToolProvider>)?
+/// Note: bash is NOT read-only — commands can have arbitrary side effects.
+#[allow(dead_code)]
 fn is_readonly_tool(name: &str) -> bool {
-    matches!(name, "read" | "bash" | "understand")
+    matches!(name, "read" | "understand")
 }
 
 // ─── Stuck detection ────────────────────────────────────────────────────────

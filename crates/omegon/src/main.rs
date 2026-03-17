@@ -195,6 +195,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
+    // Graceful bridge shutdown — send "shutdown" before kill_on_drop fires
+    bridge.shutdown().await;
+
     match &result {
         Ok(()) => {
             if let Some(last_text) = conversation.last_assistant_text() {

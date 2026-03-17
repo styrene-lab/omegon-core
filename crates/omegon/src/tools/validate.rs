@@ -174,11 +174,17 @@ fn count_errors(summary: &str) -> usize {
 }
 
 /// Truncate validation output to stay within a byte budget.
+/// Safe for multi-byte UTF-8 — finds the last char boundary before the limit.
 fn truncate_validation(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let truncated = &text[..max_bytes];
+    // Find the last valid char boundary at or before max_bytes
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = &text[..end];
     if let Some(last_nl) = truncated.rfind('\n') {
         format!("{}\n... (truncated)", &truncated[..last_nl])
     } else {
@@ -214,6 +220,17 @@ mod tests {
         let truncated = truncate_validation(text, 20);
         assert!(truncated.contains("truncated"));
         assert!(!truncated.contains("line three"));
+    }
+
+    #[test]
+    fn truncation_safe_for_multibyte_utf8() {
+        // "café" has a 2-byte é (0xC3 0xA9) — cutting at byte 4 would
+        // split the multi-byte character. This must not panic.
+        let text = "café\nbar\nbaz";
+        let truncated = truncate_validation(text, 4);
+        assert!(truncated.contains("truncated"));
+        // Should have backed up to byte 3 ("caf") rather than panicking
+        assert!(!truncated.contains('é'));
     }
 
     #[test]
