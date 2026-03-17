@@ -191,7 +191,8 @@ rl.on("line", async (line) => {
     const eventStream = streamSimple(model, context, options);
 
     for await (const event of eventStream) {
-      send({ id, event: slimEvent(event) });
+      const slim = slimEvent(event);
+      if (slim) send({ id, event: slim });
     }
 
     const finalMessage = await eventStream.result();

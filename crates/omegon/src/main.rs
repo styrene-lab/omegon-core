@@ -45,9 +45,17 @@ struct Cli {
     #[arg(long, default_value = "node")]
     node: String,
 
-    /// Model to use (for future configurability)
+    /// Model identifier (provider:model format)
     #[arg(short, long, default_value = "anthropic:claude-sonnet-4-20250514")]
     model: String,
+
+    /// Maximum turns before forced stop (0 = no limit)
+    #[arg(long, default_value = "50")]
+    max_turns: u32,
+
+    /// Max retries on transient LLM errors
+    #[arg(long, default_value = "3")]
+    max_retries: u32,
 }
 
 #[tokio::main]
@@ -63,13 +71,31 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let cwd = std::fs::canonicalize(&cli.cwd)?;
-    tracing::info!(cwd = %cwd.display(), "omegon-agent starting");
+    tracing::info!(cwd = %cwd.display(), model = %cli.model, "omegon-agent starting");
 
     let Some(prompt_text) = &cli.prompt else {
         eprintln!("Usage: omegon-agent --prompt \"<task>\" [--cwd <path>]");
         eprintln!();
         eprintln!("Headless coding agent — executes a task and exits.");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  -m, --model <MODEL>     Model identifier (default: anthropic:claude-sonnet-4-20250514)");
+        eprintln!("  --max-turns <N>         Maximum turns (default: 50, 0 = unlimited)");
+        eprintln!("  --max-retries <N>       Max LLM error retries (default: 3)");
         std::process::exit(1);
+    };
+
+    // ─── Build loop config ──────────────────────────────────────────────
+    let loop_config = r#loop::LoopConfig {
+        max_turns: cli.max_turns,
+        soft_limit_turns: if cli.max_turns > 0 {
+            cli.max_turns * 2 / 3
+        } else {
+            0
+        },
+        max_retries: cli.max_retries,
+        retry_delay_ms: 2000,
+        model: cli.model.clone(),
     };
 
     // ─── Spawn LLM bridge ───────────────────────────────────────────────
@@ -110,7 +136,6 @@ async fn main() -> anyhow::Result<()> {
                     eprint!("{text}");
                 }
                 AgentEvent::ThinkingChunk { text } => {
-                    // Dim thinking output
                     eprint!("\x1b[2m{text}\x1b[0m");
                 }
                 AgentEvent::ToolStart { name, .. } => {
@@ -152,7 +177,6 @@ async fn main() -> anyhow::Result<()> {
     // ─── Run the loop ───────────────────────────────────────────────────
     let cancel = CancellationToken::new();
 
-    // Handle Ctrl+C
     let cancel_clone = cancel.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
@@ -167,12 +191,12 @@ async fn main() -> anyhow::Result<()> {
         &mut conversation,
         &events_tx,
         cancel,
+        &loop_config,
     )
     .await;
 
     match &result {
         Ok(()) => {
-            // Print final assistant text to stdout (the actual output)
             if let Some(last_text) = conversation.last_assistant_text() {
                 println!("{last_text}");
             }
