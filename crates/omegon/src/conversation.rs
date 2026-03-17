@@ -221,6 +221,7 @@ impl ConversationState {
                 LlmMessage {
                     role: "user".into(),
                     content: serde_json::json!([{"type": "tool_result", "tool_use_id": result.call_id, "content": summary}]),
+                    timestamp: None,
                 }
             }
             _ => self.to_llm_message(msg),
@@ -233,10 +234,12 @@ impl ConversationState {
             AgentMessage::User { text } => LlmMessage {
                 role: "user".into(),
                 content: serde_json::json!(text),
+                timestamp: None,
             },
             AgentMessage::Assistant(a) => LlmMessage {
                 role: "assistant".into(),
                 content: a.raw.clone(),
+                timestamp: None,
             },
             AgentMessage::ToolResult(r) => LlmMessage {
                 role: "user".into(),
@@ -245,6 +248,7 @@ impl ConversationState {
                     "tool_use_id": r.call_id,
                     "content": r.content,
                 }]),
+                timestamp: None,
             },
         }
     }
