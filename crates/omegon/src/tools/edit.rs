@@ -4,7 +4,7 @@ use anyhow::Result;
 use omegon_traits::{ContentBlock, ToolResult};
 use std::path::Path;
 
-pub async fn execute(path: &Path, old_text: &str, new_text: &str) -> Result<ToolResult> {
+pub async fn execute(path: &Path, old_text: &str, new_text: &str, cwd: &Path) -> Result<ToolResult> {
     if !path.exists() {
         anyhow::bail!("File not found: {}", path.display());
     }
@@ -82,15 +82,22 @@ pub async fn execute(path: &Path, old_text: &str, new_text: &str) -> Result<Tool
         )
     };
 
+    // Run post-mutation validation
+    let validation = super::validate::validate_after_mutation(path, cwd).await;
+    let mut result_text = format!("Successfully replaced text in {}.", path.display());
+    if let Some(ref val) = validation {
+        result_text.push('\n');
+        result_text.push_str(val);
+    }
+
     Ok(ToolResult {
-        content: vec![ContentBlock::Text {
-            text: format!("Successfully replaced text in {}.", path.display()),
-        }],
+        content: vec![ContentBlock::Text { text: result_text }],
         details: serde_json::json!({
             "path": path.display().to_string(),
             "diff": diff_summary,
             "oldLines": old_lines,
             "newLines": new_lines,
+            "validation": validation,
         }),
     })
 }
@@ -114,7 +121,7 @@ mod tests {
             .write_all(b"hello world\nfoo bar\nbaz")
             .unwrap();
 
-        let result = execute(&file, "foo bar", "replaced").await.unwrap();
+        let result = execute(&file, "foo bar", "replaced", dir.path()).await.unwrap();
         assert!(result.content[0].clone().into_text().contains("Successfully"));
 
         let content = std::fs::read_to_string(&file).unwrap();
@@ -130,7 +137,7 @@ mod tests {
             .write_all(b"foo\nfoo\nbar")
             .unwrap();
 
-        let err = execute(&file, "foo", "replaced").await.unwrap_err();
+        let err = execute(&file, "foo", "replaced", dir.path()).await.unwrap_err();
         assert!(err.to_string().contains("2 occurrences"));
     }
 
@@ -143,7 +150,7 @@ mod tests {
             .write_all(b"hello world")
             .unwrap();
 
-        let err = execute(&file, "not found", "replaced").await.unwrap_err();
+        let err = execute(&file, "not found", "replaced", dir.path()).await.unwrap_err();
         assert!(err.to_string().contains("Could not find"));
     }
 }

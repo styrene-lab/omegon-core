@@ -1,0 +1,225 @@
+//! Post-mutation validation — run the appropriate checker after file edits.
+//!
+//! Discovers project configuration (Cargo.toml, tsconfig.json, etc.) and
+//! runs the lightest validation command relevant to the edited file.
+//! Results are appended to the tool result, not returned as a separate call.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::OnceLock;
+use tokio::process::Command;
+
+/// Cached project validators discovered at first use.
+static VALIDATORS: OnceLock<HashMap<ValidatorKind, ValidatorConfig>> = OnceLock::new();
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+enum ValidatorKind {
+    Rust,
+    TypeScript,
+    Python,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatorConfig {
+    command: String,
+    args: Vec<String>,
+}
+
+/// Run validation for a file that was just modified.
+/// Returns None if no validator applies, or Some(summary) with results.
+pub async fn validate_after_mutation(file_path: &Path, cwd: &Path) -> Option<String> {
+    let kind = validator_for_file(file_path)?;
+    let validators = discover_validators(cwd);
+    let config = validators.get(&kind)?;
+
+    let result = Command::new("bash")
+        .args(["-c", &format!("{} {}", config.command, config.args.join(" "))])
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await;
+
+    match result {
+        Ok(output) => {
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            if exit_code == 0 {
+                Some(format!("Validation (`{}`): ✓ passed", config.command))
+            } else {
+                // Extract just the error lines, not the full output
+                let errors = extract_error_summary(&stdout, &stderr, &kind);
+                Some(format!(
+                    "Validation (`{}`): ✗ {} error(s)\n{}",
+                    config.command,
+                    count_errors(&errors),
+                    truncate_validation(&errors, 500),
+                ))
+            }
+        }
+        Err(e) => {
+            tracing::debug!("Validation command failed to execute: {e}");
+            None // Don't report if the validator itself fails to run
+        }
+    }
+}
+
+/// Determine which validator applies to a file based on extension.
+fn validator_for_file(path: &Path) -> Option<ValidatorKind> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => Some(ValidatorKind::Rust),
+        Some("ts" | "tsx" | "js" | "jsx" | "mts" | "cts") => Some(ValidatorKind::TypeScript),
+        Some("py") => Some(ValidatorKind::Python),
+        _ => None,
+    }
+}
+
+/// Discover available validators by scanning for project config files.
+fn discover_validators(cwd: &Path) -> &'static HashMap<ValidatorKind, ValidatorConfig> {
+    VALIDATORS.get_or_init(|| {
+        let mut validators = HashMap::new();
+
+        // Rust: look for Cargo.toml
+        if find_upward(cwd, "Cargo.toml").is_some() {
+            validators.insert(
+                ValidatorKind::Rust,
+                ValidatorConfig {
+                    command: "cargo".into(),
+                    args: vec!["check".into(), "--message-format=short".into()],
+                },
+            );
+        }
+
+        // TypeScript: look for tsconfig.json
+        if find_upward(cwd, "tsconfig.json").is_some() {
+            validators.insert(
+                ValidatorKind::TypeScript,
+                ValidatorConfig {
+                    command: "npx".into(),
+                    args: vec!["tsc".into(), "--noEmit".into(), "--pretty".into()],
+                },
+            );
+        }
+
+        // Python: look for pyproject.toml with mypy or ruff
+        if find_upward(cwd, "pyproject.toml").is_some() {
+            // Prefer ruff (fast) over mypy (slow)
+            validators.insert(
+                ValidatorKind::Python,
+                ValidatorConfig {
+                    command: "ruff".into(),
+                    args: vec!["check".into(), "--quiet".into()],
+                },
+            );
+        }
+
+        validators
+    })
+}
+
+/// Walk up from `start` looking for a file named `name`.
+fn find_upward(start: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let mut dir = start;
+    loop {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Extract error-relevant lines from validator output.
+fn extract_error_summary(stdout: &str, stderr: &str, kind: &ValidatorKind) -> String {
+    let combined = format!("{stdout}\n{stderr}");
+
+    match kind {
+        ValidatorKind::Rust => {
+            // cargo check --message-format=short outputs "file:line:col: error[E0xxx]: msg"
+            combined
+                .lines()
+                .filter(|l| l.contains("error") || l.contains("warning"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ValidatorKind::TypeScript => {
+            // tsc outputs "file(line,col): error TSxxxx: msg"
+            combined
+                .lines()
+                .filter(|l| l.contains("error TS") || l.contains(": error"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        ValidatorKind::Python => {
+            // ruff outputs "file:line:col: EXXX msg"
+            combined
+                .lines()
+                .filter(|l| {
+                    !l.is_empty()
+                        && !l.starts_with("Found")
+                        && !l.starts_with("All checks")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+/// Count approximate number of errors from summary text.
+fn count_errors(summary: &str) -> usize {
+    summary.lines().filter(|l| !l.is_empty()).count()
+}
+
+/// Truncate validation output to stay within a byte budget.
+fn truncate_validation(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let truncated = &text[..max_bytes];
+    if let Some(last_nl) = truncated.rfind('\n') {
+        format!("{}\n... (truncated)", &truncated[..last_nl])
+    } else {
+        format!("{}... (truncated)", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validator_for_known_extensions() {
+        assert_eq!(
+            validator_for_file(Path::new("foo.rs")),
+            Some(ValidatorKind::Rust)
+        );
+        assert_eq!(
+            validator_for_file(Path::new("bar.ts")),
+            Some(ValidatorKind::TypeScript)
+        );
+        assert_eq!(
+            validator_for_file(Path::new("baz.py")),
+            Some(ValidatorKind::Python)
+        );
+        assert!(validator_for_file(Path::new("readme.md")).is_none());
+        assert!(validator_for_file(Path::new("config.json")).is_none());
+    }
+
+    #[test]
+    fn truncation_at_line_boundary() {
+        let text = "line one\nline two\nline three\nline four";
+        let truncated = truncate_validation(text, 20);
+        assert!(truncated.contains("truncated"));
+        assert!(!truncated.contains("line three"));
+    }
+
+    #[test]
+    fn error_count() {
+        assert_eq!(count_errors("error 1\nerror 2\n"), 2);
+        assert_eq!(count_errors(""), 0);
+        assert_eq!(count_errors("one\n\ntwo"), 2);
+    }
+}

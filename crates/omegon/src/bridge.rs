@@ -116,6 +116,15 @@ struct BridgeRequest {
 
 // ─── Bridge trait ───────────────────────────────────────────────────────────
 
+/// Options for an LLM stream request.
+#[derive(Debug, Clone, Default)]
+pub struct StreamOptions {
+    /// Model identifier (e.g. "anthropic:claude-sonnet-4-20250514")
+    pub model: Option<String>,
+    /// Reasoning/thinking level
+    pub reasoning: Option<String>,
+}
+
 /// Abstraction over how we call LLM providers.
 /// Primary: SubprocessBridge (pi-ai via Node.js).
 /// Test: MockBridge (scripted responses).
@@ -126,6 +135,7 @@ pub trait LlmBridge: Send + Sync {
         system_prompt: &str,
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
+        options: &StreamOptions,
     ) -> anyhow::Result<mpsc::Receiver<LlmEvent>>;
 }
 
@@ -251,6 +261,7 @@ impl LlmBridge for SubprocessBridge {
         system_prompt: &str,
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
+        options: &StreamOptions,
     ) -> anyhow::Result<mpsc::Receiver<LlmEvent>> {
         let tool_schemas: Vec<Value> = tools
             .iter()
@@ -263,14 +274,18 @@ impl LlmBridge for SubprocessBridge {
             })
             .collect();
 
-        // Send Omegon's message format — the bridge JS translates to pi-ai
+        let model = options
+            .model
+            .as_deref()
+            .unwrap_or("anthropic:claude-sonnet-4-20250514");
+        let reasoning = options.reasoning.as_deref().unwrap_or("medium");
+
         let params = serde_json::json!({
             "systemPrompt": system_prompt,
             "messages": messages,
             "tools": tool_schemas,
-            // TODO: model config from CLI/settings
-            "model": "anthropic:claude-sonnet-4-20250514",
-            "reasoning": "medium",
+            "model": model,
+            "reasoning": reasoning,
         });
 
         let req_id = self.send_request("stream", params).await?;
@@ -327,6 +342,7 @@ impl LlmBridge for MockBridge {
         _system_prompt: &str,
         _messages: &[LlmMessage],
         _tools: &[ToolDefinition],
+        _options: &StreamOptions,
     ) -> anyhow::Result<mpsc::Receiver<LlmEvent>> {
         let (tx, rx) = mpsc::channel(64);
         let events = self.events.clone();

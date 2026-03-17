@@ -7,6 +7,7 @@
 pub mod bash;
 pub mod edit;
 pub mod read;
+pub mod validate;
 pub mod write;
 
 // Phase 0+ stubs:
@@ -166,7 +167,7 @@ impl ToolProvider for CoreTools {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing 'content' argument"))?;
                 let path = self.cwd.join(path_str);
-                write::execute(&path, content).await
+                write::execute(&path, content, &self.cwd).await
             }
             "edit" => {
                 let path_str = args["path"]
@@ -179,7 +180,7 @@ impl ToolProvider for CoreTools {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing 'newText' argument"))?;
                 let path = self.cwd.join(path_str);
-                edit::execute(&path, old_text, new_text).await
+                edit::execute(&path, old_text, new_text, &self.cwd).await
             }
             _ => anyhow::bail!("Unknown core tool: {tool_name}"),
         }
