@@ -90,7 +90,8 @@ function resolveModel(modelSpec) {
     ? modelSpec.split(":", 2)
     : ["anthropic", modelSpec];
 
-  // Minimal model object — pi-ai fills in defaults from its registry
+  // Minimal model object — pi-ai fills in defaults from its registry.
+  // maxTokens left high to avoid truncating responses with extended thinking.
   return {
     id: modelId,
     name: modelId,
@@ -105,7 +106,7 @@ function resolveModel(modelSpec) {
     input: ["text", "image"],
     cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     contextWindow: 200000,
-    maxTokens: 16384,
+    maxTokens: 128000,
   };
 }
 

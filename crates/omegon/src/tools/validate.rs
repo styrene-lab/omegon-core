@@ -7,7 +7,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::process::Command;
+
+/// Maximum time to wait for a validation command to complete.
+/// cargo check on a large project can take a while; 30s is generous
+/// but prevents indefinite hangs from build locks or broken toolchains.
+const VALIDATION_TIMEOUT_SECS: u64 = 30;
 
 /// Cached project validators, keyed by the cwd they were discovered from.
 /// Re-discovers if cwd changes (Phase 1 multi-project support).
@@ -36,17 +42,18 @@ pub async fn validate_after_mutation(file_path: &Path, cwd: &Path) -> Option<Str
         validators.get(&kind)?.clone()
     };
 
-    let result = Command::new("bash")
+    let child = Command::new("bash")
         .args(["-c", &format!("{} {}", config.command, config.args.join(" "))])
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output()
-        .await;
+        .output();
+
+    let result = tokio::time::timeout(Duration::from_secs(VALIDATION_TIMEOUT_SECS), child).await;
 
     match result {
-        Ok(output) => {
+        Ok(Ok(output)) => {
             let exit_code = output.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -64,9 +71,20 @@ pub async fn validate_after_mutation(file_path: &Path, cwd: &Path) -> Option<Str
                 ))
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::debug!("Validation command failed to execute: {e}");
             None // Don't report if the validator itself fails to run
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Validation timed out after {}s for `{}`",
+                VALIDATION_TIMEOUT_SECS,
+                config.command
+            );
+            Some(format!(
+                "Validation (`{}`): ⏱ timed out after {}s",
+                config.command, VALIDATION_TIMEOUT_SECS
+            ))
         }
     }
 }

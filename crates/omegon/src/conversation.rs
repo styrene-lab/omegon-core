@@ -50,9 +50,19 @@ impl AssistantMessage {
 /// A message in the canonical conversation history.
 #[derive(Debug, Clone)]
 pub enum AgentMessage {
-    User { text: String },
-    Assistant(AssistantMessage),
-    ToolResult(ToolResultEntry),
+    User { text: String, turn: u32 },
+    Assistant(AssistantMessage, u32), // (msg, turn)
+    ToolResult(ToolResultEntry, u32), // (result, turn)
+}
+
+impl AgentMessage {
+    fn turn(&self) -> u32 {
+        match self {
+            AgentMessage::User { turn, .. } => *turn,
+            AgentMessage::Assistant(_, turn) => *turn,
+            AgentMessage::ToolResult(_, turn) => *turn,
+        }
+    }
 }
 
 /// Structured intent tracking — auto-populated, survives compaction verbatim.
@@ -132,15 +142,18 @@ impl ConversationState {
     }
 
     pub fn push_user(&mut self, text: String) {
-        self.canonical.push(AgentMessage::User { text });
+        let turn = self.intent.stats.turns;
+        self.canonical.push(AgentMessage::User { text, turn });
     }
 
     pub fn push_assistant(&mut self, msg: AssistantMessage) {
-        self.canonical.push(AgentMessage::Assistant(msg));
+        let turn = self.intent.stats.turns;
+        self.canonical.push(AgentMessage::Assistant(msg, turn));
     }
 
     pub fn push_tool_result(&mut self, result: ToolResultEntry) {
-        self.canonical.push(AgentMessage::ToolResult(result));
+        let turn = self.intent.stats.turns;
+        self.canonical.push(AgentMessage::ToolResult(result, turn));
     }
 
     pub fn turn_count(&self) -> u32 {
@@ -152,7 +165,7 @@ impl ConversationState {
             .iter()
             .rev()
             .find_map(|m| match m {
-                AgentMessage::User { text } => Some(text.as_str()),
+                AgentMessage::User { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .unwrap_or("")
@@ -160,20 +173,20 @@ impl ConversationState {
 
     pub fn last_assistant_text(&self) -> Option<&str> {
         self.canonical.iter().rev().find_map(|m| match m {
-            AgentMessage::Assistant(a) if !a.text.is_empty() => Some(a.text.as_str()),
+            AgentMessage::Assistant(a, _) if !a.text.is_empty() => Some(a.text.as_str()),
             _ => None,
         })
     }
 
     /// Build the LLM-facing view with context decay applied.
+    /// Messages older than `decay_window` turns are decayed to skeletons.
     pub fn build_llm_view(&self) -> Vec<LlmMessage> {
-        let len = self.canonical.len();
+        let current_turn = self.intent.stats.turns;
         self.canonical
             .iter()
-            .enumerate()
-            .map(|(i, msg)| {
-                let age = len.saturating_sub(i);
-                if age > self.decay_window {
+            .map(|msg| {
+                let turn_age = current_turn.saturating_sub(msg.turn());
+                if turn_age > self.decay_window as u32 {
                     self.decay_message(msg)
                 } else {
                     self.to_llm_message(msg)
@@ -218,7 +231,7 @@ impl ConversationState {
     /// Decay a message to a skeleton — strip bulk content, keep metadata.
     fn decay_message(&self, msg: &AgentMessage) -> LlmMessage {
         match msg {
-            AgentMessage::ToolResult(result) => {
+            AgentMessage::ToolResult(result, _) => {
                 let summary = if result.is_error {
                     format!("[Tool {} errored]", result.tool_name)
                 } else {
@@ -231,7 +244,7 @@ impl ConversationState {
                     is_error: result.is_error,
                 }
             }
-            AgentMessage::Assistant(a) => {
+            AgentMessage::Assistant(a, _) => {
                 // Decay: strip thinking entirely, truncate long text, preserve tool calls
                 let decayed_text = if a.text.len() > 500 {
                     let mut end = 500;
@@ -262,7 +275,7 @@ impl ConversationState {
                 }
             }
             // User messages are small — don't decay
-            AgentMessage::User { text } => LlmMessage::User {
+            AgentMessage::User { text, .. } => LlmMessage::User {
                 content: text.clone(),
             },
         }
@@ -271,10 +284,10 @@ impl ConversationState {
     /// Convert a canonical message to Omegon's wire format.
     fn to_llm_message(&self, msg: &AgentMessage) -> LlmMessage {
         match msg {
-            AgentMessage::User { text } => LlmMessage::User {
+            AgentMessage::User { text, .. } => LlmMessage::User {
                 content: text.clone(),
             },
-            AgentMessage::Assistant(a) => LlmMessage::Assistant {
+            AgentMessage::Assistant(a, _) => LlmMessage::Assistant {
                 text: if a.text.is_empty() {
                     vec![]
                 } else {
@@ -296,7 +309,7 @@ impl ConversationState {
                     .collect(),
                 raw: Some(a.raw.clone()),
             },
-            AgentMessage::ToolResult(r) => {
+            AgentMessage::ToolResult(r, _) => {
                 // Flatten content blocks to text
                 let text = r
                     .content
@@ -326,14 +339,16 @@ mod tests {
     #[test]
     fn assistant_decay_strips_thinking() {
         let mut conv = ConversationState::new();
-        conv.decay_window = 0; // Force all messages to decay
+        conv.decay_window = 0; // Decay everything older than current turn
 
+        // Push message at turn 0, then advance to turn 1 so it's "old"
         conv.push_assistant(AssistantMessage {
             text: "short response".into(),
             thinking: Some("very long internal thinking...".repeat(100)),
             tool_calls: vec![],
             raw: serde_json::Value::Null,
         });
+        conv.intent.stats.turns = 1; // Advance turn so the message is old
 
         let view = conv.build_llm_view();
         assert_eq!(view.len(), 1);
@@ -355,6 +370,7 @@ mod tests {
             tool_calls: vec![],
             raw: serde_json::Value::Null,
         });
+        conv.intent.stats.turns = 1;
 
         let view = conv.build_llm_view();
         if let LlmMessage::Assistant { text, .. } = &view[0] {
@@ -379,6 +395,7 @@ mod tests {
             }],
             is_error: false,
         });
+        conv.intent.stats.turns = 1;
 
         let view = conv.build_llm_view();
         if let LlmMessage::ToolResult { content, tool_name, .. } = &view[0] {
@@ -386,6 +403,41 @@ mod tests {
             assert!(content.contains("completed successfully"), "got: {content}");
         } else {
             panic!("Expected ToolResult message");
+        }
+    }
+
+    #[test]
+    fn decay_is_turn_based_not_message_based() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 2; // Keep last 2 turns fresh
+        conv.intent.stats.turns = 1;
+
+        // Turn 1: push multiple messages (simulates a turn with 3 tool calls)
+        conv.push_user("do something".into());
+        conv.push_assistant(AssistantMessage {
+            text: "I'll help".into(),
+            thinking: Some("detailed thinking here...".repeat(50)),
+            tool_calls: vec![],
+            raw: serde_json::Value::Null,
+        });
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "read".into(),
+            content: vec![omegon_traits::ContentBlock::Text { text: "big content".repeat(100) }],
+            is_error: false,
+        });
+
+        // Still on turn 1 — everything should be fresh
+        let view = conv.build_llm_view();
+        if let LlmMessage::Assistant { thinking, .. } = &view[1] {
+            assert!(!thinking.is_empty(), "Turn 1 at turn 1: should NOT be decayed");
+        }
+
+        // Advance to turn 4 — turn 1 is now 3 turns old, outside decay_window=2
+        conv.intent.stats.turns = 4;
+        let view = conv.build_llm_view();
+        if let LlmMessage::Assistant { thinking, .. } = &view[1] {
+            assert!(thinking.is_empty(), "Turn 1 at turn 4: should be decayed (age 3 > window 2)");
         }
     }
 }
