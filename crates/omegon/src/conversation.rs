@@ -9,7 +9,6 @@ use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// A tool call extracted from an assistant message.
 #[derive(Debug, Clone)]
@@ -92,7 +91,7 @@ impl IntentDocument {
     pub fn update_from_tools(
         &mut self,
         calls: &[ToolCall],
-        results: &[ToolResultEntry],
+        _results: &[ToolResultEntry],
     ) {
         self.stats.tool_calls += calls.len() as u32;
 
@@ -160,6 +159,14 @@ impl ConversationState {
                 _ => None,
             })
             .unwrap_or("")
+    }
+
+    /// Get the last assistant message's text content, if any.
+    pub fn last_assistant_text(&self) -> Option<&str> {
+        self.canonical.iter().rev().find_map(|m| match m {
+            AgentMessage::Assistant(a) if !a.text.is_empty() => Some(a.text.as_str()),
+            _ => None,
+        })
     }
 
     /// Build the LLM-facing view with context decay applied.
