@@ -7,6 +7,10 @@ use std::path::Path;
 const MAX_LINES: usize = 2000;
 const MAX_BYTES: usize = 50 * 1024;
 
+/// Read timeout — 30 seconds should handle any local file system.
+/// Network-mounted filesystems that stall will hit this.
+const READ_TIMEOUT_SECS: u64 = 30;
+
 pub async fn execute(
     path: &Path,
     offset: Option<usize>,
@@ -16,9 +20,13 @@ pub async fn execute(
         anyhow::bail!("File not found: {}", path.display());
     }
 
+    let timeout = std::time::Duration::from_secs(READ_TIMEOUT_SECS);
+
     // Check if it's an image
     if is_image(path) {
-        let data = tokio::fs::read(path).await?;
+        let data = tokio::time::timeout(timeout, tokio::fs::read(path))
+            .await
+            .map_err(|_| anyhow::anyhow!("Read timed out after {READ_TIMEOUT_SECS}s: {}", path.display()))??;
         let base64 = base64_encode(&data);
         let media_type = mime_from_ext(path);
         return Ok(ToolResult {
@@ -33,7 +41,9 @@ pub async fn execute(
         });
     }
 
-    let content = tokio::fs::read_to_string(path).await?;
+    let content = tokio::time::timeout(timeout, tokio::fs::read_to_string(path))
+        .await
+        .map_err(|_| anyhow::anyhow!("Read timed out after {READ_TIMEOUT_SECS}s: {}", path.display()))??;
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 

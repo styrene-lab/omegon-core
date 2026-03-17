@@ -177,14 +177,16 @@ impl SubprocessBridge {
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
 
-        // Wait for readiness signal on stderr, log everything else
+        // Wait for readiness signal on stderr, log everything else.
+        // The bridge emits exactly "llm-bridge: ready\n" — match the prefix
+        // to avoid false positives from unrelated warnings containing "ready".
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
         let mut ready_tx = Some(ready_tx);
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if line.contains("ready") {
+                if line.starts_with("llm-bridge: ready") {
                     if let Some(tx) = ready_tx.take() {
                         let _ = tx.send(());
                     }

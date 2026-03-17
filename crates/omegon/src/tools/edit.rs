@@ -4,12 +4,18 @@ use anyhow::Result;
 use omegon_traits::{ContentBlock, ToolResult};
 use std::path::Path;
 
+/// Timeout for filesystem operations during edit.
+const EDIT_TIMEOUT_SECS: u64 = 30;
+
 pub async fn execute(path: &Path, old_text: &str, new_text: &str, cwd: &Path) -> Result<ToolResult> {
     if !path.exists() {
         anyhow::bail!("File not found: {}", path.display());
     }
 
-    let content = tokio::fs::read_to_string(path).await?;
+    let timeout = std::time::Duration::from_secs(EDIT_TIMEOUT_SECS);
+    let content = tokio::time::timeout(timeout, tokio::fs::read_to_string(path))
+        .await
+        .map_err(|_| anyhow::anyhow!("Read timed out after {EDIT_TIMEOUT_SECS}s: {}", path.display()))??;
 
     // Normalize line endings for matching
     let normalized = content.replace("\r\n", "\n");
@@ -63,7 +69,9 @@ pub async fn execute(path: &Path, old_text: &str, new_text: &str, cwd: &Path) ->
         new_content
     };
 
-    tokio::fs::write(path, &final_content).await?;
+    tokio::time::timeout(timeout, tokio::fs::write(path, &final_content))
+        .await
+        .map_err(|_| anyhow::anyhow!("Write timed out after {EDIT_TIMEOUT_SECS}s: {}", path.display()))??;
 
     // Generate a simple diff summary
     let old_lines = normalized_old.lines().count();

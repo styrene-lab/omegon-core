@@ -4,6 +4,9 @@ use anyhow::Result;
 use omegon_traits::{ContentBlock, ToolResult};
 use std::path::Path;
 
+/// Write timeout — 30 seconds for filesystem operations.
+const WRITE_TIMEOUT_SECS: u64 = 30;
+
 pub async fn execute(path: &Path, content: &str, cwd: &Path) -> Result<ToolResult> {
     // Create parent directories if needed
     if let Some(parent) = path.parent() {
@@ -12,8 +15,11 @@ pub async fn execute(path: &Path, content: &str, cwd: &Path) -> Result<ToolResul
         }
     }
 
+    let timeout = std::time::Duration::from_secs(WRITE_TIMEOUT_SECS);
     let created = !path.exists();
-    tokio::fs::write(path, content).await?;
+    tokio::time::timeout(timeout, tokio::fs::write(path, content))
+        .await
+        .map_err(|_| anyhow::anyhow!("Write timed out after {WRITE_TIMEOUT_SECS}s: {}", path.display()))??;
 
     let line_count = content.lines().count();
     let byte_count = content.len();

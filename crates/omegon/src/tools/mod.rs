@@ -20,7 +20,7 @@ pub mod write;
 use async_trait::async_trait;
 use omegon_traits::{ToolDefinition, ToolProvider, ToolResult};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 /// Core tool provider — registers the primitive tools.
@@ -32,6 +32,66 @@ impl CoreTools {
     pub fn new(cwd: PathBuf) -> Self {
         Self { cwd }
     }
+
+    /// Resolve a user-provided path against cwd and verify it doesn't escape
+    /// the workspace via `../` traversal. Returns the canonical path on success.
+    fn resolve_path(&self, path_str: &str) -> anyhow::Result<PathBuf> {
+        let joined = self.cwd.join(path_str);
+
+        // Canonicalize to resolve symlinks and `..` — but the file may not
+        // exist yet (write/edit creating new files). In that case, canonicalize
+        // the parent directory and append the filename.
+        let canonical = if joined.exists() {
+            joined.canonicalize()?
+        } else if let Some(parent) = joined.parent() {
+            // Create parent dirs if needed (write tool does this), then canonicalize
+            if parent.exists() {
+                parent.canonicalize()?.join(joined.file_name().unwrap_or_default())
+            } else {
+                // Parent doesn't exist — resolve what we can. The write tool
+                // will create parents. For now, use lexical normalization.
+                lexical_normalize(&joined)
+            }
+        } else {
+            joined.clone()
+        };
+
+        let cwd_canonical = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+
+        if !canonical.starts_with(&cwd_canonical) {
+            anyhow::bail!(
+                "Path '{}' resolves to '{}' which is outside the workspace '{}'",
+                path_str,
+                canonical.display(),
+                cwd_canonical.display()
+            );
+        }
+
+        Ok(joined)
+    }
+}
+
+/// Lexical path normalization — resolve `.` and `..` without filesystem access.
+/// Used as a fallback when the path doesn't exist yet.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Only pop if there's a normal component to pop
+                if components.last().map_or(false, |c| {
+                    matches!(c, std::path::Component::Normal(_))
+                }) {
+                    components.pop();
+                } else {
+                    components.push(component);
+                }
+            }
+            std::path::Component::CurDir => {} // skip
+            _ => components.push(component),
+        }
+    }
+    components.iter().collect()
 }
 
 #[async_trait]
@@ -154,7 +214,7 @@ impl ToolProvider for CoreTools {
                 let path_str = args["path"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
-                let path = self.cwd.join(path_str);
+                let path = self.resolve_path(path_str)?;
                 let offset = args["offset"].as_u64().map(|n| n as usize);
                 let limit = args["limit"].as_u64().map(|n| n as usize);
                 read::execute(&path, offset, limit).await
@@ -166,7 +226,7 @@ impl ToolProvider for CoreTools {
                 let content = args["content"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing 'content' argument"))?;
-                let path = self.cwd.join(path_str);
+                let path = self.resolve_path(path_str)?;
                 write::execute(&path, content, &self.cwd).await
             }
             "edit" => {
@@ -179,10 +239,52 @@ impl ToolProvider for CoreTools {
                 let new_text = args["newText"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing 'newText' argument"))?;
-                let path = self.cwd.join(path_str);
+                let path = self.resolve_path(path_str)?;
                 edit::execute(&path, old_text, new_text, &self.cwd).await
             }
             _ => anyhow::bail!("Unknown core tool: {tool_name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_traversal_blocked() {
+        let tools = CoreTools::new(PathBuf::from("/tmp/workspace"));
+        // Attempting to escape the workspace via ../
+        let result = tools.resolve_path("../../../etc/passwd");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("outside the workspace"), "error: {err}");
+    }
+
+    #[test]
+    fn path_within_workspace_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create the subdirectory so canonicalize works
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        // Use canonical path to match what main.rs does with fs::canonicalize(&cli.cwd)
+        let cwd = dir.path().canonicalize().unwrap();
+        let tools = CoreTools::new(cwd.clone());
+        let result = tools.resolve_path("src/main.rs");
+        assert!(result.is_ok(), "error: {:?}", result.unwrap_err());
+        assert!(result.unwrap().starts_with(&cwd));
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_dotdot() {
+        let result = lexical_normalize(Path::new("/a/b/../c"));
+        assert_eq!(result, PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_dot() {
+        let result = lexical_normalize(Path::new("/a/./b/./c"));
+        assert_eq!(result, PathBuf::from("/a/b/c"));
     }
 }

@@ -231,8 +231,40 @@ impl ConversationState {
                     is_error: result.is_error,
                 }
             }
-            // User and assistant messages are small — don't decay
-            _ => self.to_llm_message(msg),
+            AgentMessage::Assistant(a) => {
+                // Decay: strip thinking entirely, truncate long text, preserve tool calls
+                let decayed_text = if a.text.len() > 500 {
+                    let mut end = 500;
+                    while end > 0 && !a.text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...[truncated]", &a.text[..end])
+                } else {
+                    a.text.clone()
+                };
+                LlmMessage::Assistant {
+                    text: if decayed_text.is_empty() {
+                        vec![]
+                    } else {
+                        vec![decayed_text]
+                    },
+                    thinking: vec![], // Strip thinking blocks entirely on decay
+                    tool_calls: a
+                        .tool_calls
+                        .iter()
+                        .map(|tc| WireToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .collect(),
+                    raw: None, // Don't preserve raw for decayed messages
+                }
+            }
+            // User messages are small — don't decay
+            AgentMessage::User { text } => LlmMessage::User {
+                content: text.clone(),
+            },
         }
     }
 
@@ -283,6 +315,77 @@ impl ConversationState {
                     is_error: r.is_error,
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_decay_strips_thinking() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0; // Force all messages to decay
+
+        conv.push_assistant(AssistantMessage {
+            text: "short response".into(),
+            thinking: Some("very long internal thinking...".repeat(100)),
+            tool_calls: vec![],
+            raw: serde_json::Value::Null,
+        });
+
+        let view = conv.build_llm_view();
+        assert_eq!(view.len(), 1);
+        if let LlmMessage::Assistant { thinking, .. } = &view[0] {
+            assert!(thinking.is_empty(), "Thinking should be stripped on decay");
+        } else {
+            panic!("Expected Assistant message");
+        }
+    }
+
+    #[test]
+    fn assistant_decay_truncates_long_text() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0;
+
+        conv.push_assistant(AssistantMessage {
+            text: "x".repeat(1000),
+            thinking: None,
+            tool_calls: vec![],
+            raw: serde_json::Value::Null,
+        });
+
+        let view = conv.build_llm_view();
+        if let LlmMessage::Assistant { text, .. } = &view[0] {
+            let combined: String = text.join("");
+            assert!(combined.len() < 600, "Text should be truncated, got {} bytes", combined.len());
+            assert!(combined.contains("[truncated]"));
+        } else {
+            panic!("Expected Assistant message");
+        }
+    }
+
+    #[test]
+    fn tool_result_decay_preserves_metadata() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0;
+
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "read".into(),
+            content: vec![omegon_traits::ContentBlock::Text {
+                text: "x".repeat(5000),
+            }],
+            is_error: false,
+        });
+
+        let view = conv.build_llm_view();
+        if let LlmMessage::ToolResult { content, tool_name, .. } = &view[0] {
+            assert_eq!(tool_name, "read");
+            assert!(content.contains("completed successfully"), "got: {content}");
+        } else {
+            panic!("Expected ToolResult message");
         }
     }
 }

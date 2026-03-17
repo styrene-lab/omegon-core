@@ -231,19 +231,61 @@ async fn stream_with_retry(
 }
 
 /// Heuristic: is this error message transient (worth retrying)?
+///
+/// Matches known transient error patterns. HTTP status codes use word-boundary
+/// matching to avoid false positives (e.g. "model gpt-500" shouldn't match).
 fn is_transient_error(msg: &str) -> bool {
     let lower = msg.to_lowercase();
-    lower.contains("overloaded")
+
+    // Semantic patterns — safe as substring matches
+    if lower.contains("overloaded")
         || lower.contains("rate limit")
-        || lower.contains("503")
-        || lower.contains("502")
-        || lower.contains("500")
-        || lower.contains("529")
+        || lower.contains("rate_limit")
         || lower.contains("timeout")
         || lower.contains("server_error")
         || lower.contains("capacity")
         || lower.contains("temporarily")
         || lower.contains("try again")
+        || lower.contains("service unavailable")
+        || lower.contains("bad gateway")
+        || lower.contains("internal server error")
+    {
+        return true;
+    }
+
+    // HTTP status codes — require word boundary (space, punctuation, or start/end)
+    // to avoid matching model names like "gpt-500" or version strings
+    for code in ["500", "502", "503", "529"] {
+        if contains_word(&lower, code) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if `text` contains `word` as a standalone token.
+/// Word boundaries: spaces, punctuation, and start/end of string.
+/// Hyphens and underscores are treated as word-joining (so "gpt-500" doesn't match "500").
+fn contains_word(text: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0 || !is_word_char(text.as_bytes()[abs_pos - 1]);
+        let after_pos = abs_pos + word.len();
+        let after_ok = after_pos >= text.len() || !is_word_char(text.as_bytes()[after_pos]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
+}
+
+/// Is this byte part of a "word" for boundary detection?
+/// Alphanumeric plus hyphen and underscore (common in model names, versions).
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
 /// Consume LlmEvents from the bridge, build an AssistantMessage.
@@ -530,13 +572,43 @@ mod tests {
 
     #[test]
     fn transient_error_detection() {
+        // Should match: known transient patterns
         assert!(is_transient_error("503 Service Unavailable"));
         assert!(is_transient_error("Request rate limit exceeded"));
         assert!(is_transient_error("Server is overloaded"));
         assert!(is_transient_error("transient_server_error"));
         assert!(is_transient_error("temporarily unavailable, try again later"));
+        assert!(is_transient_error("HTTP 500 Internal Server Error"));
+        assert!(is_transient_error("error 529: capacity exceeded"));
+        assert!(is_transient_error("502 Bad Gateway"));
+        assert!(is_transient_error("service unavailable"));
+
+        // Should NOT match: permanent errors
         assert!(!is_transient_error("Invalid API key"));
         assert!(!is_transient_error("Model not found"));
+
+        // Should NOT match: status codes embedded in non-error contexts
+        assert!(!is_transient_error("model gpt-500 not found"));
+        assert!(!is_transient_error("using port 5029"));
+        assert!(!is_transient_error("version 5.0.3 released"));
+    }
+
+    #[test]
+    fn contains_word_boundary() {
+        // Standalone status codes — should match
+        assert!(contains_word("error 500 occurred", "500"));
+        assert!(contains_word("500 error", "500"));
+        assert!(contains_word("error: 500", "500"));
+        assert!(contains_word("HTTP/1.1 503", "503"));
+
+        // Hyphen-joined (model names, identifiers) — should NOT match
+        assert!(!contains_word("gpt-500", "500"));
+        assert!(!contains_word("model-500x", "500"));
+        assert!(!contains_word("error_code_500x", "500"));
+
+        // Embedded in larger numbers — should NOT match
+        assert!(!contains_word("port5003", "500"));
+        assert!(!contains_word("50000 items", "500"));
     }
 
     #[test]

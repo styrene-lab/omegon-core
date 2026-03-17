@@ -5,12 +5,14 @@
 //! Results are appended to the tool result, not returned as a separate call.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tokio::process::Command;
 
-/// Cached project validators discovered at first use.
-static VALIDATORS: OnceLock<HashMap<ValidatorKind, ValidatorConfig>> = OnceLock::new();
+/// Cached project validators, keyed by the cwd they were discovered from.
+/// Re-discovers if cwd changes (Phase 1 multi-project support).
+static VALIDATORS: Mutex<Option<(PathBuf, HashMap<ValidatorKind, ValidatorConfig>)>> =
+    Mutex::new(None);
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum ValidatorKind {
@@ -29,8 +31,10 @@ struct ValidatorConfig {
 /// Returns None if no validator applies, or Some(summary) with results.
 pub async fn validate_after_mutation(file_path: &Path, cwd: &Path) -> Option<String> {
     let kind = validator_for_file(file_path)?;
-    let validators = discover_validators(cwd);
-    let config = validators.get(&kind)?;
+    let config = {
+        let validators = discover_validators(cwd);
+        validators.get(&kind)?.clone()
+    };
 
     let result = Command::new("bash")
         .args(["-c", &format!("{} {}", config.command, config.args.join(" "))])
@@ -78,46 +82,56 @@ fn validator_for_file(path: &Path) -> Option<ValidatorKind> {
 }
 
 /// Discover available validators by scanning for project config files.
-fn discover_validators(cwd: &Path) -> &'static HashMap<ValidatorKind, ValidatorConfig> {
-    VALIDATORS.get_or_init(|| {
-        let mut validators = HashMap::new();
+/// Caches results per-cwd — re-discovers if cwd changes.
+fn discover_validators(cwd: &Path) -> HashMap<ValidatorKind, ValidatorConfig> {
+    let mut guard = VALIDATORS.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Rust: look for Cargo.toml
-        if find_upward(cwd, "Cargo.toml").is_some() {
-            validators.insert(
-                ValidatorKind::Rust,
-                ValidatorConfig {
-                    command: "cargo".into(),
-                    args: vec!["check".into(), "--message-format=short".into()],
-                },
-            );
+    // Return cached if cwd matches
+    if let Some((ref cached_cwd, ref validators)) = *guard {
+        if cached_cwd == cwd {
+            return validators.clone();
         }
+    }
 
-        // TypeScript: look for tsconfig.json
-        if find_upward(cwd, "tsconfig.json").is_some() {
-            validators.insert(
-                ValidatorKind::TypeScript,
-                ValidatorConfig {
-                    command: "npx".into(),
-                    args: vec!["tsc".into(), "--noEmit".into(), "--pretty".into()],
-                },
-            );
-        }
+    // Discover fresh
+    let mut validators = HashMap::new();
 
-        // Python: look for pyproject.toml with mypy or ruff
-        if find_upward(cwd, "pyproject.toml").is_some() {
-            // Prefer ruff (fast) over mypy (slow)
-            validators.insert(
-                ValidatorKind::Python,
-                ValidatorConfig {
-                    command: "ruff".into(),
-                    args: vec!["check".into(), "--quiet".into()],
-                },
-            );
-        }
+    // Rust: look for Cargo.toml
+    if find_upward(cwd, "Cargo.toml").is_some() {
+        validators.insert(
+            ValidatorKind::Rust,
+            ValidatorConfig {
+                command: "cargo".into(),
+                args: vec!["check".into(), "--message-format=short".into()],
+            },
+        );
+    }
 
-        validators
-    })
+    // TypeScript: look for tsconfig.json
+    if find_upward(cwd, "tsconfig.json").is_some() {
+        validators.insert(
+            ValidatorKind::TypeScript,
+            ValidatorConfig {
+                command: "npx".into(),
+                args: vec!["tsc".into(), "--noEmit".into(), "--pretty".into()],
+            },
+        );
+    }
+
+    // Python: look for pyproject.toml with mypy or ruff
+    if find_upward(cwd, "pyproject.toml").is_some() {
+        // Prefer ruff (fast) over mypy (slow)
+        validators.insert(
+            ValidatorKind::Python,
+            ValidatorConfig {
+                command: "ruff".into(),
+                args: vec!["check".into(), "--quiet".into()],
+            },
+        );
+    }
+
+    *guard = Some((cwd.to_path_buf(), validators.clone()));
+    validators
 }
 
 /// Walk up from `start` looking for a file named `name`.
