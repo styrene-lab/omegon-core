@@ -13,6 +13,8 @@
  */
 
 import { createInterface } from "readline";
+import { readFileSync, existsSync } from "fs";
+import { resolve } from "path";
 import { streamSimple } from "@styrene-lab/pi-ai";
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -82,6 +84,19 @@ function toProviderMessages(omegonMessages) {
 }
 
 /**
+ * Map from Omegon's short provider name to pi-ai's registered API identifier.
+ */
+const PROVIDER_TO_API = {
+  anthropic: "anthropic-messages",
+  openai: "openai-responses",
+  google: "google-generative-ai",
+  mistral: "mistral-conversations",
+  azure: "azure-openai-responses",
+  bedrock: "bedrock-converse-stream",
+  vertex: "google-vertex",
+};
+
+/**
  * Resolve model spec from Omegon's "provider:model" string.
  * Returns a pi-ai Model object.
  */
@@ -90,12 +105,14 @@ function resolveModel(modelSpec) {
     ? modelSpec.split(":", 2)
     : ["anthropic", modelSpec];
 
+  const api = PROVIDER_TO_API[provider] ?? provider;
+
   // Minimal model object — pi-ai fills in defaults from its registry.
   // maxTokens left high to avoid truncating responses with extended thinking.
   return {
     id: modelId,
     name: modelId,
-    api: provider === "openai" ? "openai-responses" : provider,
+    api,
     provider,
     baseUrl: provider === "anthropic"
       ? "https://api.anthropic.com"
@@ -189,6 +206,12 @@ rl.on("line", async (line) => {
       options.reasoning = reasoning;
     }
 
+    // Resolve API key — try env var first, then pi's auth.json OAuth token
+    const apiKey = resolveApiKey(model.provider);
+    if (apiKey) {
+      options.apiKey = apiKey;
+    }
+
     const eventStream = streamSimple(model, context, options);
 
     for await (const event of eventStream) {
@@ -247,6 +270,38 @@ function slimEvent(event) {
     default:
       return { type: event.type };
   }
+}
+
+// ─── API key resolution ─────────────────────────────────────────────────────
+
+/**
+ * Resolve API key for a provider.
+ * Priority: env var → pi's auth.json OAuth access token → null.
+ */
+function resolveApiKey(provider) {
+  // 1. Environment variables (standard names)
+  const envMap = {
+    anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+    openai: ["OPENAI_API_KEY"],
+    google: ["GOOGLE_API_KEY"],
+    mistral: ["MISTRAL_API_KEY"],
+  };
+  for (const envVar of envMap[provider] ?? [`${provider.toUpperCase()}_API_KEY`]) {
+    if (process.env[envVar]) return process.env[envVar];
+  }
+
+  // 2. pi's auth.json — contains OAuth access tokens
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || "~";
+    const authPath = resolve(home, ".pi", "agent", "auth.json");
+    if (existsSync(authPath)) {
+      const auth = JSON.parse(readFileSync(authPath, "utf8"));
+      const entry = auth[provider];
+      if (entry?.access) return entry.access;
+    }
+  } catch { /* ignore */ }
+
+  return null;
 }
 
 process.stderr.write("llm-bridge: ready\n");

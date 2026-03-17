@@ -67,6 +67,9 @@ pub struct WireToolCall {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum LlmEvent {
+    /// Initial event with partial message — we ignore the content but must accept the variant.
+    #[serde(rename = "start")]
+    Start,
     #[serde(rename = "text_delta")]
     TextDelta { delta: String },
     #[serde(rename = "thinking_delta")]

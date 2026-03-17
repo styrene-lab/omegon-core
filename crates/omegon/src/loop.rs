@@ -304,6 +304,7 @@ async fn consume_llm_stream(
 
     while let Some(event) = rx.recv().await {
         match event {
+            LlmEvent::Start => {} // Initial partial message — ignored
             LlmEvent::TextStart => {}
             LlmEvent::TextDelta { delta } => {
                 let _ = events.send(AgentEvent::MessageChunk { text: delta.clone() });
