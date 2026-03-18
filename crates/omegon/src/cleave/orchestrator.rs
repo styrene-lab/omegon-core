@@ -195,6 +195,12 @@ pub async fn run_cleave(
                         duration = format!("{:.0}s", output.duration_secs),
                         "child completed"
                     );
+
+                    // Auto-commit any uncommitted changes in the worktree.
+                    // Children may create files but forget to git commit.
+                    if let Some(wt) = &state.children[child_idx].worktree_path {
+                        auto_commit_worktree(Path::new(wt), &state.children[child_idx].label);
+                    }
                 }
                 Err(e) => {
                     state.children[child_idx].status = ChildStatus::Failed;
@@ -407,6 +413,57 @@ async fn dispatch_child(
             exit.code().unwrap_or(-1)
         )),
         Err(e) => Err(e),
+    }
+}
+
+/// Auto-commit any uncommitted changes in a child's worktree.
+/// This catches the case where the child agent creates files but doesn't run `git commit`.
+fn auto_commit_worktree(wt_path: &Path, label: &str) {
+    if !wt_path.exists() {
+        return;
+    }
+
+    // Check for uncommitted changes
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(wt_path)
+        .output();
+
+    let has_changes = match status {
+        Ok(out) => !out.stdout.is_empty(),
+        Err(_) => false,
+    };
+
+    if !has_changes {
+        return;
+    }
+
+    tracing::info!(child = %label, "auto-committing uncommitted changes in worktree");
+
+    // Stage all changes
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(wt_path)
+        .output();
+
+    // Commit
+    let commit_msg = format!("chore(cleave): auto-commit work from child '{label}'");
+    let result = std::process::Command::new("git")
+        .args(["commit", "-m", &commit_msg, "--no-verify"])
+        .current_dir(wt_path)
+        .output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            tracing::info!(child = %label, "auto-commit succeeded");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(child = %label, "auto-commit failed: {}", stderr.trim());
+        }
+        Err(e) => {
+            tracing::warn!(child = %label, "auto-commit error: {e}");
+        }
     }
 }
 
