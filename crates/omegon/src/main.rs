@@ -21,6 +21,7 @@ mod r#loop;
 mod prompt;
 mod session;
 mod tools;
+mod tui;
 
 use bridge::SubprocessBridge;
 use context::ContextManager;
@@ -81,6 +82,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run interactive TUI session — ratatui-based terminal interface.
+    Interactive,
+
     /// Run a cleave orchestration — dispatch multiple agent children in parallel.
     Cleave {
         /// Path to the plan JSON file
@@ -128,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Interactive) => run_interactive_command(&cli).await,
         Some(Commands::Cleave {
             ref plan,
             ref directive,
@@ -280,6 +285,133 @@ fn find_project_root(cwd: &std::path::Path) -> std::path::PathBuf {
         if !dir.pop() { break; }
     }
     cwd.to_path_buf()
+}
+
+async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
+    let cwd = std::fs::canonicalize(&cli.cwd)?;
+    tracing::info!(cwd = %cwd.display(), model = %cli.model, "omegon interactive starting");
+
+    // ─── Spawn LLM bridge ───────────────────────────────────────────────
+    let bridge_path = cli
+        .bridge
+        .clone()
+        .unwrap_or_else(SubprocessBridge::default_bridge_path);
+    let bridge = SubprocessBridge::spawn(&bridge_path, &cli.node).await?;
+
+    // ─── Set up tools ───────────────────────────────────────────────────
+    let core_tools = CoreTools::new(cwd.clone());
+    let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
+
+    // Memory
+    let mind = "default".to_string();
+    let project_root = find_project_root(&cwd);
+    let memory_dir = project_root.join(".pi").join("memory");
+    let _ = std::fs::create_dir_all(&memory_dir);
+    let db_path = memory_dir.join("facts.db");
+    let jsonl_path = memory_dir.join("facts.jsonl");
+    if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
+        let stats = backend.stats(&mind).await.ok();
+        if stats.as_ref().map_or(true, |s| s.active_facts == 0) && jsonl_path.exists() {
+            if let Ok(jsonl) = std::fs::read_to_string(&jsonl_path) {
+                if let Err(e) = backend.import_jsonl(&jsonl).await {
+                    tracing::warn!("JSONL import failed: {e}");
+                }
+            }
+        }
+        let provider = omegon_memory::MemoryProvider::new(
+            backend,
+            omegon_memory::MarkdownRenderer,
+            mind.clone(),
+        );
+        tools.push(Box::new(provider));
+    }
+
+    // ─── System prompt + context ────────────────────────────────────────
+    let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
+    let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
+    let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
+    let context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> = vec![
+        Box::new(lifecycle_provider),
+    ];
+    let mut context_manager = ContextManager::new(base_prompt, context_providers);
+
+    // ─── Conversation (new or resumed) ──────────────────────────────────
+    let mut conversation = if let Some(ref resume_arg) = cli.resume {
+        let resume_id = resume_arg.as_deref();
+        match session::find_session(&cwd, resume_id) {
+            Some(path) => {
+                tracing::info!(path = %path.display(), "Resuming session");
+                ConversationState::load_session(&path)?
+            }
+            None => ConversationState::new(),
+        }
+    } else {
+        ConversationState::new()
+    };
+
+    // ─── Event channel ──────────────────────────────────────────────────
+    let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<tui::TuiCommand>(16);
+
+    // ─── Launch TUI ─────────────────────────────────────────────────────
+    let tui_handle = tokio::spawn(async move {
+        if let Err(e) = tui::run_tui(events_rx, command_tx).await {
+            tracing::error!("TUI error: {e}");
+        }
+    });
+
+    // ─── Interactive agent loop ─────────────────────────────────────────
+    let cancel = CancellationToken::new();
+
+    loop {
+        // Wait for user input from TUI
+        let cmd = match command_rx.recv().await {
+            Some(cmd) => cmd,
+            None => break, // TUI channel closed
+        };
+
+        match cmd {
+            tui::TuiCommand::Quit => break,
+            tui::TuiCommand::Cancel => {
+                cancel.cancel();
+            }
+            tui::TuiCommand::UserPrompt(text) => {
+                conversation.push_user(text);
+
+                let loop_config = r#loop::LoopConfig {
+                    max_turns: cli.max_turns,
+                    soft_limit_turns: if cli.max_turns > 0 { cli.max_turns * 2 / 3 } else { 0 },
+                    max_retries: cli.max_retries,
+                    retry_delay_ms: 2000,
+                    model: cli.model.clone(),
+                };
+
+                let child_cancel = CancellationToken::new();
+                if let Err(e) = r#loop::run(
+                    &bridge,
+                    &tools,
+                    &mut context_manager,
+                    &mut conversation,
+                    &events_tx,
+                    child_cancel,
+                    &loop_config,
+                ).await {
+                    tracing::error!("Agent loop error: {e}");
+                }
+            }
+        }
+    }
+
+    // Save session
+    if !cli.no_session {
+        if let Err(e) = session::save_session(&conversation, &cwd) {
+            tracing::debug!("Session save failed: {e}");
+        }
+    }
+
+    bridge.shutdown().await;
+    tui_handle.abort();
+    Ok(())
 }
 
 async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {

@@ -25,6 +25,8 @@ rusqlite = { workspace = true }
 tokio-util = { workspace = true }
 indexmap = { workspace = true }
 dirs = "6.0.0"
+ratatui = "0.30.0"
+crossterm = "0.29.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
