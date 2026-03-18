@@ -481,9 +481,14 @@ async fn consume_llm_stream(
 
 /// Dispatch tool calls to their providers.
 ///
+/// **Auto-batching**: when the LLM returns multiple edit/write calls in one turn,
+/// the loop snapshots target files before execution. If any mutation fails, all
+/// previously applied mutations are rolled back. This makes the existing `edit`
+/// tool secretly atomic across multi-file changes — the agent doesn't need to
+/// learn the `change` tool to get atomic behavior.
+///
 /// Currently sequential. True parallel dispatch requires `Arc<dyn ToolProvider>`
 /// which we'll add when the trait bound is relaxed in Phase 1.
-/// The `is_readonly_tool` classification is preserved for that future.
 async fn dispatch_tools(
     tools: &[Box<dyn ToolProvider>],
     tool_index: &HashMap<String, usize>,
@@ -492,6 +497,40 @@ async fn dispatch_tools(
     cancel: CancellationToken,
 ) -> Vec<ToolResultEntry> {
     let mut results = Vec::with_capacity(tool_calls.len());
+
+    // ── Auto-batch: snapshot files targeted by mutation tools ────────
+    let mutation_count = tool_calls
+        .iter()
+        .filter(|c| is_mutation_tool(&c.name))
+        .count();
+    let batch_mode = mutation_count >= 2;
+
+    let mut snapshots: HashMap<std::path::PathBuf, String> = HashMap::new();
+    let mut mutated_files: Vec<std::path::PathBuf> = Vec::new();
+
+    if batch_mode {
+        for call in tool_calls {
+            if is_mutation_tool(&call.name)
+                && let Some(path) = extract_mutation_path(&call.arguments) {
+                    let full = std::path::Path::new(&path);
+                    if full.exists() && !snapshots.contains_key(full)
+                        && let Ok(content) = tokio::fs::read_to_string(full).await {
+                            snapshots.insert(full.to_path_buf(), content);
+                        }
+                }
+        }
+        if !snapshots.is_empty() {
+            tracing::info!(
+                files = snapshots.len(),
+                edits = mutation_count,
+                "Auto-batch: snapshotted {} file(s) for {} mutations",
+                snapshots.len(),
+                mutation_count
+            );
+        }
+    }
+
+    let mut batch_failed = false;
 
     for call in tool_calls {
         let _ = events.send(AgentEvent::ToolStart {
@@ -529,6 +568,86 @@ async fn dispatch_tools(
             ),
         };
 
+        // Track which files were successfully mutated (for rollback)
+        if !is_error && is_mutation_tool(&call.name)
+            && let Some(path) = extract_mutation_path(&call.arguments) {
+                mutated_files.push(std::path::PathBuf::from(path));
+            }
+
+        // ── Auto-batch rollback on mutation failure ─────────────────
+        if is_error && batch_mode && is_mutation_tool(&call.name) && !mutated_files.is_empty() {
+            batch_failed = true;
+            tracing::warn!(
+                failed_tool = call.name,
+                mutated = mutated_files.len(),
+                "Auto-batch: mutation failed — rolling back {} file(s)",
+                mutated_files.len()
+            );
+
+            let mut rollback_report = Vec::new();
+            for file in &mutated_files {
+                if let Some(original) = snapshots.get(file) {
+                    match tokio::fs::write(file, original).await {
+                        Ok(_) => rollback_report.push(format!("  ✓ restored {}", file.display())),
+                        Err(e) => rollback_report.push(format!("  ✗ rollback failed {}: {e}", file.display())),
+                    }
+                }
+            }
+
+            // Append rollback info to the error result
+            let mut error_text = result.content.iter()
+                .filter_map(|c| c.as_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            error_text.push_str("\n\n[Auto-rollback: previous edits in this turn were reverted]\n");
+            error_text.push_str(&rollback_report.join("\n"));
+
+            let _ = events.send(AgentEvent::ToolEnd {
+                id: call.id.clone(),
+                result: omegon_traits::ToolResult {
+                    content: vec![ContentBlock::Text { text: error_text.clone() }],
+                    details: Value::Null,
+                },
+                is_error: true,
+            });
+
+            results.push(ToolResultEntry {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                content: vec![ContentBlock::Text { text: error_text }],
+                is_error: true,
+                args_summary: summarize_tool_args(&call.name, &call.arguments),
+            });
+
+            // Skip remaining mutations — they'd operate on rolled-back state
+            // Continue dispatching non-mutation tools (reads, bash, etc.)
+            continue;
+        }
+
+        // Skip remaining mutations if we've already rolled back
+        if batch_failed && is_mutation_tool(&call.name) {
+            let skip_text = format!(
+                "Skipped {} — previous edit in this turn failed and triggered rollback.",
+                call.name
+            );
+            let _ = events.send(AgentEvent::ToolEnd {
+                id: call.id.clone(),
+                result: omegon_traits::ToolResult {
+                    content: vec![ContentBlock::Text { text: skip_text.clone() }],
+                    details: Value::Null,
+                },
+                is_error: true,
+            });
+            results.push(ToolResultEntry {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                content: vec![ContentBlock::Text { text: skip_text }],
+                is_error: true,
+                args_summary: summarize_tool_args(&call.name, &call.arguments),
+            });
+            continue;
+        }
+
         let _ = events.send(AgentEvent::ToolEnd {
             id: call.id.clone(),
             result: result.clone(),
@@ -547,11 +666,17 @@ async fn dispatch_tools(
     results
 }
 
-/// Is this tool read-only (safe to run in parallel when we add Arc<dyn ToolProvider>)?
-/// Note: bash is NOT read-only — commands can have arbitrary side effects.
-#[allow(dead_code)]
-fn is_readonly_tool(name: &str) -> bool {
-    matches!(name, "read" | "understand")
+/// Is this tool a file mutation (edit, write)?
+/// Used for auto-batch snapshotting and rollback.
+fn is_mutation_tool(name: &str) -> bool {
+    matches!(name, "edit" | "write" | "change")
+}
+
+/// Extract the target file path from mutation tool arguments.
+fn extract_mutation_path(args: &Value) -> Option<String> {
+    args.get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Check if the conversation contains any file mutations (edit or write calls).
@@ -802,5 +927,199 @@ mod tests {
         // This triggers the repeated-call pattern (same args 3x)
         let warning = detector.check();
         assert!(warning.is_some());
+    }
+
+    // ── Auto-batch tests ────────────────────────────────────────────
+
+    #[test]
+    fn mutation_tool_detection() {
+        assert!(is_mutation_tool("edit"));
+        assert!(is_mutation_tool("write"));
+        assert!(is_mutation_tool("change"));
+        assert!(!is_mutation_tool("read"));
+        assert!(!is_mutation_tool("bash"));
+        assert!(!is_mutation_tool("web_search"));
+    }
+
+    #[test]
+    fn extract_path_from_args() {
+        let args = serde_json::json!({"path": "src/main.rs", "oldText": "a", "newText": "b"});
+        assert_eq!(extract_mutation_path(&args).as_deref(), Some("src/main.rs"));
+
+        let no_path = serde_json::json!({"command": "ls"});
+        assert!(extract_mutation_path(&no_path).is_none());
+    }
+
+    #[test]
+    fn summarize_args_by_tool() {
+        assert_eq!(
+            summarize_tool_args("read", &serde_json::json!({"path": "src/foo.rs"})).as_deref(),
+            Some("src/foo.rs")
+        );
+        assert_eq!(
+            summarize_tool_args("bash", &serde_json::json!({"command": "cargo test"})).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            summarize_tool_args("change", &serde_json::json!({
+                "edits": [{"file": "a.rs"}, {"file": "b.rs"}]
+            })).as_deref(),
+            Some("a.rs, b.rs")
+        );
+        // Long command gets truncated
+        let long_cmd = "x".repeat(100);
+        let summary = summarize_tool_args("bash", &serde_json::json!({"command": long_cmd})).unwrap();
+        assert!(summary.len() <= 84, "got len {}", summary.len()); // 80 + "…" (3 bytes UTF-8)
+        assert!(summary.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn auto_batch_rollback_on_second_edit_failure() {
+        use std::io::Write as IoWrite;
+        use omegon_traits::ToolResult;
+
+        // Create a mock tool provider that does real file I/O
+        struct FileEditProvider { dir: std::path::PathBuf }
+
+        #[async_trait::async_trait]
+        impl ToolProvider for FileEditProvider {
+            fn tools(&self) -> Vec<omegon_traits::ToolDefinition> {
+                vec![omegon_traits::ToolDefinition {
+                    name: "edit".into(),
+                    label: "edit".into(),
+                    description: "test".into(),
+                    parameters: serde_json::json!({}),
+                }]
+            }
+
+            async fn execute(
+                &self,
+                _tool_name: &str,
+                _call_id: &str,
+                args: Value,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<ToolResult> {
+                let path_str = args["path"].as_str().unwrap();
+                let path = std::path::Path::new(path_str);
+                let old_text = args["oldText"].as_str().unwrap();
+                let new_text = args["newText"].as_str().unwrap();
+
+                let content = tokio::fs::read_to_string(path).await?;
+                if !content.contains(old_text) {
+                    anyhow::bail!("Could not find exact text in {}", path.display());
+                }
+                let new_content = content.replacen(old_text, new_text, 1);
+                tokio::fs::write(path, &new_content).await?;
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text {
+                        text: format!("Edited {}", path.display()),
+                    }],
+                    details: Value::Null,
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        std::fs::File::create(&file_a).unwrap().write_all(b"hello world").unwrap();
+        std::fs::File::create(&file_b).unwrap().write_all(b"foo bar baz").unwrap();
+
+        let provider = FileEditProvider { dir: dir.path().to_path_buf() };
+        let tools: Vec<Box<dyn ToolProvider>> = vec![Box::new(provider)];
+        let mut tool_index: HashMap<String, usize> = HashMap::new();
+        tool_index.insert("edit".into(), 0);
+
+        let (events_tx, _rx) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        // Two edits: first succeeds, second will fail (text not found)
+        let calls = vec![
+            ToolCall {
+                id: "1".into(),
+                name: "edit".into(),
+                arguments: serde_json::json!({
+                    "path": file_a.display().to_string(),
+                    "oldText": "hello",
+                    "newText": "goodbye"
+                }),
+            },
+            ToolCall {
+                id: "2".into(),
+                name: "edit".into(),
+                arguments: serde_json::json!({
+                    "path": file_b.display().to_string(),
+                    "oldText": "NONEXISTENT",
+                    "newText": "replaced"
+                }),
+            },
+        ];
+
+        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel).await;
+
+        // The second edit should have failed
+        assert!(results[1].is_error, "second edit should fail");
+
+        // The first file should be ROLLED BACK to original content
+        let a_content = std::fs::read_to_string(&file_a).unwrap();
+        assert_eq!(a_content, "hello world", "file_a should be rolled back, got: {a_content}");
+
+        // The error message should mention the rollback
+        let error_text = results[1].content[0].as_text().unwrap();
+        assert!(error_text.contains("Auto-rollback"), "should mention rollback, got: {error_text}");
+    }
+
+    #[tokio::test]
+    async fn single_edit_has_no_batch_overhead() {
+        // With only one edit, there should be no snapshotting or rollback
+        // (batch_mode = false when mutation_count < 2)
+        // This is a structural test — we verify by checking that a single
+        // successful edit doesn't produce rollback messaging
+        use omegon_traits::ToolResult;
+
+        struct PassProvider;
+
+        #[async_trait::async_trait]
+        impl ToolProvider for PassProvider {
+            fn tools(&self) -> Vec<omegon_traits::ToolDefinition> {
+                vec![omegon_traits::ToolDefinition {
+                    name: "edit".into(),
+                    label: "edit".into(),
+                    description: "test".into(),
+                    parameters: serde_json::json!({}),
+                }]
+            }
+
+            async fn execute(
+                &self,
+                _tool_name: &str,
+                _call_id: &str,
+                _args: Value,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text { text: "Edited ok".into() }],
+                    details: Value::Null,
+                })
+            }
+        }
+
+        let tools: Vec<Box<dyn ToolProvider>> = vec![Box::new(PassProvider)];
+        let mut tool_index: HashMap<String, usize> = HashMap::new();
+        tool_index.insert("edit".into(), 0);
+
+        let (events_tx, _rx) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+
+        let calls = vec![ToolCall {
+            id: "1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({"path": "/tmp/fake.rs", "oldText": "a", "newText": "b"}),
+        }];
+
+        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel).await;
+        assert!(!results[0].is_error);
+        let text = results[0].content[0].as_text().unwrap();
+        assert!(!text.contains("rollback"), "single edit should have no batch overhead");
     }
 }
