@@ -460,24 +460,10 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         }
     }
 
-    // Export JSONL for git sync — reopen the DB briefly to export
-    if db_path.exists() && jsonl_path.parent().map_or(false, |p| p.exists()) {
-        match omegon_memory::SqliteBackend::open(&db_path) {
-            Ok(export_backend) => {
-                match export_backend.export_jsonl(&mind).await {
-                    Ok(jsonl) if !jsonl.is_empty() => {
-                        if let Err(e) = std::fs::write(&jsonl_path, &jsonl) {
-                            tracing::debug!("JSONL export failed (non-fatal): {e}");
-                        } else {
-                            tracing::info!(path = %jsonl_path.display(), lines = jsonl.lines().count(), "exported facts.jsonl");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => tracing::debug!("JSONL export: couldn't reopen DB (non-fatal): {e}"),
-        }
-    }
+    // JSONL export is intentional, not automatic.
+    // The DB is the live mutable store; facts.jsonl is the tracked transport snapshot.
+    // Export only happens via explicit memory_export or lifecycle reconciliation.
+    // See design: memory-branch-aware-facts-transport
 
     // Graceful bridge shutdown — send "shutdown" before kill_on_drop fires
     bridge.shutdown().await;
