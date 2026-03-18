@@ -18,12 +18,14 @@ mod auth;
 mod bridge;
 mod cleave;
 mod context;
+
 mod conversation;
 mod lifecycle;
 mod r#loop;
 mod prompt;
 mod providers;
 mod session;
+pub mod settings;
 mod setup;
 mod tools;
 mod tui;
@@ -364,47 +366,89 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<tui::TuiCommand>(16);
 
-    // Shared cancel token: TUI writes (on Escape/Ctrl+C), agent loop reads
+    // ─── Shared state ─────────────────────────────────────────────────
     let shared_cancel: tui::SharedCancel = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let shared_settings = settings::shared(&cli.model);
+    // Set initial settings from CLI
+    if let Ok(mut s) = shared_settings.lock() {
+        s.max_turns = cli.max_turns;
+    }
 
-    // ─── Launch TUI ─────────────────────────────────────────────────────
     let is_oauth = providers::resolve_api_key_sync(
         cli.model.split(':').next().unwrap_or("anthropic")
-    ).map_or(false, |(_, oauth)| oauth);
+    ).is_some_and(|(_, oauth)| oauth);
+
+    // ─── Launch TUI ─────────────────────────────────────────────────────
     let tui_config = tui::TuiConfig {
-        model: cli.model.clone(),
         cwd: agent.cwd.to_string_lossy().to_string(),
         is_oauth,
     };
     let tui_cancel = shared_cancel.clone();
+    let tui_settings = shared_settings.clone();
     let tui_handle = tokio::spawn(async move {
-        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_config, tui_cancel).await {
+        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_config, tui_cancel, tui_settings).await {
             tracing::error!("TUI error: {e}");
         }
     });
 
     // ─── Interactive agent loop ─────────────────────────────────────────
     loop {
-        // Wait for user input from TUI
         let cmd = match command_rx.recv().await {
             Some(cmd) => cmd,
-            None => break, // TUI channel closed
+            None => break,
         };
 
         match cmd {
             tui::TuiCommand::Quit => break,
+
+            tui::TuiCommand::SetModel(model) => {
+                tracing::info!(model = %model, "model switched via /model command");
+                if let Ok(mut s) = shared_settings.lock() {
+                    s.model = model;
+                    s.context_window = settings::Settings::new(&s.model).context_window;
+                }
+            }
+
+            tui::TuiCommand::Compact => {
+                tracing::info!("manual compaction requested");
+                // Compaction runs automatically before the next turn
+                // via the needs_compaction check in the loop
+            }
+
+            tui::TuiCommand::ListSessions => {
+                let sessions = session::list_sessions(&agent.cwd);
+                let text = if sessions.is_empty() {
+                    "No saved sessions for this directory.".to_string()
+                } else {
+                    let lines: Vec<String> = sessions.iter().take(10).map(|s| {
+                        format!("  {} — {} turns, {} tools — {}",
+                            s.meta.session_id, s.meta.turns, s.meta.tool_calls,
+                            s.meta.last_prompt_snippet)
+                    }).collect();
+                    format!("Recent sessions:\n{}", lines.join("\n"))
+                };
+                // Send back to TUI as a system message
+                let _ = events_tx.send(AgentEvent::AgentEnd);
+                tracing::info!("{text}");
+            }
+
             tui::TuiCommand::UserPrompt(text) => {
                 agent.conversation.push_user(text);
 
-                let loop_config = r#loop::LoopConfig {
-                    max_turns: cli.max_turns,
-                    soft_limit_turns: if cli.max_turns > 0 { cli.max_turns * 2 / 3 } else { 0 },
-                    max_retries: cli.max_retries,
-                    retry_delay_ms: 2000,
-                    model: cli.model.clone(),
+                // Read current settings for this turn
+                let (model, max_turns) = {
+                    let s = shared_settings.lock().unwrap();
+                    (s.model.clone(), s.max_turns)
                 };
 
-                // Install a fresh cancel token for this turn
+                let loop_config = r#loop::LoopConfig {
+                    max_turns,
+                    soft_limit_turns: if max_turns > 0 { max_turns * 2 / 3 } else { 0 },
+                    max_retries: cli.max_retries,
+                    retry_delay_ms: 2000,
+                    model,
+                };
+
                 let cancel = CancellationToken::new();
                 if let Ok(mut guard) = shared_cancel.lock() {
                     *guard = Some(cancel.clone());
@@ -422,7 +466,6 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     tracing::error!("Agent loop error: {e}");
                 }
 
-                // Clear the cancel token
                 if let Ok(mut guard) = shared_cancel.lock() {
                     guard.take();
                 }

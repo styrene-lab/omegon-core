@@ -124,7 +124,7 @@ pub fn node_from_frontmatter(
     let id = fm.get("id")?.as_str()?.to_string();
     let title = fm.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let status_str = fm.get("status").and_then(|v| v.as_str()).unwrap_or("seed");
-    let status = NodeStatus::from_str(status_str).unwrap_or(NodeStatus::Seed);
+    let status = NodeStatus::parse(status_str).unwrap_or(NodeStatus::Seed);
 
     Some(DesignNode {
         id,
@@ -137,7 +137,7 @@ pub fn node_from_frontmatter(
         open_questions: fm.get("open_questions").map(|v| v.as_list().to_vec()).unwrap_or_default(),
         branches: fm.get("branches").map(|v| v.as_list().to_vec()).unwrap_or_default(),
         openspec_change: fm.get("openspec_change").and_then(|v| v.as_str()).map(String::from),
-        issue_type: fm.get("issue_type").and_then(|v| v.as_str()).and_then(IssueType::from_str),
+        issue_type: fm.get("issue_type").and_then(|v| v.as_str()).and_then(IssueType::parse),
         priority: fm.get("priority").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
         file_path,
     })

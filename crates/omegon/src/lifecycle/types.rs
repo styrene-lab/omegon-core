@@ -39,7 +39,7 @@ impl NodeStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "seed" => Some(Self::Seed),
             "exploring" => Some(Self::Exploring),
@@ -79,7 +79,7 @@ pub enum IssueType {
 }
 
 impl IssueType {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "epic" => Some(Self::Epic),
             "feature" => Some(Self::Feature),
@@ -218,20 +218,20 @@ mod tests {
     #[test]
     fn node_status_round_trip() {
         for s in &["seed", "exploring", "resolved", "decided", "implementing", "implemented", "blocked", "deferred"] {
-            let status = NodeStatus::from_str(s).unwrap();
+            let status = NodeStatus::parse(s).unwrap();
             assert_eq!(status.as_str(), *s);
         }
     }
 
     #[test]
     fn node_status_from_invalid() {
-        assert!(NodeStatus::from_str("invalid").is_none());
+        assert!(NodeStatus::parse("invalid").is_none());
     }
 
     #[test]
     fn issue_type_from_str() {
-        assert_eq!(IssueType::from_str("epic"), Some(IssueType::Epic));
-        assert_eq!(IssueType::from_str("bug"), Some(IssueType::Bug));
-        assert!(IssueType::from_str("unknown").is_none());
+        assert_eq!(IssueType::parse("epic"), Some(IssueType::Epic));
+        assert_eq!(IssueType::parse("bug"), Some(IssueType::Bug));
+        assert!(IssueType::parse("unknown").is_none());
     }
 }

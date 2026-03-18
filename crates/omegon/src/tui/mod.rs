@@ -26,8 +26,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use omegon_traits::AgentEvent;
@@ -44,6 +43,12 @@ pub enum TuiCommand {
     UserPrompt(String),
     /// User wants to quit (double Ctrl+C, or /exit).
     Quit,
+    /// Switch the model for the next turn.
+    SetModel(String),
+    /// Trigger manual compaction.
+    Compact,
+    /// List saved sessions.
+    ListSessions,
 }
 
 /// Shared cancel token — the TUI writes it on Escape/Ctrl+C,
@@ -54,42 +59,36 @@ pub type SharedCancel = std::sync::Arc<std::sync::Mutex<Option<CancellationToken
 pub struct App {
     editor: Editor,
     conversation: ConversationView,
-    /// True when the agent is running (waiting for response or executing tools).
     agent_active: bool,
-    /// True when we should exit.
     should_quit: bool,
-    /// Current model string for footer display.
-    model: String,
-    /// Turn counter.
     turn: u32,
-    /// Tool calls this session.
     tool_calls: u32,
-    /// Input history (most recent last).
     history: Vec<String>,
-    /// History navigation index (None = not navigating).
     history_idx: Option<usize>,
-    /// Dashboard state.
     dashboard: DashboardState,
-    /// Footer card data.
     footer_data: FooterData,
-    /// Theme for all rendering.
     theme: Box<dyn theme::Theme>,
+    /// Shared settings — source of truth for model, thinking, etc.
+    settings: crate::settings::SharedSettings,
     /// Shared cancel token — Escape/Ctrl+C cancels the active agent turn.
     cancel: SharedCancel,
     /// Timestamp of last Ctrl+C (for double-tap quit detection).
     last_ctrl_c: Option<std::time::Instant>,
+    /// Session start time for /stats.
+    session_start: std::time::Instant,
 }
 
 impl App {
-    pub fn new(model: String) -> Self {
-        let provider = model.split(':').next().unwrap_or("anthropic").to_string();
-        let model_id = model.clone();
+    pub fn new(settings: crate::settings::SharedSettings) -> Self {
+        let (model_id, model_provider) = {
+            let s = settings.lock().unwrap();
+            (s.model.clone(), s.provider().to_string())
+        };
         Self {
             editor: Editor::new(),
             conversation: ConversationView::new(),
             agent_active: false,
             should_quit: false,
-            model,
             turn: 0,
             tool_calls: 0,
             history: Vec::new(),
@@ -97,23 +96,36 @@ impl App {
             dashboard: DashboardState::default(),
             footer_data: FooterData {
                 model_id,
-                model_provider: provider,
+                model_provider,
                 ..Default::default()
             },
             theme: theme::default_theme(),
+            settings,
             cancel: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_ctrl_c: None,
+            session_start: std::time::Instant::now(),
+        }
+    }
+
+    /// Read a snapshot of current settings (for display).
+    fn settings(&self) -> crate::settings::Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    /// Write a setting (for commands like /model, /think).
+    fn update_settings<F: FnOnce(&mut crate::settings::Settings)>(&self, f: F) {
+        if let Ok(mut s) = self.settings.lock() {
+            f(&mut s);
         }
     }
 
     /// Try to cancel the active agent turn. Returns true if cancelled.
     fn interrupt(&self) -> bool {
-        if let Ok(guard) = self.cancel.lock() {
-            if let Some(ref token) = *guard {
+        if let Ok(guard) = self.cancel.lock()
+            && let Some(ref token) = *guard {
                 token.cancel();
                 return true;
             }
-        }
         false
     }
 
@@ -192,7 +204,13 @@ impl App {
             self.dashboard.render_themed(dash, frame, t.as_ref());
         }
 
-        // Footer — summary cards
+        // Footer — sync from settings + session state
+        {
+            let s = self.settings();
+            self.footer_data.model_id = s.model.clone();
+            self.footer_data.model_provider = s.provider().to_string();
+            self.footer_data.context_window = s.context_window;
+        }
         self.footer_data.turn = self.turn;
         self.footer_data.tool_calls = self.tool_calls;
         self.footer_data.compactions = self.dashboard.compactions;
@@ -255,60 +273,159 @@ impl App {
         }
     }
 
-    /// All available slash commands with descriptions.
-    const COMMANDS: &'static [(&'static str, &'static str)] = &[
-        ("help", "show available commands"),
-        ("model", "show current model"),
-        ("stats", "show session statistics"),
-        ("compact", "trigger context compaction"),
-        ("clear", "clear conversation display"),
-        ("exit", "quit the session"),
+    /// Command registry: (name, description, subcommands).
+    const COMMANDS: &'static [(&'static str, &'static str, &'static [&'static str])] = &[
+        ("help",     "show available commands",              &[]),
+        ("model",    "view or switch model",                 &["list"]),
+        ("think",    "set thinking level",                   &["off", "low", "medium", "high"]),
+        ("stats",    "session telemetry",                    &[]),
+        ("compact",  "trigger context compaction",           &[]),
+        ("clear",    "clear conversation display",           &[]),
+        ("sessions", "list saved sessions",                  &[]),
+        ("memory",   "memory stats",                        &[]),
+        ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
 
-    /// Handle slash commands that are processed locally (not sent to the agent).
-    /// Returns Some(response) if handled, None if not a recognized local command.
-    fn handle_slash_command(&mut self, text: &str) -> Option<String> {
+    /// Handle a slash command. Returns Some(text) for display, None for /exit.
+    fn handle_slash_command(&mut self, text: &str, tx: &mpsc::Sender<TuiCommand>) -> Option<String> {
         let trimmed = text.trim();
-        if !trimmed.starts_with('/') {
-            return None;
-        }
-        let (cmd, _args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
+        if !trimmed.starts_with('/') { return None; }
+        let rest = &trimmed[1..];
+        let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
+        let args = args.trim();
+
         match cmd {
             "help" => {
                 let lines: Vec<String> = Self::COMMANDS.iter()
-                    .map(|(name, desc)| format!("  /{name:<10} {desc}"))
-                    .collect();
-                Some(format!("Available commands:\n{}\n\nAll other input is sent as a prompt.", lines.join("\n")))
+                    .map(|(n, d, subs)| {
+                        if subs.is_empty() {
+                            format!("  /{n:<12} {d}")
+                        } else {
+                            format!("  /{n:<12} {d}  [{}]", subs.join("|"))
+                        }
+                    }).collect();
+                Some(format!("Commands:\n{}\n\nType / to browse. Tab completes.", lines.join("\n")))
             }
-            "model" => Some(format!("Current model: {}", self.model)),
-            "stats" => Some(format!(
-                "Session: {} turns, {} tool calls, {} compactions",
-                self.turn, self.tool_calls, self.dashboard.compactions,
-            )),
-            "compact" => Some("Compaction will run automatically when context is full.".into()),
+
+            "model" => {
+                let s = self.settings();
+                if args.is_empty() {
+                    Some(format!(
+                        "Model:    {}\nProvider: {}\nAuth:     {}\nContext:  {} tokens\n\n/model <provider:id> to switch\n/model list for options",
+                        s.model_short(), s.provider(),
+                        if self.footer_data.is_oauth { "subscription" } else { "api-key" },
+                        s.context_window,
+                    ))
+                } else if args == "list" {
+                    Some("Native providers:\n\n\
+                          Anthropic:\n\
+                          \x20 anthropic:claude-sonnet-4-20250514\n\
+                          \x20 anthropic:claude-opus-4-20250514\n\
+                          \x20 anthropic:claude-haiku-3-20250307\n\n\
+                          OpenAI:\n\
+                          \x20 openai:gpt-4.1\n\
+                          \x20 openai:o3\n\n\
+                          /model <id> to switch".into())
+                } else {
+                    self.update_settings(|s| {
+                        s.model = args.to_string();
+                        s.context_window = crate::settings::Settings::new(args).context_window;
+                    });
+                    let _ = tx.try_send(TuiCommand::SetModel(args.to_string()));
+                    Some(format!("Switched to: {args}"))
+                }
+            }
+
+            "think" => {
+                let s = self.settings();
+                if args.is_empty() {
+                    Some(format!(
+                        "Thinking: {} {}\n\n/think off|low|medium|high",
+                        s.thinking.icon(), s.thinking.as_str(),
+                    ))
+                } else if let Some(level) = crate::settings::ThinkingLevel::parse(args) {
+                    self.update_settings(|s| s.thinking = level);
+                    Some(format!("Thinking set to: {} {}", level.icon(), level.as_str()))
+                } else {
+                    Some(format!("Unknown level: {args}. Options: off, low, medium, high"))
+                }
+            }
+
+            "stats" => {
+                let s = self.settings();
+                let elapsed = self.session_start.elapsed();
+                let time = if elapsed.as_secs() >= 3600 {
+                    format!("{}h{}m", elapsed.as_secs() / 3600, (elapsed.as_secs() % 3600) / 60)
+                } else if elapsed.as_secs() >= 60 {
+                    format!("{}m{}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+                } else {
+                    format!("{}s", elapsed.as_secs())
+                };
+                Some(format!(
+                    "Session:\n  Duration:    {time}\n  Turns:       {}\n  Tool calls:  {}\n  Compactions: {}\n\n\
+                     Context:\n  Usage:       {:.0}%\n  Window:      {} tokens\n  Model:       {}\n  Thinking:    {} {}",
+                    self.turn, self.tool_calls, self.dashboard.compactions,
+                    self.footer_data.context_percent, s.context_window,
+                    s.model_short(), s.thinking.icon(), s.thinking.as_str(),
+                ))
+            }
+
+            "compact" => {
+                let _ = tx.try_send(TuiCommand::Compact);
+                Some("Compaction queued — runs before next turn.".into())
+            }
+
             "clear" => {
                 self.conversation = ConversationView::new();
-                Some("Conversation cleared.".into())
+                Some("Display cleared.".into())
             }
-            "exit" | "quit" => None, // handled by caller
-            _ => None,               // unknown slash command — send to agent
+
+            "sessions" => {
+                let _ = tx.try_send(TuiCommand::ListSessions);
+                None // coordinator handles this
+            }
+
+            "memory" => {
+                Some(format!(
+                    "Memory:\n  Facts:          {}\n  Injected:       {}\n  Working memory: {}\n  ~{} tokens",
+                    self.footer_data.total_facts, self.footer_data.injected_facts,
+                    self.footer_data.working_memory, self.footer_data.memory_tokens_est,
+                ))
+            }
+
+            "exit" | "quit" => None,
+            _ => None,
         }
     }
 
-    /// Get matching commands for the current editor text (for palette display).
-    fn matching_commands(&self) -> Vec<(&'static str, &'static str)> {
+    /// Palette: matching commands + subcommands for the current editor text.
+    fn matching_commands(&self) -> Vec<(String, String)> {
         let text = self.editor.render_text();
-        if !text.starts_with('/') || text.len() < 1 {
-            return vec![];
+        if !text.starts_with('/') { return vec![]; }
+        let input = &text[1..];
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+
+        if parts.len() <= 1 {
+            let prefix = parts.first().copied().unwrap_or("");
+            if prefix.is_empty() {
+                return Self::COMMANDS.iter().map(|(n, d, _)| (n.to_string(), d.to_string())).collect();
+            }
+            Self::COMMANDS.iter()
+                .filter(|(name, _, _)| name.starts_with(prefix))
+                .map(|(n, d, _)| (n.to_string(), d.to_string()))
+                .collect()
+        } else {
+            let cmd = parts[0];
+            let sub_prefix = parts.get(1).copied().unwrap_or("");
+            if let Some((_, _, subs)) = Self::COMMANDS.iter().find(|(n, _, _)| *n == cmd) {
+                subs.iter()
+                    .filter(|s| s.starts_with(sub_prefix))
+                    .map(|s| (format!("{cmd} {s}"), String::new()))
+                    .collect()
+            } else {
+                vec![]
+            }
         }
-        let prefix = &text[1..]; // strip the /
-        if prefix.is_empty() {
-            return Self::COMMANDS.to_vec();
-        }
-        Self::COMMANDS.iter()
-            .filter(|(name, _)| name.starts_with(prefix))
-            .copied()
-            .collect()
     }
 
     fn history_up(&mut self) {
@@ -376,7 +493,6 @@ impl App {
 /// coordinator through channels.
 /// Configuration for the TUI — passed from main.
 pub struct TuiConfig {
-    pub model: String,
     pub cwd: String,
     pub is_oauth: bool,
 }
@@ -386,6 +502,7 @@ pub async fn run_tui(
     command_tx: mpsc::Sender<TuiCommand>,
     config: TuiConfig,
     cancel: SharedCancel,
+    settings: crate::settings::SharedSettings,
 ) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -401,7 +518,7 @@ pub async fn run_tui(
         original_hook(info);
     }));
 
-    let mut app = App::new(config.model.clone());
+    let mut app = App::new(settings);
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
     app.cancel = cancel;
@@ -460,7 +577,7 @@ pub async fn run_tui(
                     (KeyCode::Enter, _) if !app.agent_active => {
                         let text = app.editor.take_text();
                         if !text.is_empty() {
-                            if let Some(response) = app.handle_slash_command(&text) {
+                            if let Some(response) = app.handle_slash_command(&text, &command_tx) {
                                 app.conversation.push_system(&response);
                             } else if text == "/exit" || text == "/quit" {
                                 app.should_quit = true;

@@ -54,7 +54,7 @@ impl FooterData {
         }
 
         // Split into 4 columns
-        let col_w = width / 4;
+        let _col_w = width / 4;
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -162,7 +162,7 @@ impl FooterData {
         let auth_type = if self.is_oauth { "subscription" } else { "api-key" };
         lines.push(Line::from(vec![
             Span::styled("  Driver ", Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{model_short}"), Style::default().fg(t.muted())),
+            Span::styled(model_short.to_string(), Style::default().fg(t.muted())),
             Span::styled(" · ", Style::default().fg(t.dim())),
             Span::styled("native", Style::default().fg(t.success())),
         ]));
