@@ -199,7 +199,7 @@ impl ConversationView {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut in_code_fence = false;
 
-        for msg in &self.messages {
+        for (idx, msg) in self.messages.iter().enumerate() {
             match msg {
                 Message::User(text) => {
                     // Thin separator before user messages (except first)
@@ -290,6 +290,18 @@ impl ConversationView {
                     result_summary,
                     ..
                 } => {
+                    // Check if this is the first tool in a sequence
+                    let prev_is_tool = idx > 0 && matches!(self.messages.get(idx - 1), Some(Message::Tool { .. }));
+                    let next_is_tool = matches!(self.messages.get(idx + 1), Some(Message::Tool { .. }));
+
+                    if !prev_is_tool {
+                        // First tool in a group — add a subtle header
+                        lines.push(Line::from(Span::styled(
+                            "  ┌",
+                            Style::default().fg(t.border_dim()),
+                        )));
+                    }
+
                     lines.push(widgets::tool_card(
                         name,
                         *is_error,
@@ -298,6 +310,14 @@ impl ConversationView {
                         result_summary.as_deref(),
                         t,
                     ));
+
+                    if !next_is_tool {
+                        // Last tool in group — close the bracket
+                        lines.push(Line::from(Span::styled(
+                            "  └",
+                            Style::default().fg(t.border_dim()),
+                        )));
+                    }
                 }
 
                 Message::Lifecycle { icon, text } => {
@@ -363,16 +383,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_renders_with_gutter() {
+    fn tool_card_renders_with_bracket() {
         let mut cv = ConversationView::new();
         cv.push_tool_start("t1", "edit", Some("lib.rs"));
         cv.push_tool_end("t1", false, Some("Applied edit"));
         let lines = cv.render_text();
-        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("│"), "tool card should have gutter: {text}");
-        assert!(text.contains("✓"));
-        assert!(text.contains("edit"));
-        assert!(text.contains("lib.rs"));
+        // First line is the ┌ bracket, second is the tool card, third is └
+        assert!(lines.len() >= 3, "should have bracket + card + bracket, got {}", lines.len());
+        let bracket: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(bracket.contains("┌"), "should have opening bracket: {bracket}");
+        let card: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(card.contains("✓"), "card should have checkmark: {card}");
+        assert!(card.contains("edit"), "card should have tool name: {card}");
+        assert!(card.contains("lib.rs"), "card should have args: {card}");
     }
 
     #[test]

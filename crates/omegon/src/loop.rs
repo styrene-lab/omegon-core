@@ -812,19 +812,38 @@ impl StuckDetector {
 pub fn summarize_tool_args(tool_name: &str, args: &Value) -> Option<String> {
     match tool_name {
         "read" | "edit" | "write" | "view" => {
-            args.get("path").and_then(|v| v.as_str()).map(|p| p.to_string())
+            args.get("path").and_then(|v| v.as_str()).map(|p| {
+                // Strip common cwd prefixes to show relative paths
+                let cwd = std::env::current_dir()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !cwd.is_empty() && p.starts_with(&cwd) {
+                    p[cwd.len()..].strip_prefix('/').unwrap_or(&p[cwd.len()..]).to_string()
+                } else {
+                    p.to_string()
+                }
+            })
         }
         "bash" => {
             let cmd = args.get("command").and_then(|v| v.as_str())?;
-            // Truncate long commands, keep the first meaningful part
-            let short = if cmd.len() > 80 {
-                let mut end = 80;
-                while end > 0 && !cmd.is_char_boundary(end) {
+            // Strip common cwd wrappers: "cd /long/path && actual command"
+            let clean = if let Some(rest) = cmd.strip_prefix("cd ") {
+                // Find the && and take what's after it
+                rest.split_once(" && ")
+                    .map(|(_, after)| after)
+                    .unwrap_or(rest)
+            } else {
+                cmd
+            };
+            // Truncate to keep it compact
+            let short = if clean.len() > 60 {
+                let mut end = 60;
+                while end > 0 && !clean.is_char_boundary(end) {
                     end -= 1;
                 }
-                format!("{}…", &cmd[..end])
+                format!("{}…", &clean[..end])
             } else {
-                cmd.to_string()
+                clean.to_string()
             };
             Some(short)
         }

@@ -271,11 +271,13 @@ pub fn badge<'a>(icon: &str, text: &str, color: ratatui::style::Color) -> Vec<Sp
     ]
 }
 
-/// Tool call card — 1-2 line rendering with status icon, name, args summary, result preview.
+/// Tool call card — compact single-line rendering.
 ///
 /// In-progress:  `│ → read (src/main.rs)`
 /// Success:      `│ ✓ read (src/main.rs)  245 lines`
 /// Error:        `│ ✗ edit (src/lib.rs)  oldText not found`
+///
+/// Args and result are truncated to keep the card compact.
 pub fn tool_card<'a>(
     name: &str,
     is_error: bool,
@@ -292,23 +294,29 @@ pub fn tool_card<'a>(
 
     let gutter_style = Style::default().fg(t.border_dim());
     let mut spans = vec![
-        Span::styled("│ ", gutter_style),
+        Span::styled("  ", gutter_style), // indent
         Span::styled(format!("{icon} "), Style::default().fg(color)),
-        Span::styled(name.to_string(), Style::default().fg(color)),
+        Span::styled(name.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
     ];
 
+    // Args — truncate aggressively for bash commands
     if let Some(args) = args_summary {
-        spans.push(Span::styled(
-            format!(" ({args})"),
-            Style::default().fg(t.dim()),
-        ));
+        let display = if args.len() > 50 {
+            format!(" {}…", &args[..49.min(args.len())])
+        } else {
+            format!(" {args}")
+        };
+        spans.push(Span::styled(display, Style::default().fg(t.dim())));
     }
 
+    // Result preview — short and meaningful
     if let Some(summary) = result_summary {
-        spans.push(Span::styled(
-            format!("  {summary}"),
-            Style::default().fg(t.dim()),
-        ));
+        let display = if summary.len() > 40 {
+            format!("  {}…", &summary[..39.min(summary.len())])
+        } else {
+            format!("  {summary}")
+        };
+        spans.push(Span::styled(display, Style::default().fg(t.muted())));
     }
 
     Line::from(spans)
