@@ -371,8 +371,14 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
     let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
 
+    // ─── Set up lifecycle context ─────────────────────────────────────────
+    let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
+    let context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> = vec![
+        Box::new(lifecycle_provider),
+    ];
+
     // ─── Set up context manager ─────────────────────────────────────────
-    let mut context_manager = ContextManager::new(base_prompt, vec![]);
+    let mut context_manager = ContextManager::new(base_prompt, context_providers);
 
     // ─── Set up conversation ────────────────────────────────────────────
     let mut conversation = ConversationState::new();
