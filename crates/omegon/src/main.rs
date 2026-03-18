@@ -19,6 +19,7 @@ mod conversation;
 mod lifecycle;
 mod r#loop;
 mod prompt;
+mod session;
 mod tools;
 
 use bridge::SubprocessBridge;
@@ -67,6 +68,15 @@ struct Cli {
     /// Max retries on transient LLM errors
     #[arg(long, default_value = "3")]
     max_retries: u32,
+
+    /// Resume a previous session. Without a value, resumes the most recent.
+    /// With a value, matches by session ID prefix.
+    #[arg(long)]
+    resume: Option<Option<String>>,
+
+    /// Disable session auto-save on exit.
+    #[arg(long)]
+    no_session: bool,
 }
 
 #[derive(Subcommand)]
@@ -380,9 +390,31 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     // ─── Set up context manager ─────────────────────────────────────────
     let mut context_manager = ContextManager::new(base_prompt, context_providers);
 
-    // ─── Set up conversation ────────────────────────────────────────────
-    let mut conversation = ConversationState::new();
-    conversation.push_user(prompt_text.clone());
+    // ─── Set up conversation (new or resumed) ────────────────────────────
+    let mut conversation = if let Some(ref resume_arg) = cli.resume {
+        // --resume was passed (with or without a value)
+        let resume_id = resume_arg.as_deref();
+        match session::find_session(&cwd, resume_id) {
+            Some(session_path) => {
+                tracing::info!(path = %session_path.display(), "Resuming session");
+                let mut conv = ConversationState::load_session(&session_path)?;
+                conv.push_user(prompt_text.clone());
+                conv
+            }
+            None => {
+                let msg = if let Some(id) = resume_id {
+                    format!("No session matching '{id}' found for {}", cwd.display())
+                } else {
+                    format!("No previous sessions found for {}", cwd.display())
+                };
+                anyhow::bail!(msg);
+            }
+        }
+    } else {
+        let mut conv = ConversationState::new();
+        conv.push_user(prompt_text.clone());
+        conv
+    };
 
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(256);
@@ -457,12 +489,20 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     )
     .await;
 
-    // Save session for potential resume — only if running inside a cleave worktree
-    // (detected by the presence of .cleave-prompt.md written by the orchestrator).
-    if cwd.join(".cleave-prompt.md").exists() {
-        let session_path = cwd.join(".cleave-session.json");
-        if let Err(e) = conversation.save_session(&session_path) {
-            tracing::debug!("Session save failed (non-fatal): {e}");
+    // ─── Save session ────────────────────────────────────────────────────
+    if !cli.no_session {
+        if cwd.join(".cleave-prompt.md").exists() {
+            // Cleave child: save to worktree-local file
+            let session_path = cwd.join(".cleave-session.json");
+            if let Err(e) = conversation.save_session(&session_path) {
+                tracing::debug!("Cleave session save failed (non-fatal): {e}");
+            }
+        } else {
+            // Standalone agent: save to ~/.pi/agent/sessions/
+            match session::save_session(&conversation, &cwd) {
+                Ok(path) => tracing::info!(path = %path.display(), "Session saved"),
+                Err(e) => tracing::debug!("Session save failed (non-fatal): {e}"),
+            }
         }
     }
 
