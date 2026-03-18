@@ -271,7 +271,39 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     // ─── Set up tools ───────────────────────────────────────────────────
     let core_tools = CoreTools::new(cwd.clone());
-    let tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
+    let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
+
+    // ─── Set up memory ──────────────────────────────────────────────────
+    // Derive mind name from the project directory name
+    let mind = cwd.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("default")
+        .to_string();
+
+    // Memory DB: ~/.pi/memory/<mind>.db (matches TS factstore location)
+    let memory_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(".pi")
+        .join("memory");
+    let _ = std::fs::create_dir_all(&memory_dir);
+    let db_path = memory_dir.join(format!("{mind}.db"));
+
+    match omegon_memory::SqliteBackend::open(&db_path) {
+        Ok(backend) => {
+            tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
+            let provider = omegon_memory::MemoryProvider::new(
+                backend,
+                omegon_memory::MarkdownRenderer,
+                mind,
+            );
+            tools.push(Box::new(provider));
+        }
+        Err(e) => {
+            tracing::warn!("memory backend failed to open (non-fatal): {e}");
+            // Continue without memory — core tools still work
+        }
+    }
 
     // ─── Build system prompt ────────────────────────────────────────────
     let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();

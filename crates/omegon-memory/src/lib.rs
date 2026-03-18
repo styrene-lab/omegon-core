@@ -26,6 +26,7 @@ pub mod backend;
 pub mod util;
 pub mod inmemory;
 pub mod sqlite;
+pub mod renderer;
 pub mod provider;
 
 #[cfg(test)]
@@ -35,6 +36,7 @@ mod tests;
 pub use backend::{MemoryBackend, ContextRenderer, MemoryError};
 pub use inmemory::InMemoryBackend;
 pub use sqlite::SqliteBackend;
+pub use renderer::MarkdownRenderer;
 pub use provider::MemoryProvider;
 pub use types::*;
 pub use decay::{compute_confidence, DecayProfile};
