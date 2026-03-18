@@ -70,6 +70,7 @@ pub async fn run(
     let mut stuck_detector = StuckDetector::new();
     let session_start = Instant::now();
     let mut turn: u32 = 0;
+    let mut commit_nudged = false;
 
     loop {
         if cancel.is_cancelled() {
@@ -135,6 +136,20 @@ pub async fn run(
         // Extract tool calls
         let tool_calls = assistant_msg.tool_calls();
         if tool_calls.is_empty() {
+            // Check if the agent skipped committing.
+            // If the conversation has edit/write calls but hasn't been nudged yet,
+            // give it one more turn to commit.
+            if !commit_nudged && has_mutations(conversation) && turn < config.max_turns {
+                commit_nudged = true;
+                tracing::info!("Agent stopped without committing — nudging");
+                conversation.push_user(
+                    "[System: You made file changes but did not run `git add` and `git commit`. \
+                     Please commit your work now with a descriptive message, then summarize what you did.]"
+                        .to_string(),
+                );
+                let _ = events.send(AgentEvent::TurnEnd { turn });
+                continue; // give it one more turn to commit
+            }
             let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
         }
@@ -458,6 +473,13 @@ async fn dispatch_tools(
 fn is_readonly_tool(name: &str) -> bool {
     matches!(name, "read" | "understand")
 }
+
+/// Check if the conversation contains any file mutations (edit or write calls).
+fn has_mutations(conversation: &ConversationState) -> bool {
+    conversation.intent.files_modified.len() > 0
+}
+
+
 
 // ─── Stuck detection ────────────────────────────────────────────────────────
 
