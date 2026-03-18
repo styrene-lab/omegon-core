@@ -15,6 +15,7 @@ pub mod dashboard;
 pub mod editor;
 pub mod footer;
 pub mod selector;
+pub mod spinner;
 pub mod theme;
 pub mod widgets;
 
@@ -84,6 +85,8 @@ pub struct App {
     selector_kind: Option<SelectorKind>,
     /// Last tool name from ToolStart — used to track memory mutations.
     last_tool_name: Option<String>,
+    /// Current spinner verb — rotates on each tool call.
+    working_verb: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +136,7 @@ impl App {
             selector: None,
             selector_kind: None,
             last_tool_name: None,
+            working_verb: "Working",
         }
     }
 
@@ -343,7 +347,13 @@ impl App {
                 match_text.to_string(),
             )
         } else if self.agent_active {
-            (Span::styled(" ⟳ ", t.style_warning()), String::new())
+            (
+                Span::styled(
+                    format!(" ⟳ {}... ", self.working_verb),
+                    t.style_warning(),
+                ),
+                String::new(),
+            )
         } else {
             (Span::styled(" ▸ ", t.style_accent()), String::new())
         };
@@ -644,6 +654,7 @@ impl App {
             AgentEvent::TurnStart { turn } => {
                 self.agent_active = true;
                 self.turn = turn;
+                self.working_verb = spinner::next_verb();
             }
             AgentEvent::TurnEnd { turn } => {
                 self.turn = turn;
@@ -664,6 +675,7 @@ impl App {
                 self.conversation.append_thinking(&text);
             }
             AgentEvent::ToolStart { id, name, args } => {
+                self.working_verb = spinner::next_verb();
                 let args_summary = crate::r#loop::summarize_tool_args(&name, &args);
                 // Full args for detailed view
                 let detail_args = match name.as_str() {
@@ -768,6 +780,12 @@ pub async fn run_tui(
         let _ = io::stdout().execute(LeaveAlternateScreen);
         original_hook(info);
     }));
+
+    // Seed spinner from process start time for variety across sessions
+    spinner::seed(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as usize)
+        .unwrap_or(42));
 
     let mut app = App::new(settings);
     app.footer_data.cwd = config.cwd;
