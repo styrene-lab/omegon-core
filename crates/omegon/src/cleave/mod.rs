@@ -5,6 +5,7 @@
 //! tracks state, and merges results.
 
 mod plan;
+pub mod progress;
 pub mod state;
 mod waves;
 mod worktree;

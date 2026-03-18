@@ -4,6 +4,7 @@
 //! tracks state, and merges results.
 
 use super::plan::CleavePlan;
+use super::progress::{self, ProgressEvent, ChildProgressStatus};
 use super::state::{ChildStatus, CleaveState};
 use super::waves::compute_waves;
 use super::worktree;
@@ -91,6 +92,10 @@ pub async fn run_cleave(
 
         let wave_labels: Vec<&str> = wave.iter().map(|&i| plan.children[i].label.as_str()).collect();
         tracing::info!(wave = wave_idx, children = ?wave_labels, "dispatching wave");
+        progress::emit_progress(&ProgressEvent::WaveStart {
+            wave: wave_idx,
+            children: wave_labels.iter().map(|s| s.to_string()).collect(),
+        });
 
         // ── Prepare children (worktrees, task files, status) ────────────
         struct ChildDispatchInfo {
@@ -197,14 +202,29 @@ pub async fn run_cleave(
                     );
 
                     // Auto-commit any uncommitted changes in the worktree.
-                    // Children may create files but forget to git commit.
-                    if let Some(wt) = &state.children[child_idx].worktree_path {
+                    let auto_committed = if let Some(wt) = &state.children[child_idx].worktree_path {
                         auto_commit_worktree(
                             Path::new(wt),
                             &state.children[child_idx].label,
                             &state.children[child_idx].scope,
-                        );
+                        )
+                    } else {
+                        0
+                    };
+
+                    if auto_committed > 0 {
+                        progress::emit_progress(&ProgressEvent::AutoCommit {
+                            child: state.children[child_idx].label.clone(),
+                            files: auto_committed,
+                        });
                     }
+
+                    progress::emit_progress(&ProgressEvent::ChildStatus {
+                        child: state.children[child_idx].label.clone(),
+                        status: ChildProgressStatus::Completed,
+                        duration_secs: Some(output.duration_secs),
+                        error: None,
+                    });
                 }
                 Err(e) => {
                     state.children[child_idx].status = ChildStatus::Failed;
@@ -213,6 +233,12 @@ pub async fn run_cleave(
                         child = %state.children[child_idx].label,
                         "child failed: {e}"
                     );
+                    progress::emit_progress(&ProgressEvent::ChildStatus {
+                        child: state.children[child_idx].label.clone(),
+                        status: ChildProgressStatus::Failed,
+                        duration_secs: Some(started.elapsed().as_secs_f64()),
+                        error: Some(format!("{e}")),
+                    });
                 }
             }
         }
@@ -221,6 +247,7 @@ pub async fn run_cleave(
 
     // ── Merge phase ─────────────────────────────────────────────────────
     tracing::info!("merge phase starting");
+    progress::emit_progress(&ProgressEvent::MergeStart);
     let mut merge_results = Vec::new();
 
     for child in &mut state.children {
@@ -244,22 +271,34 @@ pub async fn run_cleave(
                 tracing::info!(child = %child.label, "merged successfully");
                 let _ = worktree::delete_branch(repo_path, branch);
                 merge_results.push((child.label.clone(), MergeOutcome::Success));
+                progress::emit_progress(&ProgressEvent::MergeResult {
+                    child: child.label.clone(), success: true, detail: None,
+                });
             }
             Ok(worktree::MergeResult::Conflict(detail)) => {
                 tracing::warn!(child = %child.label, "merge conflict");
-                merge_results.push((child.label.clone(), MergeOutcome::Conflict(detail)));
+                merge_results.push((child.label.clone(), MergeOutcome::Conflict(detail.clone())));
+                progress::emit_progress(&ProgressEvent::MergeResult {
+                    child: child.label.clone(), success: false, detail: Some(detail),
+                });
             }
             Ok(worktree::MergeResult::Failed(detail)) => {
                 tracing::error!(child = %child.label, detail = %detail, "merge failed — demoting child to failed");
                 child.status = ChildStatus::Failed;
                 child.error = Some(detail.clone());
                 let _ = worktree::delete_branch(repo_path, branch);
-                merge_results.push((child.label.clone(), MergeOutcome::Failed(detail)));
+                merge_results.push((child.label.clone(), MergeOutcome::Failed(detail.clone())));
+                progress::emit_progress(&ProgressEvent::MergeResult {
+                    child: child.label.clone(), success: false, detail: Some(detail),
+                });
             }
             Err(e) => {
                 child.status = ChildStatus::Failed;
                 child.error = Some(format!("{e}"));
                 merge_results.push((child.label.clone(), MergeOutcome::Failed(format!("{e}"))));
+                progress::emit_progress(&ProgressEvent::MergeResult {
+                    child: child.label.clone(), success: false, detail: Some(format!("{e}")),
+                });
             }
         }
     }
@@ -273,6 +312,14 @@ pub async fn run_cleave(
 
     let duration_secs = started.elapsed().as_secs_f64();
     state.save(&state_path)?;
+
+    let completed = state.children.iter().filter(|c| c.status == ChildStatus::Completed).count();
+    let failed = state.children.iter().filter(|c| c.status == ChildStatus::Failed).count();
+    progress::emit_progress(&ProgressEvent::Done {
+        completed,
+        failed,
+        duration_secs,
+    });
 
     Ok(CleaveResult {
         state,
@@ -338,6 +385,16 @@ async fn dispatch_child(
 
     let pid = child.id().unwrap_or(0);
     tracing::info!(child = %label, pid, "child spawned");
+    progress::emit_progress(&ProgressEvent::ChildSpawned {
+        child: label.to_string(),
+        pid,
+    });
+    progress::emit_progress(&ProgressEvent::ChildStatus {
+        child: label.to_string(),
+        status: ChildProgressStatus::Running,
+        duration_secs: None,
+        error: None,
+    });
 
     let stderr = child.stderr.take().unwrap();
     let mut reader = BufReader::new(stderr).lines();
@@ -346,6 +403,7 @@ async fn dispatch_child(
     let idle_timeout = tokio::time::Duration::from_secs(idle_timeout_secs);
 
     let mut last_activity = Instant::now();
+    let mut last_activity_event = Instant::now() - std::time::Duration::from_secs(2); // allow first event immediately
 
     tracing::info!(child = %label, wall_timeout_secs = timeout_secs, idle_timeout_secs, "entering IO loop");
 
@@ -365,6 +423,15 @@ async fn dispatch_child(
                     Ok(Ok(Some(line))) => {
                         last_activity = Instant::now();
                         line_count += 1;
+
+                        // Emit activity events (throttled to 1/sec)
+                        if last_activity.duration_since(last_activity_event).as_secs() >= 1 {
+                            if let Some(activity) = progress::parse_child_activity(label, &line) {
+                                progress::emit_progress(&activity);
+                                last_activity_event = Instant::now();
+                            }
+                        }
+
                         if line_count <= 5 || line_count % 50 == 0 {
                             tracing::info!(child = %label, line_count, "stderr: {line}");
                         } else {
@@ -424,9 +491,10 @@ async fn dispatch_child(
 /// This catches the case where the child agent creates files but doesn't run `git commit`.
 /// Only stages files matching the child's declared `scope` prefixes (plus the task file).
 /// Files outside scope are left unstaged to avoid polluting the merge.
-fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) {
+/// Returns the number of files auto-committed (0 if nothing was committed).
+fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) -> usize {
     if !wt_path.exists() {
-        return;
+        return 0;
     }
 
     // Check for uncommitted changes (excluding .cleave-prompt.md which is always present)
@@ -449,12 +517,12 @@ fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) {
                 })
                 .collect()
         }
-        Err(_) => return,
+        Err(_) => return 0,
     };
 
     if changed_files.is_empty() {
         tracing::info!(child = %label, "no real changes to auto-commit (only .cleave-prompt.md)");
-        return;
+        return 0;
     }
 
     // Filter to files matching the child's scope (if scope is non-empty).
@@ -478,10 +546,11 @@ fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) {
 
     if in_scope.is_empty() {
         tracing::info!(child = %label, "no in-scope changes to auto-commit");
-        return;
+        return 0;
     }
 
-    tracing::info!(child = %label, files = in_scope.len(), "auto-committing uncommitted changes in worktree");
+    let file_count = in_scope.len();
+    tracing::info!(child = %label, files = file_count, "auto-committing uncommitted changes in worktree");
 
     // Stage only in-scope files
     let mut add_args = vec!["add", "--"];
@@ -502,13 +571,16 @@ fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) {
     match result {
         Ok(out) if out.status.success() => {
             tracing::info!(child = %label, "auto-commit succeeded");
+            file_count
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             tracing::warn!(child = %label, "auto-commit failed: {}", stderr.trim());
+            0
         }
         Err(e) => {
             tracing::warn!(child = %label, "auto-commit error: {e}");
+            0
         }
     }
 }
