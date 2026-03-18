@@ -202,19 +202,29 @@ impl ConversationView {
         for msg in &self.messages {
             match msg {
                 Message::User(text) => {
+                    // Thin separator before user messages (except first)
+                    if !lines.is_empty() {
+                        lines.push(Line::from(""));
+                    }
                     lines.push(Line::from(vec![
-                        Span::styled("▸ ", t.style_accent()),
+                        Span::styled("▸ ", t.style_accent_bold()),
                         Span::styled(text.clone(), t.style_user_input()),
                     ]));
                     lines.push(Line::from(""));
                 }
 
                 Message::System(text) => {
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(t.accent_muted()),
-                        )));
+                    for (i, line) in text.lines().enumerate() {
+                        let style = if i == 0 && line.starts_with('Ω') {
+                            // Welcome header — bold accent
+                            t.style_accent_bold()
+                        } else if line.starts_with("  ▸") || line.starts_with("  /") || line.starts_with("  Ctrl") {
+                            // Structured info lines — dim
+                            Style::default().fg(t.muted())
+                        } else {
+                            Style::default().fg(t.accent_muted())
+                        };
+                        lines.push(Line::from(Span::styled(line.to_string(), style)));
                     }
                     lines.push(Line::from(""));
                 }

@@ -277,13 +277,13 @@ impl App {
 
         let area = frame.area();
 
-        // Full-width vertical layout: conversation | footer | editor
-        // No sidebar — footer cards carry telemetry, /dash for expanded view
+        // Full-width vertical layout: conversation | footer | hint | editor
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),    // conversation (all remaining space)
                 Constraint::Length(4), // footer cards
+                Constraint::Length(1), // hint line
                 Constraint::Length(3), // editor
             ])
             .split(area);
@@ -310,6 +310,24 @@ impl App {
         self.footer_data.tool_calls = self.tool_calls;
         self.footer_data.compactions = self.dashboard.compactions;
         self.footer_data.render(chunks[1], frame, t.as_ref());
+
+        // Hint line between footer and editor
+        {
+            let ctx_mode = self.footer_data.context_mode;
+            let hint_spans = vec![
+                Span::styled("/dash ", Style::default().fg(t.dim())),
+                Span::styled("to expand", Style::default().fg(t.dim())),
+                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
+                Span::styled(format!("{} context {}", ctx_mode.icon(), ctx_mode.as_str()), Style::default().fg(t.dim())),
+                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
+                Span::styled(
+                    format!("{} {}", self.settings().thinking.icon(), self.settings().thinking.as_str()),
+                    Style::default().fg(t.dim()),
+                ),
+            ];
+            let hint = Paragraph::new(Line::from(hint_spans));
+            frame.render_widget(hint, chunks[2]);
+        }
 
         // Editor — shows reverse search prompt when active
         let (editor_title, editor_content) = if let editor::EditorMode::ReverseSearch { ref query, ref match_idx } = *self.editor.mode() {
@@ -343,14 +361,14 @@ impl App {
         let editor_widget = Paragraph::new(display_text)
             .style(t.style_fg())
             .block(editor_block);
-        frame.render_widget(editor_widget, chunks[2]);
+        frame.render_widget(editor_widget, chunks[3]);
 
         // Command palette popup (above editor when typing /)
         if !self.agent_active {
             let matches = self.matching_commands();
             if !matches.is_empty() {
                 let palette_height = matches.len().min(8) as u16 + 2; // +2 for borders
-                let editor_area = chunks[2];
+                let editor_area = chunks[3];
                 let palette_area = Rect {
                     x: editor_area.x,
                     y: editor_area.y.saturating_sub(palette_height),
@@ -377,7 +395,7 @@ impl App {
             }
 
             // Position cursor in editor
-            let editor_area = chunks[2];
+            let editor_area = chunks[3];
             let cursor_x = editor_area.x + 1 + self.editor.cursor_position() as u16;
             let cursor_y = editor_area.y + 1; // +1 for border
             frame.set_cursor_position(Position::new(
@@ -734,10 +752,26 @@ pub async fn run_tui(
     app.dashboard.focused_node = config.initial.focused_node;
     app.dashboard.active_changes = config.initial.active_changes;
 
-    app.conversation.push_system(
-        "Ω Omegon interactive session\n\
-         Type a message and press Enter. /help for commands. Ctrl+C to cancel/quit."
-    );
+    // Build a contextual welcome message
+    {
+        let s = app.settings();
+        let model_short = s.model_short();
+        let project = app.footer_data.cwd.split('/').next_back().unwrap_or("project");
+        let facts = app.footer_data.total_facts;
+        let ctx = s.context_window / 1000;
+
+        let mut welcome = format!("Ω Omegon — {project}");
+        welcome.push_str(&format!("\n  ▸ {model_short}  ·  {ctx}k context"));
+        if facts > 0 {
+            welcome.push_str(&format!("  ·  {facts} facts loaded"));
+        }
+        welcome.push('\n');
+        welcome.push_str("\n  /model  switch provider    /think  reasoning level");
+        welcome.push_str("\n  /context  toggle 200k↔1M   /help   all commands");
+        welcome.push_str("\n  Ctrl+R  search history      Ctrl+C  cancel/quit");
+
+        app.conversation.push_system(&welcome);
+    }
 
     loop {
         // Draw
