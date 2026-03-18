@@ -185,14 +185,14 @@ async fn run_cleave_command(
     let result = cleave::run_cleave(&plan, directive, &repo_path, workspace, &config, cancel).await?;
 
     // Print report
-    println!("\n## Cleave Report: {}", result.state.run_id);
-    println!("**Duration:** {:.0}s", result.duration_secs);
-    println!();
+    eprintln!("\n## Cleave Report: {}", result.state.run_id);
+    eprintln!("**Duration:** {:.0}s", result.duration_secs);
+    eprintln!();
 
     let completed = result.state.children.iter().filter(|c| c.status == cleave::state::ChildStatus::Completed).count();
     let failed = result.state.children.iter().filter(|c| c.status == cleave::state::ChildStatus::Failed).count();
-    println!("**Children:** {} completed, {} failed of {}", completed, failed, result.state.children.len());
-    println!();
+    eprintln!("**Children:** {} completed, {} failed of {}", completed, failed, result.state.children.len());
+    eprintln!();
 
     for child in &result.state.children {
         let icon = match child.status {
@@ -202,25 +202,30 @@ async fn run_cleave_command(
             cleave::state::ChildStatus::Pending => "○",
         };
         let dur = child.duration_secs.map(|d| format!(" ({:.0}s)", d)).unwrap_or_default();
-        println!("  {} **{}**{}: {:?}", icon, child.label, dur, child.status);
+        eprintln!("  {} **{}**{}: {:?}", icon, child.label, dur, child.status);
         if let Some(err) = &child.error {
-            println!("    Error: {}", err);
+            eprintln!("    Error: {}", err);
         }
     }
 
-    println!("\n### Merge Results");
+    eprintln!("\n### Merge Results");
     for (label, outcome) in &result.merge_results {
         match outcome {
-            cleave::orchestrator::MergeOutcome::Success => println!("  ✓ {} merged", label),
-            cleave::orchestrator::MergeOutcome::Conflict(d) => println!("  ✗ {} CONFLICT: {}", label, d.lines().next().unwrap_or("")),
-            cleave::orchestrator::MergeOutcome::Failed(d) => println!("  ✗ {} FAILED: {}", label, d.lines().next().unwrap_or("")),
-            cleave::orchestrator::MergeOutcome::Skipped(reason) => println!("  ○ {} skipped ({})", label, reason),
+            cleave::orchestrator::MergeOutcome::Success => eprintln!("  ✓ {} merged", label),
+            cleave::orchestrator::MergeOutcome::Conflict(d) => eprintln!("  ✗ {} CONFLICT: {}", label, d.lines().next().unwrap_or("")),
+            cleave::orchestrator::MergeOutcome::Failed(d) => eprintln!("  ✗ {} FAILED: {}", label, d.lines().next().unwrap_or("")),
+            cleave::orchestrator::MergeOutcome::Skipped(reason) => eprintln!("  ○ {} skipped ({})", label, reason),
         }
     }
 
-    // Post-merge guardrails
-    if let Some(ref report) = result.guardrail_report {
-        println!("\n### Post-Merge Guardrails\n{report}");
+    // Post-merge guardrails (CLI only — TS wrapper runs its own)
+    let all_merged = result.merge_results.iter().all(|(_, o)| matches!(o, cleave::orchestrator::MergeOutcome::Success));
+    if all_merged && failed == 0 {
+        let checks = cleave::guardrails::discover_guardrails(&repo_path);
+        if !checks.is_empty() {
+            let report = cleave::guardrails::run_guardrails(&repo_path, &checks);
+            eprintln!("\n### Post-Merge Guardrails\n{report}");
+        }
     }
 
     // Exit with error if any children failed
@@ -228,6 +233,42 @@ async fn run_cleave_command(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Find the project root by walking up from cwd looking for .git (directory, not file).
+/// For cleave worktrees (.git is a file), follows the gitdir to the real repo.
+/// Falls back to cwd if no .git found.
+fn find_project_root(cwd: &std::path::Path) -> std::path::PathBuf {
+    let mut dir = cwd.to_path_buf();
+    loop {
+        let git_path = dir.join(".git");
+        if git_path.is_dir() {
+            return dir;
+        }
+        if git_path.is_file() {
+            // Worktree: .git file contains "gitdir: /main/repo/.git/worktrees/name"
+            if let Ok(content) = std::fs::read_to_string(&git_path) {
+                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                    let gitdir = gitdir.trim();
+                    let gitdir_path = if std::path::Path::new(gitdir).is_absolute() {
+                        std::path::PathBuf::from(gitdir)
+                    } else {
+                        dir.join(gitdir)
+                    };
+                    // .git/worktrees/<name> → .git → repo root
+                    if let Some(repo) = gitdir_path.parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.parent())
+                    {
+                        return repo.to_path_buf();
+                    }
+                }
+            }
+            return dir; // fallback
+        }
+        if !dir.pop() { break; }
+    }
+    cwd.to_path_buf()
 }
 
 async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
@@ -279,20 +320,19 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
 
     // ─── Set up memory ──────────────────────────────────────────────────
-    // Derive mind name from the project directory name
+    // Mind name = project directory name (for logging/identification)
     let mind = cwd.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default")
         .to_string();
 
-    // Memory DB: ~/.pi/memory/<mind>.db (matches TS factstore location)
-    let memory_dir = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(".pi")
-        .join("memory");
+    // DB path: <cwd>/.pi/memory/facts.db — matches TS factstore convention.
+    // For cleave children (cwd is a worktree), walk up to the git repo root
+    // to find the project's .pi/memory/ directory.
+    let project_root = find_project_root(&cwd);
+    let memory_dir = project_root.join(".pi").join("memory");
     let _ = std::fs::create_dir_all(&memory_dir);
-    let db_path = memory_dir.join(format!("{mind}.db"));
+    let db_path = memory_dir.join("facts.db");
 
     match omegon_memory::SqliteBackend::open(&db_path) {
         Ok(backend) => {

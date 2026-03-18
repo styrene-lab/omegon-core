@@ -79,6 +79,9 @@ pub fn format_guardrail_section(checks: &[GuardrailCheck]) -> String {
     lines.join("\n")
 }
 
+/// Per-check timeout (seconds). Matches TS guardrails.ts defaults.
+const CHECK_TIMEOUT_SECS: u64 = 60;
+
 /// Run guardrails and return a formatted report.
 /// Used for post-merge verification.
 pub fn run_guardrails(cwd: &Path, checks: &[GuardrailCheck]) -> String {
@@ -86,10 +89,37 @@ pub fn run_guardrails(cwd: &Path, checks: &[GuardrailCheck]) -> String {
     let mut all_passed = true;
 
     for check in checks {
-        let output = std::process::Command::new("bash")
+        let child = std::process::Command::new("bash")
             .args(["-c", &check.cmd])
             .current_dir(cwd)
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+
+        let output = match child {
+            Ok(c) => {
+                // Wait with timeout
+                let start = std::time::Instant::now();
+                let mut child = c;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break child.wait_with_output(),
+                        Ok(None) => {
+                            if start.elapsed().as_secs() > CHECK_TIMEOUT_SECS {
+                                let _ = child.kill();
+                                break Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    format!("timed out after {CHECK_TIMEOUT_SECS}s"),
+                                ));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        Err(e) => break Err(e),
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        };
 
         match output {
             Ok(out) if out.status.success() => {

@@ -36,8 +36,6 @@ pub struct CleaveResult {
     pub state: CleaveState,
     pub merge_results: Vec<(String, MergeOutcome)>,
     pub duration_secs: f64,
-    /// Post-merge guardrail report (if guardrails were discovered and all merges succeeded).
-    pub guardrail_report: Option<String>,
 }
 
 pub enum MergeOutcome {
@@ -326,14 +324,8 @@ pub async fn run_cleave(
     let completed = state.children.iter().filter(|c| c.status == ChildStatus::Completed).count();
     let failed = state.children.iter().filter(|c| c.status == ChildStatus::Failed).count();
 
-    // Run post-merge guardrails if all merges succeeded
-    let all_merged = merge_results.iter().all(|(_, o)| matches!(o, MergeOutcome::Success));
-    let guardrail_report = if all_merged && !guardrail_checks.is_empty() {
-        tracing::info!("running post-merge guardrails");
-        Some(guardrails::run_guardrails(repo_path, &guardrail_checks))
-    } else {
-        None
-    };
+    // Post-merge guardrails are handled by the caller (TS wrapper or CLI).
+    // The orchestrator only discovers guardrails for task file enrichment.
 
     progress::emit_progress(&ProgressEvent::Done {
         completed,
@@ -345,7 +337,6 @@ pub async fn run_cleave(
         state,
         merge_results,
         duration_secs,
-        guardrail_report,
     })
 }
 
@@ -617,8 +608,8 @@ fn build_task_file(
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Sibling info
-    let _sibling_list: String = siblings.iter()
+    // Sibling context
+    let sibling_list: String = siblings.iter()
         .filter(|s| s.label != label)
         .map(|s| format!("- **{}**: {}", s.label, s.description))
         .collect::<Vec<_>>()
@@ -633,6 +624,21 @@ fn build_task_file(
         "**Depends on:** none (independent)".to_string()
     } else {
         format!("**Depends on:** {}", depends_on.join(", "))
+    };
+
+    let sibling_section = if sibling_list.is_empty() {
+        String::new()
+    } else {
+        format!("\n## Siblings\n\n{sibling_list}\n")
+    };
+
+    // Language-aware test convention
+    let test_convention = if scope.iter().any(|s| s.ends_with(".rs") || s.contains("crates/")) {
+        "Write tests as #[test] functions in the same file or a tests submodule"
+    } else if scope.iter().any(|s| s.ends_with(".py") || s.contains("python")) {
+        "Write tests using pytest in co-located test_*.py files"
+    } else {
+        "Write tests for new functions and changed behavior — co-locate as *.test.ts"
     };
 
     format!(
@@ -657,11 +663,12 @@ siblings: [{sibling_refs}]
 {scope_list}
 
 {dep_note}
+{sibling_section}
 {guardrail_section}
 ## Contract
 
 1. Only work on files within your scope
-2. Write tests for new functions and changed behavior — co-locate as *.test.ts
+2. {test_convention}
 3. Update the Result section below when done
 4. Commit your work with clear messages — do not push
 5. If the task is too complex, set status to NEEDS_DECOMPOSITION
@@ -719,6 +726,68 @@ mod tests {
         assert_eq!(config.timeout_secs, 900);
     }
 }
+
+    #[test]
+    fn build_task_file_includes_all_sections() {
+        let siblings = vec![
+            crate::cleave::state::ChildState {
+                child_id: 0, label: "alpha".into(), description: "Do alpha work".into(),
+                scope: vec!["src/".into()], depends_on: vec![],
+                status: crate::cleave::state::ChildStatus::Pending,
+                error: None, branch: Some("cleave/0-alpha".into()),
+                worktree_path: None, backend: "native".into(),
+                execute_model: None, duration_secs: None,
+            },
+            crate::cleave::state::ChildState {
+                child_id: 1, label: "beta".into(), description: "Do beta work".into(),
+                scope: vec!["tests/".into()], depends_on: vec!["alpha".into()],
+                status: crate::cleave::state::ChildStatus::Pending,
+                error: None, branch: Some("cleave/1-beta".into()),
+                worktree_path: None, backend: "native".into(),
+                execute_model: None, duration_secs: None,
+            },
+        ];
+        let guardrails = "## Project Guardrails\n\n1. **typecheck**: `tsc`\n";
+
+        let task = build_task_file(1, "beta", "Do beta work", &["tests/".into()], "Fix bugs", &siblings, guardrails);
+
+        // Frontmatter
+        assert!(task.contains("task_id: 1"), "missing task_id");
+        assert!(task.contains("label: beta"), "missing label");
+        assert!(task.contains("0:alpha"), "missing sibling ref");
+
+        // Content
+        assert!(task.contains("## Mission"), "missing Mission");
+        assert!(task.contains("Do beta work"), "missing description");
+        assert!(task.contains("- `tests/`"), "missing scope");
+        assert!(task.contains("**Depends on:** alpha"), "missing dependency");
+
+        // Siblings section
+        assert!(task.contains("## Siblings"), "missing siblings section");
+        assert!(task.contains("**alpha**: Do alpha work"), "missing sibling detail");
+
+        // Guardrails
+        assert!(task.contains("## Project Guardrails"), "missing guardrails");
+        assert!(task.contains("typecheck"), "missing guardrail check");
+
+        // Contract + Result
+        assert!(task.contains("## Contract"), "missing contract");
+        assert!(task.contains("## Result"), "missing result");
+        assert!(task.contains("**Status:** PENDING"), "missing pending status");
+    }
+
+    #[test]
+    fn build_task_file_rust_scope_gets_rust_test_convention() {
+        let siblings = vec![crate::cleave::state::ChildState {
+            child_id: 0, label: "rust-child".into(), description: "Fix Rust code".into(),
+            scope: vec!["crates/omegon/".into()], depends_on: vec![],
+            status: crate::cleave::state::ChildStatus::Pending,
+            error: None, branch: None, worktree_path: None,
+            backend: "native".into(), execute_model: None, duration_secs: None,
+        }];
+        let task = build_task_file(0, "rust-child", "Fix Rust code", &["crates/omegon/".into()], "Fix", &siblings, "");
+        assert!(task.contains("#[test]"), "Rust scope should get #[test] convention, got: {}", task.lines().find(|l| l.contains("test")).unwrap_or("none"));
+    }
 
 fn nanoid(len: usize) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
