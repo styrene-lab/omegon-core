@@ -82,6 +82,8 @@ pub struct App {
     selector: Option<selector::Selector>,
     /// What the selector is for — determines what happens on confirm.
     selector_kind: Option<SelectorKind>,
+    /// Last tool name from ToolStart — used to track memory mutations.
+    last_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +120,7 @@ impl App {
             session_start: std::time::Instant::now(),
             selector: None,
             selector_kind: None,
+            last_tool_name: None,
         }
     }
 
@@ -259,28 +262,17 @@ impl App {
         self.dashboard.tool_calls = self.tool_calls;
 
         let area = frame.area();
-        let show_dashboard = area.width >= 100;
 
-        // Top-level horizontal split: main area | dashboard
-        let (main_area, dash_area) = if show_dashboard {
-            let h = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(60), Constraint::Length(30)])
-                .split(area);
-            (h[0], Some(h[1]))
-        } else {
-            (area, None)
-        };
-
-        // Vertical split within main area
+        // Full-width vertical layout: conversation | footer | editor
+        // No sidebar — footer cards carry telemetry, /dash for expanded view
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),    // conversation
-                Constraint::Length(4), // footer cards (header + 2 content lines + separator)
+                Constraint::Min(3),    // conversation (all remaining space)
+                Constraint::Length(4), // footer cards
                 Constraint::Length(3), // editor
             ])
-            .split(main_area);
+            .split(area);
 
         // Conversation view
         let t = &self.theme;
@@ -291,11 +283,6 @@ impl App {
             .wrap(Wrap { trim: false })
             .scroll((self.conversation.scroll_offset(), 0));
         frame.render_widget(conv_widget, chunks[0]);
-
-        // Dashboard (right panel)
-        if let Some(dash) = dash_area {
-            self.dashboard.render_themed(dash, frame, t.as_ref());
-        }
 
         // Footer — sync from settings + session state
         {
@@ -309,17 +296,36 @@ impl App {
         self.footer_data.compactions = self.dashboard.compactions;
         self.footer_data.render(chunks[1], frame, t.as_ref());
 
-        // Editor
+        // Editor — shows reverse search prompt when active
+        let (editor_title, editor_content) = if let editor::EditorMode::ReverseSearch { ref query, ref match_idx } = *self.editor.mode() {
+            let match_text = match_idx
+                .and_then(|i| self.history.get(i))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            (
+                Span::styled(
+                    format!(" (reverse-i-search)`{query}': "),
+                    t.style_warning(),
+                ),
+                match_text.to_string(),
+            )
+        } else if self.agent_active {
+            (Span::styled(" ⟳ ", t.style_warning()), String::new())
+        } else {
+            (Span::styled(" ▸ ", t.style_accent()), String::new())
+        };
+
         let editor_block = Block::default()
             .borders(Borders::TOP)
             .border_style(t.style_border_dim())
-            .title(if self.agent_active {
-                Span::styled(" ⟳ ", t.style_warning())
-            } else {
-                Span::styled(" ▸ ", t.style_accent())
-            });
-        let editor_text = self.editor.render_text();
-        let editor_widget = Paragraph::new(editor_text)
+            .title(editor_title);
+
+        let display_text = if editor_content.is_empty() {
+            self.editor.render_text().to_string()
+        } else {
+            editor_content
+        };
+        let editor_widget = Paragraph::new(display_text)
             .style(t.style_fg())
             .block(editor_block);
         frame.render_widget(editor_widget, chunks[2]);
@@ -552,9 +558,17 @@ impl App {
                 self.agent_active = true;
                 self.turn = turn;
             }
-            AgentEvent::TurnEnd { .. } => {
-                // Don't set agent_active=false here — wait for AgentEnd
-                // (multiple turns happen in sequence)
+            AgentEvent::TurnEnd { turn } => {
+                self.turn = turn;
+                // Estimate context usage from turn count + tool calls
+                // (rough heuristic: ~2k tokens per turn average)
+                let est_tokens = (turn as usize) * 2000 + (self.tool_calls as usize) * 500;
+                let ctx_window = self.footer_data.context_window;
+                if ctx_window > 0 {
+                    self.footer_data.estimated_tokens = est_tokens;
+                    self.footer_data.context_percent =
+                        (est_tokens as f32 / ctx_window as f32 * 100.0).min(100.0);
+                }
             }
             AgentEvent::MessageChunk { text } => {
                 self.conversation.append_streaming(&text);
@@ -563,10 +577,10 @@ impl App {
                 self.conversation.append_thinking(&text);
             }
             AgentEvent::ToolStart { id, name, args } => {
-                // Extract a short args summary for display
                 let args_summary = crate::r#loop::summarize_tool_args(&name, &args);
                 self.conversation.push_tool_start(&id, &name, args_summary.as_deref());
                 self.tool_calls += 1;
+                self.last_tool_name = Some(name);
             }
             AgentEvent::ToolEnd { id, result, is_error } => {
                 let summary = result.content.first().and_then(|c| match c {
@@ -574,6 +588,16 @@ impl App {
                     _ => None,
                 });
                 self.conversation.push_tool_end(&id, is_error, summary);
+
+                // Dynamic footer: memory tools update fact count
+                if let Some(ref name) = self.last_tool_name {
+                    if name == "memory_store" || name == "memory_supersede" {
+                        self.footer_data.total_facts += 1;
+                    } else if name == "memory_archive" {
+                        self.footer_data.total_facts = self.footer_data.total_facts.saturating_sub(1);
+                    }
+                }
+                self.last_tool_name = None;
             }
             AgentEvent::AgentEnd => {
                 self.agent_active = false;
@@ -690,9 +714,38 @@ pub async fn run_tui(
                             app.selector = None;
                             app.selector_kind = None;
                         }
-                        _ => {} // ignore other keys when selector is open
+                        _ => {}
                     }
-                    continue; // skip normal key handling
+                    continue;
+                }
+
+                // ── Reverse search mode intercepts keys ─────────
+                if matches!(app.editor.mode(), editor::EditorMode::ReverseSearch { .. }) {
+                    match key.code {
+                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Ctrl+R again: search further back
+                            app.editor.search_prev(&app.history);
+                        }
+                        KeyCode::Char(c) => {
+                            app.editor.insert(c);
+                            app.editor.search_update(&app.history);
+                        }
+                        KeyCode::Backspace => {
+                            app.editor.backspace();
+                            app.editor.search_update(&app.history);
+                        }
+                        KeyCode::Enter => {
+                            app.editor.accept_search(&app.history);
+                        }
+                        KeyCode::Esc => {
+                            app.editor.cancel_search();
+                        }
+                        _ => {
+                            // Any other key: accept search + process key normally
+                            app.editor.accept_search(&app.history);
+                        }
+                    }
+                    continue;
                 }
 
                 match (key.code, key.modifiers) {
@@ -705,11 +758,9 @@ pub async fn run_tui(
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         if app.agent_active {
-                            // Single Ctrl+C: interrupt
                             app.interrupt();
                             app.conversation.push_system("⎋ Interrupted (Ctrl+C)");
                         } else {
-                            // Double Ctrl+C within 1s: quit
                             let now = std::time::Instant::now();
                             if let Some(last) = app.last_ctrl_c {
                                 if now.duration_since(last).as_millis() < 1000 {
@@ -725,14 +776,54 @@ pub async fn run_tui(
                             }
                         }
                     }
+
+                    // ── Editor: word/line operations (idle only) ────
+                    (KeyCode::Char('w'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.delete_word_backward();
+                    }
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.clear_line();
+                    }
+                    (KeyCode::Char('k'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.kill_to_end();
+                    }
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.yank();
+                    }
+                    (KeyCode::Char('a'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.move_home();
+                    }
+                    (KeyCode::Char('e'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.move_end();
+                    }
+                    (KeyCode::Char('r'), KeyModifiers::CONTROL) if !app.agent_active => {
+                        app.editor.start_reverse_search();
+                    }
+
+                    // Meta (Alt) key combos for word operations
+                    (KeyCode::Backspace, KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.delete_word_backward();
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.delete_word_forward();
+                    }
+                    (KeyCode::Char('b'), KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.move_word_backward();
+                    }
+                    (KeyCode::Char('f'), KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.move_word_forward();
+                    }
+
+                    // Tab completion
                     (KeyCode::Tab, _) if !app.agent_active => {
-                        // Tab completion for slash commands
                         let matches = app.matching_commands();
                         if matches.len() == 1 {
                             let cmd = format!("/{}", matches[0].0);
                             app.editor.set_text(&cmd);
                         }
                     }
+
+                    // Submit
                     (KeyCode::Enter, _) if !app.agent_active => {
                         let text = app.editor.take_text();
                         if !text.is_empty() {
@@ -750,11 +841,19 @@ pub async fn run_tui(
                             }
                         }
                     }
+
+                    // Basic editing
                     (KeyCode::Char(c), _) if !app.agent_active => {
                         app.editor.insert(c);
                     }
                     (KeyCode::Backspace, _) if !app.agent_active => {
                         app.editor.backspace();
+                    }
+                    (KeyCode::Left, KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.move_word_backward();
+                    }
+                    (KeyCode::Right, KeyModifiers::ALT) if !app.agent_active => {
+                        app.editor.move_word_forward();
                     }
                     (KeyCode::Left, _) if !app.agent_active => {
                         app.editor.move_left();
@@ -768,16 +867,12 @@ pub async fn run_tui(
                     (KeyCode::End, _) if !app.agent_active => {
                         app.editor.move_end();
                     }
-                    (KeyCode::Up, _) if !app.agent_active => {
-                        app.history_up();
-                    }
-                    (KeyCode::Down, _) if !app.agent_active => {
-                        app.history_down();
-                    }
-                    (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, _) if app.agent_active => {
+
+                    // ── Scrolling ────────────────────────────────
+                    (KeyCode::Up, KeyModifiers::SHIFT) => {
                         app.conversation.scroll_up(3);
                     }
-                    (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, _) if app.agent_active => {
+                    (KeyCode::Down, KeyModifiers::SHIFT) => {
                         app.conversation.scroll_down(3);
                     }
                     (KeyCode::PageUp, _) => {
@@ -785,6 +880,18 @@ pub async fn run_tui(
                     }
                     (KeyCode::PageDown, _) => {
                         app.conversation.scroll_down(20);
+                    }
+                    (KeyCode::Up, _) if app.agent_active => {
+                        app.conversation.scroll_up(3);
+                    }
+                    (KeyCode::Down, _) if app.agent_active => {
+                        app.conversation.scroll_down(3);
+                    }
+                    (KeyCode::Up, _) if !app.agent_active => {
+                        app.history_up();
+                    }
+                    (KeyCode::Down, _) if !app.agent_active => {
+                        app.history_down();
                     }
                     _ => {}
                 }

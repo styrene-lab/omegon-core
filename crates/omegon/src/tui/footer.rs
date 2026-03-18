@@ -146,16 +146,20 @@ impl FooterData {
         lines.push(widgets::section_divider("models", inner_w, t));
 
         let model_short = short_model(&self.model_id);
-        let auth_type = if self.is_oauth { "subscription" } else { "api-key" };
+        let source = if self.model_provider == "local" { "local" } else { "cloud" };
+        let source_color = if source == "local" { t.accent() } else { t.muted() };
         lines.push(Line::from(vec![
             Span::styled("  Driver ", Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
             Span::styled(model_short.to_string(), Style::default().fg(t.muted())),
             Span::styled(" · ", Style::default().fg(t.dim())),
-            Span::styled("native", Style::default().fg(t.success())),
+            Span::styled(source.to_string(), Style::default().fg(source_color)),
+            Span::styled(" · ", Style::default().fg(t.dim())),
+            Span::styled("active", Style::default().fg(t.success())),
         ]));
 
+        let auth_type = if self.is_oauth { "subscription" } else { "api-key" };
         lines.push(Line::from(vec![
-            Span::styled("  Auth ", Style::default().fg(t.muted())),
+            Span::styled("  Auth ", Style::default().fg(t.dim())),
             Span::styled(auth_type, Style::default().fg(t.muted())),
         ]));
 
@@ -222,6 +226,15 @@ impl FooterData {
 
         let widget = Paragraph::new(lines);
         frame.render_widget(widget, area);
+    }
+
+    /// Render the `/dash` hint line below the footer cards.
+    pub fn render_hint(area: Rect, frame: &mut Frame, t: &dyn Theme) {
+        let hint = Line::from(Span::styled(
+            "/dash to expand  ·  /dashboard modal",
+            Style::default().fg(t.dim()),
+        ));
+        frame.render_widget(Paragraph::new(hint), area);
     }
 }
 

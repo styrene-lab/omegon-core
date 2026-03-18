@@ -141,12 +141,24 @@ impl ConversationView {
                 *c = true;
                 *e = is_error;
                 *r = result_text.and_then(|text| {
+                    // Extract a meaningful first non-empty line as preview
                     let line = text.lines()
-                        .find(|l| !l.trim().is_empty())
+                        .find(|l| {
+                            let t = l.trim();
+                            !t.is_empty()
+                                && !t.starts_with("```")
+                                && !t.starts_with("---")
+                        })
                         .unwrap_or("").trim();
                     if line.is_empty() { None }
-                    else if line.len() > 120 { Some(format!("{}…", &line[..119])) }
-                    else { Some(line.to_string()) }
+                    else {
+                        let display = if line.len() > 100 {
+                            format!("{}…", &line[..99])
+                        } else {
+                            line.to_string()
+                        };
+                        Some(display)
+                    }
                 });
                 break;
             }
