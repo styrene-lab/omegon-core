@@ -557,8 +557,13 @@ impl App {
                 self.conversation.push_tool_start(&id, &name);
                 self.tool_calls += 1;
             }
-            AgentEvent::ToolEnd { id, is_error, .. } => {
-                self.conversation.push_tool_end(&id, is_error);
+            AgentEvent::ToolEnd { id, result, is_error } => {
+                // Extract first text content block for display
+                let summary = result.content.first().and_then(|c| match c {
+                    omegon_traits::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                });
+                self.conversation.push_tool_end(&id, is_error, summary);
             }
             AgentEvent::AgentEnd => {
                 self.agent_active = false;

@@ -475,6 +475,22 @@ async fn parse_anthropic_stream(
                 block_type = None;
             }
 
+            // message_delta: stop_reason + final usage (not critical for functionality)
+            "message_delta" => {
+                tracing::trace!("message_delta: stop_reason/usage");
+            }
+
+            // Events from newer SDK versions — gracefully handled
+            "citation" | "citations_delta" => {
+                tracing::trace!(event_type = etype, "citation event");
+            }
+            "signature" | "signature_delta" => {
+                tracing::trace!(event_type = etype, "signature event");
+            }
+            "server_tool_use" => {
+                tracing::debug!(event_type = etype, "server_tool_use (not yet dispatched)");
+            }
+
             "message_stop" => {
                 tracing::debug!(
                     text_len = full_text.len(),

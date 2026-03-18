@@ -17,12 +17,14 @@ enum Message {
         thinking: String,
         complete: bool,
     },
-    /// Tool call summary.
+    /// Tool call with optional result summary.
     Tool {
         id: String,
         name: String,
         is_error: bool,
         complete: bool,
+        /// First line of the result (truncated for display).
+        result_summary: Option<String>,
     },
 }
 
@@ -90,24 +92,34 @@ impl ConversationView {
             name: name.to_string(),
             is_error: false,
             complete: false,
+            result_summary: None,
         });
         self.scroll = 0;
     }
 
-    pub fn push_tool_end(&mut self, id: &str, is_error: bool) {
-        // Find the matching tool start by id and mark it complete
+    pub fn push_tool_end(&mut self, id: &str, is_error: bool, result_text: Option<&str>) {
         for msg in self.messages.iter_mut().rev() {
             if let Message::Tool {
                 id: tool_id,
                 complete: c,
                 is_error: e,
+                result_summary: r,
                 ..
             } = msg
-                && tool_id == id && !*c {
-                    *c = true;
-                    *e = is_error;
-                    break;
-                }
+                && tool_id == id && !*c
+            {
+                *c = true;
+                *e = is_error;
+                *r = result_text.and_then(|text| {
+                    let line = text.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("").trim();
+                    if line.is_empty() { None }
+                    else if line.len() > 120 { Some(format!("{}…", &line[..119])) }
+                    else { Some(line.to_string()) }
+                });
+                break;
+            }
         }
     }
 
@@ -186,6 +198,7 @@ impl ConversationView {
                     name,
                     is_error,
                     complete,
+                    result_summary,
                     ..
                 } => {
                     let (icon, color) = if *complete {
@@ -197,10 +210,18 @@ impl ConversationView {
                     } else {
                         ("→", t.warning())
                     };
-                    lines.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(format!("{icon} "), Style::default().fg(color)),
                         Span::styled(name.clone(), Style::default().fg(color)),
-                    ]));
+                    ];
+                    // Show result summary after the tool name
+                    if let Some(summary) = result_summary {
+                        spans.push(Span::styled(
+                            format!("  {summary}"),
+                            Style::default().fg(t.dim()),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
                 }
             }
         }
@@ -246,7 +267,7 @@ mod tests {
     fn tool_lifecycle() {
         let mut cv = ConversationView::new();
         cv.push_tool_start("tc1", "read");
-        cv.push_tool_end("tc1", false);
+        cv.push_tool_end("tc1", false, Some("file written"));
         if let Message::Tool {
             complete, is_error, ..
         } = &cv.messages[0]
