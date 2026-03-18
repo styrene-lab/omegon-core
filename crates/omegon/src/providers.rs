@@ -28,28 +28,39 @@ pub fn resolve_api_key_sync(provider: &str) -> Option<(String, bool)> {
     };
     for key in env_keys {
         if let Ok(val) = std::env::var(key)
-            && !val.is_empty() {
-                return Some((val, false));
-            }
+            && !val.is_empty()
+        {
+            tracing::debug!(provider, source = key, "API key resolved from env");
+            return Some((val, false));
+        }
     }
 
     // OAuth token from env
     if provider == "anthropic"
         && let Ok(val) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
-            && !val.is_empty() {
-                return Some((val, true));
-            }
+        && !val.is_empty()
+    {
+        tracing::debug!(provider, "OAuth token resolved from ANTHROPIC_OAUTH_TOKEN env");
+        return Some((val, true));
+    }
 
     // auth.json — only if not expired
-    let creds = crate::auth::read_credentials(provider)?;
-    if creds.cred_type == "oauth" && !creds.is_expired() {
-        return Some((creds.access, true));
+    match crate::auth::read_credentials(provider) {
+        Some(creds) if creds.cred_type == "oauth" && !creds.is_expired() => {
+            tracing::debug!(provider, expires = creds.expires, "OAuth token from auth.json (valid)");
+            return Some((creds.access, true));
+        }
+        Some(creds) if creds.cred_type == "oauth" => {
+            tracing::debug!(provider, expires = creds.expires, "OAuth token from auth.json (EXPIRED — needs refresh)");
+        }
+        Some(creds) => {
+            tracing::debug!(provider, cred_type = %creds.cred_type, "credential from auth.json");
+            return Some((creds.access, false));
+        }
+        None => {
+            tracing::debug!(provider, "no credentials in auth.json");
+        }
     }
-    if creds.cred_type != "oauth" {
-        return Some((creds.access, false));
-    }
-
-    // Expired OAuth — caller should use resolve_with_refresh
     None
 }
 
@@ -115,6 +126,30 @@ pub async fn auto_detect_bridge(model_spec: &str) -> Option<Box<dyn LlmBridge>> 
 }
 
 // ─── SSE Helpers ────────────────────────────────────────────────────────────
+
+/// Map tool names to Claude Code PascalCase canonical names for OAuth.
+fn to_claude_code_name(name: &str) -> String {
+    match name {
+        "bash" => "Bash".into(),
+        "read" => "Read".into(),
+        "write" => "Write".into(),
+        "edit" => "Edit".into(),
+        "web_search" => "WebSearch".into(),
+        _ => name.to_string(),
+    }
+}
+
+/// Map Claude Code PascalCase names back to lowercase for tool dispatch.
+fn from_claude_code_name(name: &str) -> String {
+    match name {
+        "Bash" => "bash".into(),
+        "Read" => "read".into(),
+        "Write" => "write".into(),
+        "Edit" => "edit".into(),
+        "WebSearch" => "web_search".into(),
+        _ => name.to_string(),
+    }
+}
 
 /// Accumulator for streaming tool call arguments.
 struct ToolCallAccum {
@@ -221,12 +256,23 @@ impl AnthropicClient {
         }).collect()
     }
 
-    fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
-        tools.iter().map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.parameters,
-        })).collect()
+    fn build_tools(&self, tools: &[ToolDefinition]) -> Vec<Value> {
+        tools.iter().map(|t| {
+            let name = if self.is_oauth {
+                to_claude_code_name(&t.name)
+            } else {
+                t.name.clone()
+            };
+            json!({
+                "name": name,
+                "description": t.description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": t.parameters.get("properties").cloned().unwrap_or(json!({})),
+                    "required": t.parameters.get("required").cloned().unwrap_or(json!([])),
+                },
+            })
+        }).collect()
     }
 }
 
@@ -245,15 +291,26 @@ impl LlmBridge for AnthropicClient {
             .and_then(|m| m.strip_prefix("anthropic:"))
             .unwrap_or("claude-sonnet-4-20250514");
 
+        // OAuth requires Claude Code identity prefix + array format
+        let system_value = if self.is_oauth {
+            json!([
+                {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+                {"type": "text", "text": system_prompt},
+            ])
+        } else {
+            json!(system_prompt)
+        };
+
         let mut body = json!({
             "model": model,
             "max_tokens": 16384,
-            "system": system_prompt,
+            "system": system_value,
             "messages": Self::build_messages(messages),
             "stream": true,
         });
 
-        let wire_tools = Self::build_tools(tools);
+        let wire_tools = self.build_tools(tools);
+        let tool_count = wire_tools.len();
         if !wire_tools.is_empty() {
             body["tools"] = Value::Array(wire_tools);
         }
@@ -263,6 +320,19 @@ impl LlmBridge for AnthropicClient {
                 "budget_tokens": 10000,
             });
         }
+
+        let msg_count = body["messages"].as_array().map(|a| a.len()).unwrap_or(0);
+        let system_len = system_prompt.len();
+        tracing::debug!(
+            model,
+            is_oauth = self.is_oauth,
+            tool_count,
+            msg_count,
+            system_len,
+            base_url = %self.base_url,
+            "Anthropic streaming request"
+        );
+        tracing::trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "request body");
 
         let response = self.client
             .post(format!("{}/v1/messages", self.base_url))
@@ -276,7 +346,7 @@ impl LlmBridge for AnthropicClient {
                 if self.is_oauth {
                     "claude-code-20250219,oauth-2025-04-20"
                 } else {
-                    "claude-code-20250219"
+                    "interleaved-thinking-2025-05-14"
                 },
             )
             .header("content-type", "application/json")
@@ -286,10 +356,19 @@ impl LlmBridge for AnthropicClient {
 
         if !response.status().is_success() {
             let status = response.status();
+            let headers = format!("{:?}", response.headers());
             let err = response.text().await.unwrap_or_default();
+            tracing::error!(
+                %status,
+                error_body = %err,
+                response_headers = %headers,
+                "Anthropic API error"
+            );
+            tracing::debug!(request_body = %serde_json::to_string(&body).unwrap_or_default(), "failed request body");
             let _ = tx.send(LlmEvent::Error { message: format!("Anthropic {status}: {err}") }).await;
             return Ok(rx);
         }
+        tracing::debug!(status = %response.status(), "Anthropic response OK — starting SSE stream");
 
         tokio::spawn(async move {
             if let Err(e) = parse_anthropic_stream(response, &tx).await {
@@ -309,12 +388,23 @@ async fn parse_anthropic_stream(
     let mut full_text = String::new();
     let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
 
+    tracing::debug!("parsing Anthropic SSE stream");
+    let mut event_count = 0u32;
+
     process_sse(response, |data| {
-        let Ok(event) = serde_json::from_str::<Value>(data) else { return true };
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            tracing::warn!(data, "failed to parse SSE event as JSON");
+            return true;
+        };
         let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        event_count += 1;
+        tracing::trace!(event_type = etype, n = event_count, "SSE event");
 
         match etype {
-            "message_start" => { let _ = tx.try_send(LlmEvent::Start); }
+            "message_start" => {
+                tracing::debug!("message_start received");
+                let _ = tx.try_send(LlmEvent::Start);
+            }
 
             "content_block_start" => {
                 let bt = event["content_block"]["type"].as_str().unwrap_or("");
@@ -324,7 +414,9 @@ async fn parse_anthropic_stream(
                     "thinking" => { let _ = tx.try_send(LlmEvent::ThinkingStart); }
                     "tool_use" => {
                         let id = event["content_block"]["id"].as_str().unwrap_or("").to_string();
-                        let name = event["content_block"]["name"].as_str().unwrap_or("").to_string();
+                        let raw_name = event["content_block"]["name"].as_str().unwrap_or("");
+                        let name = from_claude_code_name(raw_name);
+                        tracing::debug!(tool_id = %id, raw_name, name = %name, "tool_use block started");
                         tool_calls.push(ToolCallAccum { id: id.clone(), name: name.clone(), args_json: String::new() });
                         let _ = tx.try_send(LlmEvent::ToolCallStart);
                     }
@@ -369,6 +461,12 @@ async fn parse_anthropic_stream(
             }
 
             "message_stop" => {
+                tracing::debug!(
+                    text_len = full_text.len(),
+                    tool_calls = tool_calls.len(),
+                    sse_events = event_count,
+                    "message_stop — stream complete"
+                );
                 let tc_vals: Vec<Value> = tool_calls.iter().map(|tc| tc.to_value()).collect();
                 let _ = tx.try_send(LlmEvent::Done {
                     message: json!({"text": full_text, "tool_calls": tc_vals}),

@@ -143,6 +143,15 @@ pub async fn run(
             context.build_system_prompt(conversation.last_user_prompt(), conversation);
         let llm_messages = conversation.build_llm_view();
 
+        tracing::debug!(
+            turn,
+            system_prompt_len = system_prompt.len(),
+            messages = llm_messages.len(),
+            tools = tool_defs.len(),
+            estimated_tokens = conversation.estimate_tokens(),
+            "LLM context assembled"
+        );
+
         // ─── Stream LLM response with retry ─────────────────────────
         let assistant_msg = stream_with_retry(
             bridge,

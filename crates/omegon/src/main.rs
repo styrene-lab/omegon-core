@@ -10,6 +10,8 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 mod auth;
@@ -77,6 +79,14 @@ struct Cli {
     /// Disable session auto-save on exit.
     #[arg(long)]
     no_session: bool,
+
+    /// Log level: error, warn, info, debug, trace. Overrides RUST_LOG.
+    #[arg(long, default_value = "info")]
+    log_level: String,
+
+    /// Write logs to a file in addition to stderr.
+    #[arg(long)]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -123,15 +133,45 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+
+    // ─── Logging setup ──────────────────────────────────────────────────
+    // Priority: RUST_LOG env > --log-level flag > "info" default
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+
+    // Stderr layer — always present, respects filter
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_writer(std::io::stderr);
+
+    // Optional file layer — uses the same filter as stderr.
+    // For full diagnostics use --log-level debug or RUST_LOG=debug.
+    let _guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+    if let Some(ref log_path) = cli.log_file {
+        let dir = log_path.parent().unwrap_or(Path::new("."));
+        let name = log_path.file_name().unwrap_or_default().to_str().unwrap_or("omegon.log");
+        let file_appender = tracing_appender::rolling::never(dir, name);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        _guard = Some(guard);
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(non_blocking);
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+    } else {
+        _guard = None;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .init();
+    }
 
     match cli.command {
         Some(Commands::Interactive) => run_interactive_command(&cli).await,
