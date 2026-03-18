@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install omegon-agent from GitHub Releases.
+# Install omegon from GitHub Releases.
 #
 # Usage:
 #   curl -fsSL https://omegon.styrene.dev/install.sh | sh
@@ -13,7 +13,7 @@
 set -e
 
 REPO="styrene-lab/omegon-core"
-BINARY="omegon-agent"
+BINARY="omegon"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 # Detect platform

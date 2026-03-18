@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end test: install omegon-agent in a container and run a real prompt.
+# End-to-end test: install omegon in a container and run a real prompt.
 #
 # Prerequisites:
 #   - Docker or Podman
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 RUNTIME="${CONTAINER_RUNTIME:-$(command -v podman || command -v docker)}"
-IMAGE="omegon-agent-test:latest"
+IMAGE="omegon-test:latest"
 WORKSPACE=$(mktemp -d)
 
 echo "=== Building container ==="

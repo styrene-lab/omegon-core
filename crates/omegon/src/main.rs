@@ -35,7 +35,7 @@ use bridge::{LlmBridge, SubprocessBridge};
 use omegon_traits::AgentEvent;
 
 #[derive(Parser)]
-#[command(name = "omegon-agent", about = "Omegon agent loop — headless coding agent")]
+#[command(name = "omegon", about = "Omegon — AI coding agent")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -257,7 +257,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        None => run_agent_command(&cli).await,
+        None => {
+            // No subcommand: interactive if no --prompt, headless if --prompt given
+            if cli.prompt.is_some() || cli.prompt_file.is_some() {
+                run_agent_command(&cli).await
+            } else {
+                run_interactive_command(&cli).await
+            }
+        }
     }
 }
 

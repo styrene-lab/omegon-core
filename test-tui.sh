@@ -1,12 +1,12 @@
 #!/bin/bash
 # TUI interaction test — drives the ratatui interactive mode via tmux.
 #
-# Starts omegon-agent interactive in a tmux session, sends keystrokes,
+# Starts omegon interactive in a tmux session, sends keystrokes,
 # captures pane output, and verifies rendering.
 #
 # Prerequisites:
 #   - tmux
-#   - omegon-agent binary (built or on PATH)
+#   - omegon binary (built or on PATH)
 #   - ANTHROPIC_API_KEY or ~/.pi/agent/auth.json
 #
 # Usage:
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-BINARY="${1:-target/release/omegon-agent}"
+BINARY="${1:-target/release/omegon}"
 SESSION="omegon-tui-test"
 WORKSPACE=$(mktemp -d)
 FAILURES=0

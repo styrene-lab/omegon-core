@@ -53,22 +53,22 @@ jobs:
 
       - name: Strip binary
         run: |
-          BINARY=target/${{ matrix.target }}/release/omegon-agent
+          BINARY=target/${{ matrix.target }}/release/omegon
           if command -v strip &> /dev/null; then
             strip "$BINARY" 2>/dev/null || true
           fi
 
       - name: Package
         run: |
-          BINARY=target/${{ matrix.target }}/release/omegon-agent
-          ARCHIVE=omegon-agent-${{ matrix.name }}.tar.gz
+          BINARY=target/${{ matrix.target }}/release/omegon
+          ARCHIVE=omegon-${{ matrix.name }}.tar.gz
           tar czf "$ARCHIVE" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: omegon-agent-${{ matrix.name }}
+          name: omegon-${{ matrix.name }}
           path: ${{ env.ARCHIVE }}
 
   release:
