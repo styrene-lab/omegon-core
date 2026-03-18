@@ -55,20 +55,36 @@ impl FooterData {
             return;
         }
 
+        // 4 cards with │ dividers between them
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Ratio(1, 4),
-                Constraint::Ratio(1, 4),
-                Constraint::Ratio(1, 4),
-                Constraint::Ratio(1, 4),
+                Constraint::Ratio(1, 4),  // context
+                Constraint::Length(1),     // │
+                Constraint::Ratio(1, 4),  // models
+                Constraint::Length(1),     // │
+                Constraint::Ratio(1, 4),  // memory
+                Constraint::Length(1),     // │
+                Constraint::Min(10),      // system (takes remainder)
             ])
             .split(area);
 
         self.render_context_card(cols[0], frame, t);
-        self.render_model_card(cols[1], frame, t);
-        self.render_memory_card(cols[2], frame, t);
-        self.render_system_card(cols[3], frame, t);
+        Self::render_divider(cols[1], frame, t);
+        self.render_model_card(cols[2], frame, t);
+        Self::render_divider(cols[3], frame, t);
+        self.render_memory_card(cols[4], frame, t);
+        Self::render_divider(cols[5], frame, t);
+        self.render_system_card(cols[6], frame, t);
+    }
+
+    /// Render a vertical divider (│) filling the full height.
+    fn render_divider(area: Rect, frame: &mut Frame, t: &dyn Theme) {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for _ in 0..area.height {
+            lines.push(Line::from(Span::styled("│", Style::default().fg(t.border_dim()))));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn render_narrow(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
