@@ -805,7 +805,7 @@ impl StuckDetector {
 
 /// Summarize tool call arguments into a compact string for decay context.
 /// Returns None if no useful summary can be extracted.
-fn summarize_tool_args(tool_name: &str, args: &Value) -> Option<String> {
+pub fn summarize_tool_args(tool_name: &str, args: &Value) -> Option<String> {
     match tool_name {
         "read" | "edit" | "write" | "view" => {
             args.get("path").and_then(|v| v.as_str()).map(|p| p.to_string())

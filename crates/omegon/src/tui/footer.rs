@@ -1,19 +1,19 @@
-//! Footer zone — summary cards rendered directly from system state.
+//! Footer zone — summary cards rendered from system state.
 //!
-//! Four cards matching the TS dashboard HUD:
+//! Four cards matching the dashboard HUD:
 //!   context — token usage gauge, model, turn count
 //!   models  — driver model info
 //!   memory  — fact count, injection stats
 //!   system  — cwd, session
 //!
-//! Unlike the TS version, this reads directly from ConversationState,
-//! MemoryProvider, and LifecycleContext — no shared-state indirection.
+//! Uses shared widget primitives from `widgets.rs`.
 
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::theme::Theme;
+use super::widgets::{self, GaugeConfig};
 
 /// Data collected from the agent systems for footer rendering.
 /// Populated by the App on each frame from the live system state.
@@ -48,13 +48,10 @@ impl FooterData {
         let width = area.width as usize;
 
         if width < 60 {
-            // Narrow: single-line minimal footer
             self.render_narrow(area, frame, t);
             return;
         }
 
-        // Split into 4 columns
-        let _col_w = width / 4;
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -72,16 +69,14 @@ impl FooterData {
     }
 
     fn render_narrow(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
-        let model_short = self.model_id.split(':').next_back()
-            .or_else(|| self.model_id.split('/').next_back())
-            .unwrap_or(&self.model_id);
+        let model_short = short_model(&self.model_id);
         let pct = self.context_percent as u32;
         let line = Line::from(vec![
             Span::styled(" Ω ", t.style_accent_bold()),
             Span::styled(format!("{model_short} "), Style::default().fg(t.muted())),
             Span::styled("│ ", Style::default().fg(t.dim())),
             Span::styled(format!("{pct}% "), Style::default().fg(
-                if pct > 70 { t.error() } else if pct > 45 { t.warning() } else { t.muted() }
+                widgets::percent_color(self.context_percent, t)
             )),
             Span::styled("│ ", Style::default().fg(t.dim())),
             Span::styled(format!("T·{} ", self.turn), Style::default().fg(t.muted())),
@@ -94,36 +89,33 @@ impl FooterData {
         let inner_w = area.width.saturating_sub(4) as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Section divider
-        lines.push(card_header("context", inner_w, t));
+        lines.push(widgets::section_divider("context", inner_w, t));
 
         // Gauge bar
         let bar_w = inner_w.min(20);
         let pct = self.context_percent.min(100.0);
-        let filled = ((pct / 100.0) * bar_w as f32) as usize;
-        let empty = bar_w.saturating_sub(filled);
+        let memory_blocks = if self.memory_tokens_est > 0 && self.context_window > 0 {
+            let mem_pct = self.memory_tokens_est as f32 / self.context_window as f32 * 100.0;
+            ((mem_pct / 100.0) * bar_w as f32) as usize
+        } else {
+            0
+        };
 
-        let bar_color = if pct > 70.0 { t.error() } else if pct > 45.0 { t.warning() } else { t.accent_muted() };
-        let mut bar_spans = vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("▐", Style::default().fg(t.dim())),
-        ];
-        if filled > 0 {
-            bar_spans.push(Span::styled("█".repeat(filled), Style::default().fg(bar_color)));
-        }
-        if empty > 0 {
-            bar_spans.push(Span::styled("░".repeat(empty), Style::default().fg(t.border())));
-        }
-        bar_spans.push(Span::styled("▌ ", Style::default().fg(t.dim())));
+        let mut bar_spans = vec![Span::styled("  ", Style::default())];
+        bar_spans.extend(widgets::gauge_bar(&GaugeConfig {
+            percent: pct,
+            bar_width: bar_w,
+            memory_blocks,
+        }, t));
 
-        let pct_str = format!("{}%", pct as u32);
+        let pct_str = format!(" {}%", pct as u32);
         bar_spans.push(Span::styled(pct_str, Style::default().fg(
-            if pct > 70.0 { t.error() } else if pct > 45.0 { t.warning() } else { t.muted() }
+            widgets::percent_color(pct, t)
         )));
 
         if self.context_window > 0 {
             bar_spans.push(Span::styled(
-                format!(" / {}", format_tokens(self.context_window)),
+                format!(" / {}", widgets::format_tokens(self.context_window)),
                 Style::default().fg(t.dim()),
             ));
         }
@@ -133,9 +125,7 @@ impl FooterData {
         lines.push(Line::from(bar_spans));
 
         // Model line
-        let model_short = self.model_id.split(':').next_back()
-            .or_else(|| self.model_id.split('/').next_back())
-            .unwrap_or(&self.model_id);
+        let model_short = short_model(&self.model_id);
         lines.push(Line::from(vec![
             Span::styled("  ▸ ", Style::default().fg(t.accent())),
             Span::styled(
@@ -153,12 +143,9 @@ impl FooterData {
         let inner_w = area.width.saturating_sub(4) as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        lines.push(card_header("models", inner_w, t));
+        lines.push(widgets::section_divider("models", inner_w, t));
 
-        // Driver model
-        let model_short = self.model_id.split(':').next_back()
-            .or_else(|| self.model_id.split('/').next_back())
-            .unwrap_or(&self.model_id);
+        let model_short = short_model(&self.model_id);
         let auth_type = if self.is_oauth { "subscription" } else { "api-key" };
         lines.push(Line::from(vec![
             Span::styled("  Driver ", Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
@@ -167,7 +154,6 @@ impl FooterData {
             Span::styled("native", Style::default().fg(t.success())),
         ]));
 
-        // Auth info
         lines.push(Line::from(vec![
             Span::styled("  Auth ", Style::default().fg(t.muted())),
             Span::styled(auth_type, Style::default().fg(t.muted())),
@@ -181,7 +167,7 @@ impl FooterData {
         let inner_w = area.width.saturating_sub(4) as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        lines.push(card_header("memory", inner_w, t));
+        lines.push(widgets::section_divider("memory", inner_w, t));
 
         let sep = Span::styled(" · ", Style::default().fg(t.dim()));
         let mut parts: Vec<Span<'static>> = vec![
@@ -205,7 +191,7 @@ impl FooterData {
         if self.memory_tokens_est > 0 {
             parts.push(sep);
             parts.push(Span::styled(
-                format!("~{}", format_tokens(self.memory_tokens_est)),
+                format!("~{}", widgets::format_tokens(self.memory_tokens_est)),
                 Style::default().fg(t.dim()),
             ));
         }
@@ -220,7 +206,7 @@ impl FooterData {
         let inner_w = area.width.saturating_sub(4) as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        lines.push(card_header("system", inner_w, t));
+        lines.push(widgets::section_divider("system", inner_w, t));
 
         // cwd — shorten home dir
         let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_default();
@@ -239,25 +225,9 @@ impl FooterData {
     }
 }
 
-/// Render a card header: `── label ──────────`
-fn card_header<'a>(label: &str, width: usize, t: &dyn Theme) -> Line<'a> {
-    let prefix = "── ";
-    let suffix_len = width.saturating_sub(prefix.len() + label.len() + 2);
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(t.dim())),
-        Span::styled(label.to_string(), Style::default().fg(t.muted())),
-        Span::styled(format!(" {}", "─".repeat(suffix_len)), Style::default().fg(t.dim())),
-    ])
-}
-
-fn format_tokens(count: usize) -> String {
-    if count < 1000 {
-        count.to_string()
-    } else if count < 10_000 {
-        format!("{:.1}k", count as f64 / 1000.0)
-    } else if count < 1_000_000 {
-        format!("{}k", count / 1000)
-    } else {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    }
+/// Extract short model name from full ID.
+fn short_model(model_id: &str) -> &str {
+    model_id.split(':').next_back()
+        .or_else(|| model_id.split('/').next_back())
+        .unwrap_or(model_id)
 }

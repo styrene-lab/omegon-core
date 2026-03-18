@@ -2,6 +2,7 @@
 //!
 //! Rendered as a right-side panel when terminal width >= 100 columns.
 //! Shows: focused design node, active openspec changes, session stats.
+//! Uses shared widget primitives from `widgets.rs`.
 
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
@@ -9,15 +10,13 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::lifecycle::types::*;
 use super::theme::Theme;
+use super::widgets;
 
 /// Dashboard state — updated from lifecycle scanning.
 #[derive(Default)]
 pub struct DashboardState {
-    /// Focused design node summary.
     pub focused_node: Option<FocusedNodeSummary>,
-    /// Active openspec changes.
     pub active_changes: Vec<ChangeSummary>,
-    /// Session stats.
     pub turns: u32,
     pub tool_calls: u32,
     pub compactions: u32,
@@ -49,65 +48,56 @@ impl DashboardState {
             .border_style(t.style_border())
             .title(Span::styled(" Ω Dashboard ", t.style_accent_bold()));
 
+        let inner_w = area.width.saturating_sub(3) as usize; // left border + padding
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // ─── Focused Node ───────────────────────────────────────────
+        // ─── Focused Node ───────────────────────────────────────
         if let Some(ref node) = self.focused_node {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} ", node.status.icon()),
-                    Style::default().fg(status_color_themed(node.status, t)),
+                    Style::default().fg(status_color(node.status, t)),
                 ),
                 Span::styled(node.id.clone(), t.style_heading()),
             ]));
-            let title = if node.title.len() > 35 {
-                format!("{}…", &node.title[..34])
-            } else {
-                node.title.clone()
-            };
+            let title = widgets::truncate_str(&node.title, inner_w.saturating_sub(2), "…");
             lines.push(Line::from(Span::styled(format!("  {title}"), t.style_muted())));
             if node.decisions > 0 || node.open_questions > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}● {}? ", node.decisions, node.open_questions),
-                    t.style_dim(),
-                )));
+                let mut parts: Vec<Span<'static>> = vec![Span::styled("  ", Style::default())];
+                if node.decisions > 0 {
+                    parts.extend(widgets::badge("●", &node.decisions.to_string(), t.success()));
+                    parts.push(Span::styled(" ", Style::default()));
+                }
+                if node.open_questions > 0 {
+                    parts.extend(widgets::badge("?", &node.open_questions.to_string(), t.warning()));
+                }
+                lines.push(Line::from(parts));
             }
             lines.push(Line::from(""));
         }
 
-        // ─── Active Changes ─────────────────────────────────────────
+        // ─── Active Changes ─────────────────────────────────────
         if !self.active_changes.is_empty() {
-            lines.push(Line::from(Span::styled("OpenSpec", t.style_heading())));
+            lines.push(widgets::section_divider("openspec", inner_w, t));
             for change in &self.active_changes {
-                let icon = match change.stage {
-                    ChangeStage::Proposed => "◌",
-                    ChangeStage::Specified => "◐",
-                    ChangeStage::Planned => "▸",
-                    ChangeStage::Implementing => "⟳",
-                    ChangeStage::Verifying => "◉",
-                    ChangeStage::Archived => "✓",
-                };
+                let (icon, color) = stage_badge(change.stage, t);
                 let progress = if change.total_tasks > 0 {
                     format!(" {}/{}", change.done_tasks, change.total_tasks)
                 } else {
                     String::new()
                 };
-                let color = match change.stage {
-                    ChangeStage::Implementing => t.warning(),
-                    ChangeStage::Verifying => t.success(),
-                    _ => t.dim(),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {icon} "), Style::default().fg(color)),
-                    Span::styled(change.name.clone(), Style::default().fg(color)),
-                    Span::styled(progress, t.style_dim()),
-                ]));
+                let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", Style::default())];
+                spans.extend(widgets::badge(icon, &change.name, color));
+                if !progress.is_empty() {
+                    spans.push(Span::styled(progress, Style::default().fg(t.dim())));
+                }
+                lines.push(Line::from(spans));
             }
             lines.push(Line::from(""));
         }
 
-        // ─── Session Stats ──────────────────────────────────────────
-        lines.push(Line::from(Span::styled("Session", t.style_heading())));
+        // ─── Session Stats ──────────────────────────────────────
+        lines.push(widgets::section_divider("session", inner_w, t));
         lines.push(Line::from(Span::styled(
             format!("  {} turns, {} tool calls", self.turns, self.tool_calls),
             t.style_muted(),
@@ -126,7 +116,7 @@ impl DashboardState {
     }
 }
 
-fn status_color_themed(status: NodeStatus, t: &dyn Theme) -> Color {
+fn status_color(status: NodeStatus, t: &dyn Theme) -> Color {
     match status {
         NodeStatus::Seed => t.dim(),
         NodeStatus::Exploring => t.accent(),
@@ -134,5 +124,16 @@ fn status_color_themed(status: NodeStatus, t: &dyn Theme) -> Color {
         NodeStatus::Implementing => t.warning(),
         NodeStatus::Blocked => t.error(),
         NodeStatus::Deferred => t.caution(),
+    }
+}
+
+fn stage_badge(stage: ChangeStage, t: &dyn Theme) -> (&'static str, Color) {
+    match stage {
+        ChangeStage::Proposed => ("◌", t.dim()),
+        ChangeStage::Specified => ("◐", t.dim()),
+        ChangeStage::Planned => ("▸", t.muted()),
+        ChangeStage::Implementing => ("⟳", t.warning()),
+        ChangeStage::Verifying => ("◉", t.success()),
+        ChangeStage::Archived => ("✓", t.success()),
     }
 }

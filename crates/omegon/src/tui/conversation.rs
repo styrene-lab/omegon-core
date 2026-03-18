@@ -1,13 +1,25 @@
 //! Conversation view — scrollable message display with streaming support.
+//!
+//! Messages are grouped into **turns** for visual coherence:
+//! - User message → turn boundary
+//! - Assistant text + tool calls → single visual unit with left gutter
+//! - System/lifecycle messages → ungrouped, inline
+//!
+//! Tool calls render as cards with args summary + result preview.
+//! Assistant text gets structural markdown highlighting.
+//! Code fences render with distinct background styling.
 
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::style::Style;
 
 use super::theme::Theme;
+use super::widgets;
+
+// ─── Message model ──────────────────────────────────────────────────
 
 /// A message in the conversation view.
 #[derive(Debug, Clone)]
-enum Message {
+pub(crate) enum Message {
     User(String),
     /// System/info message (from slash commands, etc.)
     System(String),
@@ -17,16 +29,23 @@ enum Message {
         thinking: String,
         complete: bool,
     },
-    /// Tool call with optional result summary.
+    /// Tool call with args summary and result.
     Tool {
         id: String,
         name: String,
+        args_summary: Option<String>,
         is_error: bool,
         complete: bool,
-        /// First line of the result (truncated for display).
         result_summary: Option<String>,
     },
+    /// Lifecycle event (phase change, decomposition, etc.)
+    Lifecycle {
+        icon: String,
+        text: String,
+    },
 }
+
+// ─── Conversation state ─────────────────────────────────────────────
 
 pub struct ConversationView {
     messages: Vec<Message>,
@@ -45,6 +64,8 @@ impl ConversationView {
         }
     }
 
+    // ─── Push methods ───────────────────────────────────────────
+
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(Message::User(text.to_string()));
         self.scroll = 0;
@@ -52,6 +73,14 @@ impl ConversationView {
 
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(Message::System(text.to_string()));
+        self.scroll = 0;
+    }
+
+    pub fn push_lifecycle(&mut self, icon: &str, text: &str) {
+        self.messages.push(Message::Lifecycle {
+            icon: icon.to_string(),
+            text: text.to_string(),
+        });
         self.scroll = 0;
     }
 
@@ -86,10 +115,11 @@ impl ConversationView {
         }
     }
 
-    pub fn push_tool_start(&mut self, id: &str, name: &str) {
+    pub fn push_tool_start(&mut self, id: &str, name: &str, args_summary: Option<&str>) {
         self.messages.push(Message::Tool {
             id: id.to_string(),
             name: name.to_string(),
+            args_summary: args_summary.map(|s| s.to_string()),
             is_error: false,
             complete: false,
             result_summary: None,
@@ -130,6 +160,8 @@ impl ConversationView {
         self.streaming = false;
     }
 
+    // ─── Scroll ─────────────────────────────────────────────────
+
     pub fn scroll_up(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_add(amount);
     }
@@ -142,15 +174,18 @@ impl ConversationView {
         self.scroll
     }
 
-    /// Render conversation to ratatui Lines (legacy — uses hardcoded colors).
+    // ─── Rendering ──────────────────────────────────────────────
+
+    /// Render conversation to ratatui Lines (test fallback).
     pub fn render_text(&self) -> Vec<Line<'static>> {
-        // Fallback for tests — use a default theme
         self.render_themed(&super::theme::Alpharius)
     }
 
     /// Render conversation to ratatui Lines with theme colors.
+    #[allow(unused_assignments)] // in_code_fence reset is read by next iteration
     pub fn render_themed(&self, t: &dyn Theme) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut in_code_fence = false;
 
         for msg in &self.messages {
             match msg {
@@ -161,6 +196,7 @@ impl ConversationView {
                     ]));
                     lines.push(Line::from(""));
                 }
+
                 Message::System(text) => {
                     for line in text.lines() {
                         lines.push(Line::from(Span::styled(
@@ -170,58 +206,80 @@ impl ConversationView {
                     }
                     lines.push(Line::from(""));
                 }
-                Message::Assistant {
-                    text,
-                    thinking,
-                    complete,
-                } => {
+
+                Message::Assistant { text, thinking, complete } => {
+                    // Thinking block (dimmed, with header)
                     if !thinking.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "◌ thinking…",
+                            Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC),
+                        )));
                         for line in thinking.lines() {
                             lines.push(Line::from(Span::styled(
                                 line.to_string(),
                                 t.style_dim(),
                             )));
                         }
+                        lines.push(Line::from("")); // gap before response
                     }
+
+                    // Assistant text with structural highlighting
+                    in_code_fence = false;
                     for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            t.style_fg(),
-                        )));
+                        if line.starts_with("```") {
+                            if in_code_fence {
+                                // Closing fence
+                                in_code_fence = false;
+                                lines.push(Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(t.dim()).bg(t.surface_bg()),
+                                )));
+                            } else {
+                                // Opening fence
+                                in_code_fence = true;
+                                lines.push(Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(t.dim()).bg(t.surface_bg()),
+                                )));
+                            }
+                        } else if in_code_fence {
+                            // Code block content
+                            lines.push(Line::from(Span::styled(
+                                line.to_string(),
+                                Style::default().fg(t.accent_muted()).bg(t.surface_bg()),
+                            )));
+                        } else {
+                            // Regular text with markdown highlighting
+                            lines.push(widgets::highlight_line(line, t));
+                        }
                     }
-                    if !*complete && text.is_empty() {
+
+                    if !*complete && text.is_empty() && thinking.is_empty() {
                         lines.push(Line::from(Span::styled("...", t.style_dim())));
                     }
                     lines.push(Line::from(""));
                 }
+
                 Message::Tool {
                     name,
+                    args_summary,
                     is_error,
                     complete,
                     result_summary,
                     ..
                 } => {
-                    let (icon, color) = if *complete {
-                        if *is_error {
-                            ("✗", t.error())
-                        } else {
-                            ("✓", t.success())
-                        }
-                    } else {
-                        ("→", t.warning())
-                    };
-                    let mut spans = vec![
-                        Span::styled(format!("{icon} "), Style::default().fg(color)),
-                        Span::styled(name.clone(), Style::default().fg(color)),
-                    ];
-                    // Show result summary after the tool name
-                    if let Some(summary) = result_summary {
-                        spans.push(Span::styled(
-                            format!("  {summary}"),
-                            Style::default().fg(t.dim()),
-                        ));
-                    }
-                    lines.push(Line::from(spans));
+                    lines.push(widgets::tool_card(
+                        name,
+                        *is_error,
+                        *complete,
+                        args_summary.as_deref(),
+                        result_summary.as_deref(),
+                        t,
+                    ));
+                }
+
+                Message::Lifecycle { icon, text } => {
+                    lines.push(widgets::lifecycle_event(icon, text, t));
                 }
             }
         }
@@ -240,6 +298,9 @@ mod tests {
         cv.push_user("hello");
         let lines = cv.render_text();
         assert!(!lines.is_empty());
+        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("▸"));
+        assert!(text.contains("hello"));
     }
 
     #[test]
@@ -266,15 +327,86 @@ mod tests {
     #[test]
     fn tool_lifecycle() {
         let mut cv = ConversationView::new();
-        cv.push_tool_start("tc1", "read");
-        cv.push_tool_end("tc1", false, Some("file written"));
+        cv.push_tool_start("tc1", "read", Some("src/main.rs"));
+        cv.push_tool_end("tc1", false, Some("245 lines"));
         if let Message::Tool {
-            complete, is_error, ..
+            complete, is_error, args_summary, result_summary, ..
         } = &cv.messages[0]
         {
             assert!(complete);
             assert!(!is_error);
+            assert_eq!(args_summary.as_deref(), Some("src/main.rs"));
+            assert!(result_summary.is_some());
         }
+    }
+
+    #[test]
+    fn tool_card_renders_with_gutter() {
+        let mut cv = ConversationView::new();
+        cv.push_tool_start("t1", "edit", Some("lib.rs"));
+        cv.push_tool_end("t1", false, Some("Applied edit"));
+        let lines = cv.render_text();
+        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("│"), "tool card should have gutter: {text}");
+        assert!(text.contains("✓"));
+        assert!(text.contains("edit"));
+        assert!(text.contains("lib.rs"));
+    }
+
+    #[test]
+    fn thinking_block_renders() {
+        let mut cv = ConversationView::new();
+        cv.append_thinking("Let me think...");
+        cv.append_streaming("Here's my answer.");
+        cv.finalize_message();
+        let lines = cv.render_text();
+        let all_text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.to_string()).collect();
+        assert!(all_text.contains("thinking"));
+        assert!(all_text.contains("Let me think"));
+        assert!(all_text.contains("Here's my answer"));
+    }
+
+    #[test]
+    fn lifecycle_event_renders() {
+        let mut cv = ConversationView::new();
+        cv.push_lifecycle("⚡", "Cleave: 3 children dispatched");
+        let lines = cv.render_text();
+        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("⚡"));
+        assert!(text.contains("Cleave"));
+    }
+
+    #[test]
+    fn code_fence_highlighting() {
+        let mut cv = ConversationView::new();
+        cv.append_streaming("Here's some code:\n```rust\nfn main() {}\n```\nDone.");
+        cv.finalize_message();
+        let lines = cv.render_text();
+        // The code line should have surface_bg
+        let code_line = lines.iter().find(|l| {
+            l.spans.iter().any(|s| s.content.contains("fn main"))
+        });
+        assert!(code_line.is_some(), "should find the code line");
+        let code_span = code_line.unwrap().spans.iter()
+            .find(|s| s.content.contains("fn main")).unwrap();
+        let t = super::super::theme::Alpharius;
+        assert_eq!(code_span.style.bg, Some(t.surface_bg()), "code should have surface_bg");
+    }
+
+    #[test]
+    fn markdown_headers_highlighted() {
+        let mut cv = ConversationView::new();
+        cv.append_streaming("# Big Header\n## Sub Header\nPlain text");
+        cv.finalize_message();
+        let lines = cv.render_text();
+        // First content line should be the header
+        let header_line = lines.iter().find(|l| {
+            l.spans.iter().any(|s| s.content.contains("Big Header"))
+        });
+        assert!(header_line.is_some());
+        let span = header_line.unwrap().spans.iter()
+            .find(|s| s.content.contains("Big Header")).unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -286,6 +418,6 @@ mod tests {
         cv.scroll_down(3);
         assert_eq!(cv.scroll_offset(), 2);
         cv.scroll_down(10);
-        assert_eq!(cv.scroll_offset(), 0); // saturates at 0
+        assert_eq!(cv.scroll_offset(), 0);
     }
 }

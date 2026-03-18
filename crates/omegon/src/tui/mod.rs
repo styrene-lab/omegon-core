@@ -16,6 +16,7 @@ pub mod editor;
 pub mod footer;
 pub mod selector;
 pub mod theme;
+pub mod widgets;
 
 use std::io;
 use std::time::Duration;
@@ -561,12 +562,13 @@ impl App {
             AgentEvent::ThinkingChunk { text } => {
                 self.conversation.append_thinking(&text);
             }
-            AgentEvent::ToolStart { id, name, .. } => {
-                self.conversation.push_tool_start(&id, &name);
+            AgentEvent::ToolStart { id, name, args } => {
+                // Extract a short args summary for display
+                let args_summary = crate::r#loop::summarize_tool_args(&name, &args);
+                self.conversation.push_tool_start(&id, &name, args_summary.as_deref());
                 self.tool_calls += 1;
             }
             AgentEvent::ToolEnd { id, result, is_error } => {
-                // Extract first text content block for display
                 let summary = result.content.first().and_then(|c| match c {
                     omegon_traits::ContentBlock::Text { text } => Some(text.as_str()),
                     _ => None,
@@ -576,6 +578,23 @@ impl App {
             AgentEvent::AgentEnd => {
                 self.agent_active = false;
                 self.conversation.finalize_message();
+            }
+            AgentEvent::PhaseChanged { phase } => {
+                self.conversation.push_lifecycle("◈", &format!("Phase → {phase:?}"));
+            }
+            AgentEvent::DecompositionStarted { children } => {
+                self.conversation.push_lifecycle(
+                    "⚡",
+                    &format!("Cleave: {} children dispatched", children.len()),
+                );
+            }
+            AgentEvent::DecompositionChildCompleted { label, success } => {
+                let icon = if success { "✓" } else { "✗" };
+                self.conversation.push_lifecycle(icon, &format!("Child '{label}' completed"));
+            }
+            AgentEvent::DecompositionCompleted { merged } => {
+                let status = if merged { "merged" } else { "completed (no merge)" };
+                self.conversation.push_lifecycle("⚡", &format!("Cleave {status}"));
             }
             _ => {}
         }
