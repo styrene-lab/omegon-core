@@ -710,6 +710,7 @@ mod tests {
                 tool_name: "read".into(),
                 content: "file contents".into(),
                 is_error: false,
+                args_summary: None,
             },
         ];
         let wire = AnthropicClient::build_messages(&messages);

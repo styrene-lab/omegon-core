@@ -52,6 +52,9 @@ pub enum LlmMessage {
         tool_name: String,
         content: String,
         is_error: bool,
+        /// Key arguments summarized for decay context. Survives serialization.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_summary: Option<String>,
     },
 }
 
@@ -444,6 +447,7 @@ mod tests {
             tool_name: "read".into(),
             content: "file contents here".into(),
             is_error: false,
+            args_summary: Some("test.txt".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""role":"tool_result"#));

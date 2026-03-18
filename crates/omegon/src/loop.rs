@@ -540,6 +540,7 @@ async fn dispatch_tools(
             tool_name: call.name.clone(),
             content: result.content,
             is_error,
+            args_summary: summarize_tool_args(&call.name, &call.arguments),
         });
     }
 
@@ -657,6 +658,59 @@ impl StuckDetector {
             .into_iter()
             .find(|(_, count)| *count >= threshold)
             .map(|((name, _), count)| (name, count))
+    }
+}
+
+/// Summarize tool call arguments into a compact string for decay context.
+/// Returns None if no useful summary can be extracted.
+fn summarize_tool_args(tool_name: &str, args: &Value) -> Option<String> {
+    match tool_name {
+        "read" | "edit" | "write" | "view" => {
+            args.get("path").and_then(|v| v.as_str()).map(|p| p.to_string())
+        }
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str())?;
+            // Truncate long commands, keep the first meaningful part
+            let short = if cmd.len() > 80 {
+                let mut end = 80;
+                while end > 0 && !cmd.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &cmd[..end])
+            } else {
+                cmd.to_string()
+            };
+            Some(short)
+        }
+        "change" => {
+            let edits = args.get("edits").and_then(|v| v.as_array())?;
+            let files: Vec<&str> = edits.iter()
+                .filter_map(|e| e.get("file").and_then(|v| v.as_str()))
+                .collect();
+            Some(files.join(", "))
+        }
+        "web_search" => {
+            args.get("query").and_then(|v| v.as_str()).map(|q| {
+                if q.len() > 60 {
+                    format!("{}…", &q[..60])
+                } else {
+                    q.to_string()
+                }
+            })
+        }
+        "memory_recall" | "memory_store" | "memory_query" => {
+            args.get("query")
+                .or_else(|| args.get("content"))
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    if s.len() > 60 {
+                        format!("{}…", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+        }
+        _ => None,
     }
 }
 

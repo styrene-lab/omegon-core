@@ -9,34 +9,208 @@ use std::path::{Path, PathBuf};
 /// Build the base system prompt for headless mode.
 ///
 /// Loads project directives (AGENTS.md) from the working directory if present.
+/// Build the base system prompt.
+///
+/// Loads: global AGENTS.md (~/.omegon/), project AGENTS.md, project conventions.
+/// Includes rich tool guidelines that shape behavior, not just descriptions.
 pub fn build_base_prompt(cwd: &Path, tools: &[ToolDefinition]) -> String {
     let date = utc_date();
     let tool_list = format_tool_list(tools);
+    let tool_guidelines = build_tool_guidelines(tools);
+    let global_directives = load_global_directives();
     let project_directives = load_project_directives(cwd);
+    let project_conventions = detect_project_conventions(cwd);
 
     format!(
-        r#"You are an expert coding assistant operating as a headless agent. You help by reading files, executing commands, editing code, and writing new files.
+        r#"You are an expert coding assistant. You help by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 {tool_list}
 
-Guidelines:
-- Use bash for file operations like ls, grep, find
-- Use read to examine files before editing
-- Use edit for precise changes (old text must match exactly)
-- Use write only for new files or complete rewrites
-- Be concise in your responses
-- Show file paths clearly when working with files
-- Every non-trivial code change must include tests. Untested code is incomplete.
-- Write tests alongside implementation, not as a follow-up. Co-locate test files.
-- Always commit your work with clear, descriptive commit messages before finishing
-- Do NOT push — only commit locally
-- When you complete the task, update any task/result sections in the prompt, then summarize what you did
-{project_directives}
+# Tool Guidelines
+
+{tool_guidelines}
+
+# Workflow
+
+- Read files before editing. Use read to see the exact content, then edit with precise matches.
+- Edit produces automatic validation (type check, lint) — read the result carefully. If validation shows errors, fix them before moving on.
+- Every non-trivial code change must include tests. Untested code is incomplete. Write tests alongside implementation, not as a follow-up.
+- Always commit your work with clear, descriptive commit messages when the task is complete.
+- Do NOT push — only commit locally.
+- Be concise. Show file paths clearly. Don't explain what you're about to do — just do it.
+- When you complete the task, summarize what you did and what changed.
+{global_directives}{project_directives}{project_conventions}
 Current date: {date}
 Current working directory: {cwd}"#,
         cwd = cwd.display()
     )
+}
+
+/// Rich tool guidelines — how to use each tool well, not just what it does.
+fn build_tool_guidelines(tools: &[ToolDefinition]) -> String {
+    let mut guidelines = Vec::new();
+
+    // Only include guidelines for tools that are actually registered
+    let tool_names: std::collections::HashSet<&str> =
+        tools.iter().map(|t| t.name.as_str()).collect();
+
+    if tool_names.contains("bash") {
+        guidelines.push(
+            "**bash**: Execute shell commands. Output is tail-truncated to 2000 lines / 50KB.\n\
+             - Use for: running tests, git operations, installing dependencies, grepping across files\n\
+             - Don't use for: reading files (use `read`), writing files (use `write`)\n\
+             - Set timeout for potentially long commands: builds, test suites, network operations\n\
+             - Check exit codes in the result — non-zero means the command failed"
+        );
+    }
+
+    if tool_names.contains("read") {
+        guidelines.push(
+            "**read**: Read file contents. Use offset/limit for large files.\n\
+             - Always read a file before editing it — you need the exact text to match\n\
+             - For large files, use offset and limit to read specific sections\n\
+             - When exploring a codebase, read entry points and type definitions first"
+        );
+    }
+
+    if tool_names.contains("edit") {
+        guidelines.push(
+            "**edit**: Replace exact text in a file. The oldText must match exactly — every character, every whitespace.\n\
+             - Read the file first to get the exact text. Don't guess at indentation or whitespace.\n\
+             - If your edit fails with 'Could not find', read the file again — it may have changed.\n\
+             - If it fails with 'multiple occurrences', include more surrounding context to make the match unique.\n\
+             - Edit runs automatic validation (type check / lint) after every change — read the validation result.\n\
+             - Multiple edits in the same turn are applied atomically with rollback on failure."
+        );
+    }
+
+    if tool_names.contains("write") {
+        guidelines.push(
+            "**write**: Create or overwrite a file. Creates parent directories automatically.\n\
+             - Use for new files only. For existing files, prefer edit (preserves content you don't need to change).\n\
+             - Write runs automatic validation after creation."
+        );
+    }
+
+    if tool_names.contains("change") {
+        guidelines.push(
+            "**change**: Atomic multi-file edit with validation. Use when editing multiple related files.\n\
+             - All edits succeed or all roll back — no partial state.\n\
+             - validate: 'standard' (default) runs type checker; 'full' also runs affected tests; 'none' skips."
+        );
+    }
+
+    if tool_names.contains("speculate_start") {
+        guidelines.push(
+            "**speculate_start/check/commit/rollback**: Git checkpoint for exploratory changes.\n\
+             - Use when trying a risky approach. Start → make changes → check → commit or rollback.\n\
+             - Only one speculation can be active at a time."
+        );
+    }
+
+    if tool_names.contains("memory_query") || tool_names.contains("memory_recall") {
+        guidelines.push(
+            "**memory**: Project memory persists across sessions.\n\
+             - Use memory_recall(query) for targeted semantic search — more efficient than memory_query.\n\
+             - Store conclusions, not investigation steps. Current state, not transitions.\n\
+             - Before storing, check if an existing fact covers it — use memory_supersede to update."
+        );
+    }
+
+    if tool_names.contains("web_search") {
+        guidelines.push(
+            "**web_search**: Search the web via Brave, Tavily, or Serper.\n\
+             - Use 'compare' mode for research requiring cross-source verification.\n\
+             - Use 'quick' mode for simple lookups."
+        );
+    }
+
+    guidelines.join("\n\n")
+}
+
+/// Load global operator directives from ~/.omegon/AGENTS.md
+fn load_global_directives() -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    let global_agents = home.join(".omegon/AGENTS.md");
+
+    if let Ok(content) = std::fs::read_to_string(&global_agents) {
+        let trimmed = truncate_directive(&content, 3000);
+        format!("\n# Operator Directives\n\n{trimmed}\n")
+    } else {
+        String::new()
+    }
+}
+
+/// Detect project conventions by scanning for config files.
+fn detect_project_conventions(cwd: &Path) -> String {
+    let mut conventions = Vec::new();
+    let repo_root = find_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+
+    // Rust
+    if repo_root.join("Cargo.toml").exists() {
+        conventions.push("- Rust project: use `cargo check` for type checking, `cargo clippy` for lints, `cargo test` for tests");
+        if repo_root.join("Cargo.lock").exists() {
+            conventions.push("- Cargo.lock is committed — this is an application, not a library");
+        }
+    }
+
+    // TypeScript / JavaScript
+    if repo_root.join("tsconfig.json").exists() {
+        conventions.push("- TypeScript project: use `npx tsc --noEmit` for type checking");
+    }
+    if repo_root.join("package.json").exists() {
+        // Check for test runner
+        if repo_root.join("vitest.config.ts").exists()
+            || repo_root.join("vitest.config.js").exists()
+        {
+            conventions.push("- Vitest for testing: `npx vitest run`");
+        } else if repo_root.join("jest.config.ts").exists()
+            || repo_root.join("jest.config.js").exists()
+        {
+            conventions.push("- Jest for testing: `npx jest`");
+        }
+    }
+
+    // Python
+    if repo_root.join("pyproject.toml").exists() {
+        conventions.push("- Python project: use `ruff check` for linting, `pytest` for tests");
+    }
+
+    // Go
+    if repo_root.join("go.mod").exists() {
+        conventions.push("- Go project: use `go vet` for checking, `go test ./...` for tests");
+    }
+
+    // Git conventions
+    if repo_root.join(".gitignore").exists() {
+        conventions.push("- .gitignore present — respect it when creating files");
+    }
+
+    if conventions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n# Project Conventions\n\n{}\n",
+            conventions.join("\n")
+        )
+    }
+}
+
+/// Truncate a directive string to a byte budget, breaking at a line boundary.
+fn truncate_directive(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some(nl) = content[..end].rfind('\n') {
+        format!("{}\n[truncated]", &content[..nl])
+    } else {
+        format!("{}…", &content[..end])
+    }
 }
 
 /// Load project directives from AGENTS.md files.

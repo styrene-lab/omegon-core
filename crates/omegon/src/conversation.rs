@@ -25,6 +25,9 @@ pub struct ToolResultEntry {
     pub tool_name: String,
     pub content: Vec<omegon_traits::ContentBlock>,
     pub is_error: bool,
+    /// Key arguments summarized for decay context (e.g. "path: src/auth.rs").
+    /// Set by the loop from the tool call arguments when the result is created.
+    pub args_summary: Option<String>,
 }
 
 /// An assistant message with parsed content.
@@ -571,6 +574,7 @@ impl ConversationState {
                     tool_name: result.tool_name.clone(),
                     content: summary,
                     is_error: result.is_error,
+                    args_summary: result.args_summary.clone(),
                 }
             }
             AgentMessage::Assistant(a, _) => {
@@ -669,13 +673,14 @@ impl ConversationState {
                             turn,
                         )
                     }
-                    LlmMessage::ToolResult { call_id, tool_name, content, is_error } => {
+                    LlmMessage::ToolResult { call_id, tool_name, content, is_error, args_summary } => {
                         AgentMessage::ToolResult(
                             ToolResultEntry {
                                 call_id,
                                 tool_name,
                                 content: vec![omegon_traits::ContentBlock::Text { text: content }],
                                 is_error,
+                                args_summary,
                             },
                             turn,
                         )
@@ -704,6 +709,13 @@ impl ConversationState {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let ctx = result.args_summary.as_deref().unwrap_or("");
+        let ctx_suffix = if ctx.is_empty() {
+            String::new()
+        } else {
+            format!(" ({ctx})")
+        };
+
         if result.is_error {
             // Preserve error message — errors are high-signal
             let error_preview = if text.len() > 300 {
@@ -715,47 +727,41 @@ impl ConversationState {
             } else {
                 text
             };
-            return format!("[Tool {} ERROR: {}]", result.tool_name, error_preview);
+            return format!("[{} ERROR{ctx_suffix}: {error_preview}]", result.tool_name);
         }
 
         match result.tool_name.as_str() {
             "read" => {
                 let lines = text.lines().count();
                 let bytes = text.len();
-                // Try to extract the path from the result or just report size
-                format!("[Read: {lines} lines, {bytes} bytes]")
+                format!("[Read{ctx_suffix}: {lines} lines, {bytes} bytes]")
             }
             "bash" | "execute" => {
                 let lines = text.lines().count();
-                // Extract exit code if present in the result text
                 let exit_hint = if text.contains("exit code") || text.contains("exited with") {
                     " (non-zero exit)"
                 } else {
                     ""
                 };
-                // Preserve last 3 lines as signal (summary/errors often at end)
                 let tail: Vec<&str> = text.lines().rev().take(3).collect();
                 let tail_str: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
                 if lines <= 5 {
-                    // Short output — keep it all
-                    format!("[bash{exit_hint}: {text}]")
+                    format!("[bash{ctx_suffix}{exit_hint}: {text}]")
                 } else {
-                    format!("[bash: {lines} lines{exit_hint}. Tail:\n{tail_str}]")
+                    format!("[bash{ctx_suffix}: {lines} lines{exit_hint}. Tail:\n{tail_str}]")
                 }
             }
             "edit" => {
-                // Edit results are usually "Successfully replaced text in <path>"
-                format!("[{text}]")
+                format!("[edit{ctx_suffix}: {text}]")
             }
             "write" => {
-                format!("[{text}]")
+                format!("[write{ctx_suffix}: {text}]")
             }
             "web_search" => {
                 let lines = text.lines().count();
                 format!("[web_search: {lines} lines of results]")
             }
             _ => {
-                // Generic: line count + first line preview
                 let lines = text.lines().count();
                 let first_line = text.lines().next().unwrap_or("").trim();
                 let preview = if first_line.len() > 120 {
@@ -768,9 +774,9 @@ impl ConversationState {
                     first_line.to_string()
                 };
                 if lines <= 3 {
-                    format!("[{}: {}]", result.tool_name, text.trim())
+                    format!("[{}{ctx_suffix}: {}]", result.tool_name, text.trim())
                 } else {
-                    format!("[{}: {lines} lines. {preview}]", result.tool_name)
+                    format!("[{}{ctx_suffix}: {lines} lines. {preview}]", result.tool_name)
                 }
             }
         }
@@ -821,6 +827,7 @@ impl ConversationState {
                     tool_name: r.tool_name.clone(),
                     content: text,
                     is_error: r.is_error,
+                    args_summary: r.args_summary.clone(),
                 }
             }
         }
@@ -914,6 +921,7 @@ mod tests {
                 text: "x".repeat(5000),
             }],
             is_error: false,
+            args_summary: None,
         });
         conv.intent.stats.turns = 1;
 
@@ -948,6 +956,7 @@ mod tests {
             tool_name: "read".into(),
             content: vec![omegon_traits::ContentBlock::Text { text: "big content".repeat(100) }],
             is_error: false,
+            args_summary: None,
         });
 
         // Still on turn 1 — everything should be fresh
@@ -983,6 +992,7 @@ mod tests {
             tool_name: "edit".into(),
             content: vec![omegon_traits::ContentBlock::Text { text: "Edited successfully".into() }],
             is_error: false,
+            args_summary: None,
         });
         conv.intent.stats.turns = 1;
         conv.intent.current_task = Some("Fix the auth bug".into());
@@ -1193,6 +1203,7 @@ mod tests {
             tool_name: "bash".into(),
             content: vec![omegon_traits::ContentBlock::Text { text: output }],
             is_error: false,
+            args_summary: None,
         });
         conv.intent.stats.turns = 1;
 
@@ -1216,6 +1227,7 @@ mod tests {
                 text: "command not found: foobar".into(),
             }],
             is_error: true,
+            args_summary: None,
         });
         conv.intent.stats.turns = 1;
 
@@ -1238,6 +1250,7 @@ mod tests {
                 text: "Successfully replaced text in src/auth.rs".into(),
             }],
             is_error: false,
+            args_summary: None,
         });
         conv.intent.stats.turns = 1;
 
@@ -1261,6 +1274,7 @@ mod tests {
                 text: "pub fn authenticate_user(token: AuthToken) -> Result<User> {\n    validate_token(token)\n}".into(),
             }],
             is_error: false,
+            args_summary: None,
         });
 
         // Turn 2: assistant references the function name
@@ -1348,6 +1362,44 @@ mod tests {
         conv.apply_ambient_captures(&captures);
         assert_eq!(conv.intent.constraints_discovered.len(), 1);
         assert_eq!(conv.intent.failed_approaches.len(), 1);
+    }
+
+    #[test]
+    fn args_summary_survives_session_round_trip() {
+        let mut conv = ConversationState::new();
+        conv.push_user("read a file".into());
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "read".into(),
+            content: vec![omegon_traits::ContentBlock::Text { text: "file contents".into() }],
+            is_error: false,
+            args_summary: Some("src/auth.rs".into()),
+        });
+        conv.intent.stats.turns = 1;
+
+        let tmp = std::env::temp_dir().join("omegon-test-args-summary-session.json");
+        conv.save_session(&tmp).unwrap();
+
+        let loaded = ConversationState::load_session(&tmp).unwrap();
+        // After load, verify the args_summary survived
+        let view = loaded.build_llm_view();
+        // Find the tool result in the view
+        let tool_msg = view.iter().find(|m| matches!(m, LlmMessage::ToolResult { .. }));
+        assert!(tool_msg.is_some(), "should have a tool result in the view");
+        if let Some(LlmMessage::ToolResult { args_summary, .. }) = tool_msg {
+            assert_eq!(args_summary.as_deref(), Some("src/auth.rs"), "args_summary should survive round-trip");
+        }
+
+        // Now advance turns so it decays, verify the skeleton includes the path
+        let mut loaded = ConversationState::load_session(&tmp).unwrap();
+        loaded.decay_window = 0;
+        loaded.intent.stats.turns = 100; // Force decay
+        let view = loaded.build_llm_view();
+        if let Some(LlmMessage::ToolResult { content, .. }) = view.iter().find(|m| matches!(m, LlmMessage::ToolResult { .. })) {
+            assert!(content.contains("src/auth.rs"), "decayed skeleton should include path from args_summary, got: {content}");
+        }
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

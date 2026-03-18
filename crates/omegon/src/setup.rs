@@ -65,12 +65,35 @@ impl AgentSetup {
             tools.push(Box::new(provider));
         }
 
+        // ─── Memory context injection ───────────────────────────────────
+        // Create a second backend handle for proactive fact injection.
+        // The MemoryProvider (above) handles tool calls; this handle
+        // injects relevant facts into the system prompt each turn.
+        let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
+        {
+            let memory_dir2 = project_root.join(".pi").join("memory");
+            let db_path2 = memory_dir2.join("facts.db");
+            if db_path2.exists()
+                && let Ok(backend2) = omegon_memory::SqliteBackend::open(&db_path2) {
+                    let provider2 = omegon_memory::MemoryProvider::new(
+                        backend2,
+                        omegon_memory::MarkdownRenderer,
+                        "default".to_string(),
+                    );
+                    memory_context = Some(Box::new(provider2));
+                    tracing::info!("Memory context injection enabled");
+                }
+        }
+
         // ─── System prompt + context ────────────────────────────────────
         let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
         let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
         let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
-        let context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> =
+        let mut context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> =
             vec![Box::new(lifecycle_provider)];
+        if let Some(mc) = memory_context {
+            context_providers.push(mc);
+        }
         let context_manager = ContextManager::new(base_prompt, context_providers);
 
         // ─── Conversation ───────────────────────────────────────────────
