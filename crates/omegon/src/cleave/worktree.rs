@@ -23,9 +23,9 @@ pub fn create_worktree(
         .current_dir(repo_path)
         .output();
 
-    // Create worktree
+    // Create worktree (-f handles stale registrations from previous failed runs)
     let output = Command::new("git")
-        .args(["worktree", "add", worktree_dir.to_str().unwrap(), branch])
+        .args(["worktree", "add", "-f", worktree_dir.to_str().unwrap(), branch])
         .current_dir(repo_path)
         .output()
         .context("Failed to run git worktree add")?;
