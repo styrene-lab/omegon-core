@@ -76,7 +76,9 @@ enum Commands {
         #[arg(long)]
         directive: String,
 
-        /// Workspace directory for worktrees and state
+        /// Workspace directory for worktrees and state.
+        /// If workspace/state.json exists, it is loaded and resumed
+        /// (preserving TS-written worktree paths and task files).
         #[arg(long)]
         workspace: String,
 

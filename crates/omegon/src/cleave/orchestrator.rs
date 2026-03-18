@@ -53,15 +53,25 @@ pub async fn run_cleave(
     cancel: CancellationToken,
 ) -> Result<CleaveResult> {
     let started = Instant::now();
-    let run_id = format!("clv-{}-{}", nanoid(8), nanoid(4));
 
     std::fs::create_dir_all(workspace_path)
         .context("Failed to create workspace directory")?;
 
-    let mut state = CleaveState::from_plan(
-        &run_id, directive, repo_path, workspace_path, plan, &config.model,
-    );
     let state_path = workspace_path.join("state.json");
+
+    // Resume from existing state.json if present (TS caller pre-populated it
+    // with worktree paths, enriched task files, etc.)
+    let mut state = if state_path.exists() {
+        let mut s = CleaveState::load(&state_path)?;
+        s.started_at = Some(Instant::now());
+        tracing::info!("resuming from existing state.json");
+        s
+    } else {
+        let run_id = format!("clv-{}-{}", nanoid(8), nanoid(4));
+        CleaveState::from_plan(
+            &run_id, directive, repo_path, workspace_path, plan, &config.model,
+        )
+    };
     state.save(&state_path)?;
 
     let waves = compute_waves(&plan.children);
@@ -95,16 +105,31 @@ pub async fn run_cleave(
             let label = state.children[child_idx].label.clone();
             let branch = state.children[child_idx].branch.clone().unwrap();
 
-            // Create worktree
-            match worktree::create_worktree(repo_path, workspace_path, child_idx, &label, &branch) {
+            // Use existing worktree if the TS caller already created it,
+            // otherwise create one
+            let existing_wt = state.children[child_idx].worktree_path.as_ref()
+                .filter(|p| std::path::Path::new(p).exists());
+            let wt_result = if let Some(wt) = existing_wt {
+                Ok(PathBuf::from(wt))
+            } else {
+                worktree::create_worktree(repo_path, workspace_path, child_idx, &label, &branch)
+            };
+            match wt_result {
                 Ok(wt_path) => {
                     state.children[child_idx].worktree_path = Some(wt_path.to_string_lossy().to_string());
 
+                    // Read existing task file (written by TS with OpenSpec enrichment)
+                    // or generate a basic one if absent
                     let task_path = workspace_path.join(format!("{}-task.md", child_idx));
-                    let description = &state.children[child_idx].description;
-                    let scope = &state.children[child_idx].scope;
-                    let task_content = build_task_file(&label, description, scope, directive);
-                    std::fs::write(&task_path, &task_content)?;
+                    let task_content = if task_path.exists() {
+                        std::fs::read_to_string(&task_path)?
+                    } else {
+                        let description = &state.children[child_idx].description;
+                        let scope = &state.children[child_idx].scope;
+                        let content = build_task_file(&label, description, scope, directive);
+                        std::fs::write(&task_path, &content)?;
+                        content
+                    };
 
                     state.children[child_idx].status = ChildStatus::Running;
 
