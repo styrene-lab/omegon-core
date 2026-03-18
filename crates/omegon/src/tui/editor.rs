@@ -69,6 +69,12 @@ impl Editor {
         self.buffer[..self.cursor].chars().count()
     }
 
+    /// Set the buffer text (for history navigation).
+    pub fn set_text(&mut self, text: &str) {
+        self.buffer = text.to_string();
+        self.cursor = self.buffer.len();
+    }
+
     pub fn render_text(&self) -> &str {
         &self.buffer
     }

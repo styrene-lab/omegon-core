@@ -49,15 +49,30 @@ pub struct App {
     agent_active: bool,
     /// True when we should exit.
     should_quit: bool,
+    /// Current model string for footer display.
+    model: String,
+    /// Turn counter.
+    turn: u32,
+    /// Tool calls this session.
+    tool_calls: u32,
+    /// Input history (most recent last).
+    history: Vec<String>,
+    /// History navigation index (None = not navigating).
+    history_idx: Option<usize>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(model: String) -> Self {
         Self {
             editor: Editor::new(),
             conversation: ConversationView::new(),
             agent_active: false,
             should_quit: false,
+            model,
+            turn: 0,
+            tool_calls: 0,
+            history: Vec::new(),
+            history_idx: None,
         }
     }
 
@@ -66,6 +81,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),    // conversation (takes remaining space)
+                Constraint::Length(1), // footer
                 Constraint::Length(3), // editor
             ])
             .split(frame.area());
@@ -80,32 +96,78 @@ impl App {
             .scroll((self.conversation.scroll_offset(), 0));
         frame.render_widget(conv_widget, chunks[0]);
 
+        // Footer
+        let status_str = if self.agent_active { "working" } else { "idle" };
+        let model_short = self.model.split(':').last().unwrap_or(&self.model);
+        let footer_text = format!(
+            " Ω {model_short} │ turn {} │ {} tools │ {status_str}",
+            self.turn, self.tool_calls,
+        );
+        let footer = Paragraph::new(footer_text)
+            .style(Style::default().fg(Color::DarkGray).bg(Color::Black));
+        frame.render_widget(footer, chunks[1]);
+
         // Editor
-        let status = if self.agent_active { " (working...)" } else { "" };
         let editor_block = Block::default()
             .borders(Borders::TOP)
-            .title(format!("Ω{status}"));
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(if self.agent_active {
+                Span::styled(" ⟳ ", Style::default().fg(Color::Yellow))
+            } else {
+                Span::styled(" ▸ ", Style::default().fg(Color::Cyan))
+            });
         let editor_text = self.editor.render_text();
         let editor_widget = Paragraph::new(editor_text).block(editor_block);
-        frame.render_widget(editor_widget, chunks[1]);
+        frame.render_widget(editor_widget, chunks[2]);
 
-        // Position cursor in editor
-        let editor_area = chunks[1];
-        let cursor_x = editor_area.x + 1 + self.editor.cursor_position() as u16;
-        let cursor_y = editor_area.y + 1; // +1 for border
-        frame.set_cursor_position(Position::new(
-            cursor_x.min(editor_area.right().saturating_sub(1)),
-            cursor_y,
-        ));
+        // Position cursor in editor (only when not agent_active)
+        if !self.agent_active {
+            let editor_area = chunks[2];
+            let cursor_x = editor_area.x + 1 + self.editor.cursor_position() as u16;
+            let cursor_y = editor_area.y + 1; // +1 for border
+            frame.set_cursor_position(Position::new(
+                cursor_x.min(editor_area.right().saturating_sub(1)),
+                cursor_y,
+            ));
+        }
+    }
+
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let idx = match self.history_idx {
+            None => self.history.len().saturating_sub(1),
+            Some(i) => i.saturating_sub(1),
+        };
+        self.history_idx = Some(idx);
+        self.editor.set_text(&self.history[idx]);
+    }
+
+    fn history_down(&mut self) {
+        match self.history_idx {
+            None => {}
+            Some(i) => {
+                if i + 1 < self.history.len() {
+                    self.history_idx = Some(i + 1);
+                    self.editor.set_text(&self.history[i + 1]);
+                } else {
+                    self.history_idx = None;
+                    self.editor.set_text("");
+                }
+            }
+        }
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::TurnStart { .. } => {
+            AgentEvent::TurnStart { turn } => {
                 self.agent_active = true;
+                self.turn = turn;
             }
             AgentEvent::TurnEnd { .. } => {
-                self.agent_active = false;
+                // Don't set agent_active=false here — wait for AgentEnd
+                // (multiple turns happen in sequence)
             }
             AgentEvent::MessageChunk { text } => {
                 self.conversation.append_streaming(&text);
@@ -115,6 +177,7 @@ impl App {
             }
             AgentEvent::ToolStart { id, name, .. } => {
                 self.conversation.push_tool_start(&id, &name);
+                self.tool_calls += 1;
             }
             AgentEvent::ToolEnd { id, is_error, .. } => {
                 self.conversation.push_tool_end(&id, is_error);
@@ -135,6 +198,7 @@ impl App {
 pub async fn run_tui(
     mut events_rx: broadcast::Receiver<AgentEvent>,
     command_tx: mpsc::Sender<TuiCommand>,
+    model: String,
 ) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -150,7 +214,7 @@ pub async fn run_tui(
         original_hook(info);
     }));
 
-    let mut app = App::new();
+    let mut app = App::new(model);
 
     loop {
         // Draw
@@ -178,6 +242,8 @@ pub async fn run_tui(
                                 let _ = command_tx.send(TuiCommand::Quit).await;
                             } else {
                                 app.conversation.push_user(&text);
+                                app.history.push(text.clone());
+                                app.history_idx = None;
                                 app.agent_active = true;
                                 let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
                             }
@@ -201,10 +267,16 @@ pub async fn run_tui(
                     (KeyCode::End, _) if !app.agent_active => {
                         app.editor.move_end();
                     }
-                    (KeyCode::Up, _) => {
+                    (KeyCode::Up, _) if !app.agent_active => {
+                        app.history_up();
+                    }
+                    (KeyCode::Down, _) if !app.agent_active => {
+                        app.history_down();
+                    }
+                    (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, _) if app.agent_active => {
                         app.conversation.scroll_up(3);
                     }
-                    (KeyCode::Down, _) => {
+                    (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, _) if app.agent_active => {
                         app.conversation.scroll_down(3);
                     }
                     (KeyCode::PageUp, _) => {
