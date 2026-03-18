@@ -1,18 +1,21 @@
 //! System prompt assembly for the headless agent.
 //!
-//! Phase 0: static base prompt + tool definitions.
+//! Phase 0: static base prompt + tool definitions + project directives.
 //! Phase 0+: ContextManager provides dynamic injection.
 
 use omegon_traits::ToolDefinition;
 use std::path::Path;
 
 /// Build the base system prompt for headless mode.
+///
+/// Loads project directives (AGENTS.md) from the working directory if present.
 pub fn build_base_prompt(cwd: &Path, tools: &[ToolDefinition]) -> String {
     let date = chrono_date();
     let tool_list = format_tool_list(tools);
+    let project_directives = load_project_directives(cwd);
 
     format!(
-        r#"You are an expert coding assistant. You help users by reading files, executing commands, editing code, and writing new files.
+        r#"You are an expert coding assistant operating as a headless agent. You help by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 {tool_list}
@@ -24,12 +27,48 @@ Guidelines:
 - Use write only for new files or complete rewrites
 - Be concise in your responses
 - Show file paths clearly when working with files
-- When you complete the task, summarize what you did
-
+- Always commit your work with clear, descriptive commit messages before finishing
+- Do NOT push — only commit locally
+- When you complete the task, update any task/result sections in the prompt, then summarize what you did
+{project_directives}
 Current date: {date}
 Current working directory: {cwd}"#,
         cwd = cwd.display()
     )
+}
+
+/// Load project directives from AGENTS.md files.
+///
+/// Checks (in order):
+/// 1. `<cwd>/AGENTS.md` — project-level directives
+/// 2. Walks up to repo root looking for AGENTS.md
+///
+/// Returns a formatted section or empty string if no directives found.
+fn load_project_directives(cwd: &Path) -> String {
+    // Try cwd first, then walk up to find repo root
+    let mut dir = cwd.to_path_buf();
+    loop {
+        let agents_file = dir.join("AGENTS.md");
+        if agents_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&agents_file) {
+                // Trim to reasonable size — don't blow up the system prompt
+                let trimmed = if content.len() > 4000 {
+                    format!("{}...\n[truncated at 4000 chars]", &content[..4000])
+                } else {
+                    content
+                };
+                return format!(
+                    "\n# Project Directives\n\nFrom `{}`:\n\n{trimmed}\n",
+                    agents_file.display()
+                );
+            }
+        }
+        // Stop at git root or filesystem root
+        if dir.join(".git").exists() || !dir.pop() {
+            break;
+        }
+    }
+    String::new()
 }
 
 fn format_tool_list(tools: &[ToolDefinition]) -> String {
@@ -117,5 +156,19 @@ mod tests {
         assert!(prompt.contains("test_tool"));
         assert!(prompt.contains("A test tool"));
         assert!(prompt.contains("/tmp"));
+    }
+
+    #[test]
+    fn base_prompt_includes_commit_instructions() {
+        let tools = vec![];
+        let prompt = build_base_prompt(Path::new("/tmp"), &tools);
+        assert!(prompt.contains("commit your work"), "should instruct to commit");
+        assert!(prompt.contains("Do NOT push"), "should instruct not to push");
+    }
+
+    #[test]
+    fn load_directives_returns_empty_for_missing() {
+        let directives = load_project_directives(Path::new("/tmp/nonexistent"));
+        assert!(directives.is_empty());
     }
 }

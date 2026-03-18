@@ -8,7 +8,7 @@ use indexmap::IndexSet;
 use omegon_traits::LifecyclePhase;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A tool call extracted from an assistant message.
 #[derive(Debug, Clone)]
@@ -118,6 +118,14 @@ impl IntentDocument {
             }
         }
     }
+}
+
+/// Serializable session snapshot for save/resume.
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionSnapshot {
+    messages: Vec<LlmMessage>,
+    intent: IntentDocument,
+    decay_window: usize,
 }
 
 /// The full conversation state.
@@ -281,6 +289,82 @@ impl ConversationState {
         }
     }
 
+    // ── Session persistence ──────────────────────────────────────────────
+
+    /// Save conversation state to a JSON file for later resumption.
+    /// Persists: the LLM-facing view (not canonical — raw may contain
+    /// non-serializable handles), the intent document, and turn count.
+    pub fn save_session(&self, path: &Path) -> anyhow::Result<()> {
+        let view = self.build_llm_view();
+        let session = SessionSnapshot {
+            messages: view,
+            intent: self.intent.clone(),
+            decay_window: self.decay_window,
+        };
+        let json = serde_json::to_string_pretty(&session)?;
+        std::fs::write(path, json)?;
+        tracing::info!(path = %path.display(), turns = self.intent.stats.turns, "session saved");
+        Ok(())
+    }
+
+    /// Load a previously saved session. The loaded messages become the
+    /// canonical history (since they were already decay-processed at save time).
+    pub fn load_session(path: &Path) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let snapshot: SessionSnapshot = serde_json::from_str(&json)?;
+        tracing::info!(
+            path = %path.display(),
+            turns = snapshot.intent.stats.turns,
+            messages = snapshot.messages.len(),
+            "session loaded"
+        );
+
+        // Reconstruct canonical from the saved LLM view
+        let canonical: Vec<AgentMessage> = snapshot
+            .messages
+            .into_iter()
+            .enumerate()
+            .map(|(i, msg)| {
+                let turn = i as u32;
+                match msg {
+                    LlmMessage::User { content } => AgentMessage::User { text: content, turn },
+                    LlmMessage::Assistant { text, thinking, tool_calls, raw } => {
+                        AgentMessage::Assistant(
+                            AssistantMessage {
+                                text: text.join("\n"),
+                                thinking: if thinking.is_empty() { None } else { Some(thinking.join("\n")) },
+                                tool_calls: tool_calls.into_iter().map(|tc| ToolCall {
+                                    id: tc.id,
+                                    name: tc.name,
+                                    arguments: tc.arguments,
+                                }).collect(),
+                                raw: raw.unwrap_or(Value::Null),
+                            },
+                            turn,
+                        )
+                    }
+                    LlmMessage::ToolResult { call_id, tool_name, content, is_error } => {
+                        AgentMessage::ToolResult(
+                            ToolResultEntry {
+                                call_id,
+                                tool_name,
+                                content: vec![omegon_traits::ContentBlock::Text { text: content }],
+                                is_error,
+                            },
+                            turn,
+                        )
+                    }
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            canonical,
+            intent: snapshot.intent,
+            decay_window: snapshot.decay_window,
+        })
+    }
+
     /// Convert a canonical message to Omegon's wire format.
     fn to_llm_message(&self, msg: &AgentMessage) -> LlmMessage {
         match msg {
@@ -439,5 +523,46 @@ mod tests {
         if let LlmMessage::Assistant { thinking, .. } = &view[1] {
             assert!(thinking.is_empty(), "Turn 1 at turn 4: should be decayed (age 3 > window 2)");
         }
+    }
+
+    #[test]
+    fn session_save_load_round_trip() {
+        let mut conv = ConversationState::new();
+        conv.push_user("Fix the bug".into());
+        conv.push_assistant(AssistantMessage {
+            text: "I'll fix it".into(),
+            thinking: None,
+            tool_calls: vec![ToolCall {
+                id: "tc1".into(),
+                name: "edit".into(),
+                arguments: serde_json::json!({"path": "src/foo.rs"}),
+            }],
+            raw: serde_json::Value::Null,
+        });
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "tc1".into(),
+            tool_name: "edit".into(),
+            content: vec![omegon_traits::ContentBlock::Text { text: "Edited successfully".into() }],
+            is_error: false,
+        });
+        conv.intent.stats.turns = 1;
+        conv.intent.current_task = Some("Fix the auth bug".into());
+        conv.intent.files_modified.insert(PathBuf::from("src/foo.rs"));
+
+        // Save
+        let tmp = std::env::temp_dir().join("omegon-test-session.json");
+        conv.save_session(&tmp).unwrap();
+
+        // Load
+        let loaded = ConversationState::load_session(&tmp).unwrap();
+        assert_eq!(loaded.intent.stats.turns, 1);
+        assert_eq!(loaded.intent.current_task.as_deref(), Some("Fix the auth bug"));
+        assert!(loaded.intent.files_modified.contains(&PathBuf::from("src/foo.rs")));
+
+        let view = loaded.build_llm_view();
+        assert_eq!(view.len(), 3); // user + assistant + tool_result
+
+        // Cleanup
+        let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -357,6 +357,12 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     )
     .await;
 
+    // Save session for potential resume
+    let session_path = cwd.join(".cleave-session.json");
+    if let Err(e) = conversation.save_session(&session_path) {
+        tracing::debug!("Session save failed (non-fatal): {e}");
+    }
+
     // Graceful bridge shutdown — send "shutdown" before kill_on_drop fires
     bridge.shutdown().await;
 
