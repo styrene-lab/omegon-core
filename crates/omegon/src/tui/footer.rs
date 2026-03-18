@@ -40,6 +40,9 @@ pub struct FooterData {
     pub cwd: String,
     pub compactions: u32,
     pub tool_calls: u32,
+
+    // Context mode
+    pub context_mode: crate::settings::ContextMode,
 }
 
 impl FooterData {

@@ -356,14 +356,17 @@ impl LlmBridge for AnthropicClient {
                 if self.is_oauth { format!("Bearer {}", self.api_key) } else { self.api_key.clone() },
             )
             .header("anthropic-version", "2023-06-01")
-            .header(
-                "anthropic-beta",
-                if self.is_oauth {
-                    "claude-code-20250219,oauth-2025-04-20"
+            .header("anthropic-beta", {
+                let mut flags = if self.is_oauth {
+                    "claude-code-20250219,oauth-2025-04-20".to_string()
                 } else {
-                    "interleaved-thinking-2025-05-14"
-                },
-            )
+                    "interleaved-thinking-2025-05-14".to_string()
+                };
+                if options.extended_context {
+                    flags.push_str(",context-1m-2025-08-07");
+                }
+                flags
+            })
             .header("content-type", "application/json")
             .json(&body)
             .send()

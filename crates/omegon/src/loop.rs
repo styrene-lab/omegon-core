@@ -30,6 +30,8 @@ pub struct LoopConfig {
     pub model: String,
     /// Working directory — used for path resolution in auto-batch rollback.
     pub cwd: std::path::PathBuf,
+    /// Extended context window (1M for Anthropic).
+    pub extended_context: bool,
 }
 
 impl Default for LoopConfig {
@@ -41,6 +43,7 @@ impl Default for LoopConfig {
             retry_delay_ms: 2000,
             model: "anthropic:claude-sonnet-4-6".into(),
             cwd: std::env::current_dir().unwrap_or_default(),
+            extended_context: false,
         }
     }
 }
@@ -68,6 +71,7 @@ pub async fn run(
     let stream_options = StreamOptions {
         model: Some(config.model.clone()),
         reasoning: None, // TODO: configurable
+        extended_context: config.extended_context,
     };
 
     let mut stuck_detector = StuckDetector::new();

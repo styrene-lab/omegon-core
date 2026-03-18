@@ -24,8 +24,54 @@ pub struct Settings {
     /// Context compaction threshold (fraction of context window).
     pub compaction_threshold: f32,
 
-    /// Context window size (tokens). Inferred from model.
+    /// Context window size (tokens). Inferred from model + context_mode.
     pub context_window: usize,
+
+    /// Extended context mode — controls 200k vs 1M for Anthropic models.
+    pub context_mode: ContextMode,
+}
+
+/// Context window mode for providers that support multiple sizes.
+/// Anthropic models default to 200k but support 1M via beta header.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextMode {
+    /// Standard context window (200k for Anthropic, varies for OpenAI).
+    #[default]
+    Standard,
+    /// Extended 1M context window (Anthropic beta).
+    Extended,
+}
+
+impl ContextMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "200k",
+            Self::Extended => "1M",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "standard" | "200k" | "default" => Some(Self::Standard),
+            "extended" | "1m" | "1M" | "million" => Some(Self::Extended),
+            _ => None,
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Standard => "◇",
+            Self::Extended => "◆",
+        }
+    }
+
+    /// Returns the Anthropic beta header flag needed for this mode, if any.
+    pub fn anthropic_beta_flag(&self) -> Option<&'static str> {
+        match self {
+            Self::Standard => None,
+            Self::Extended => Some("context-1m-2025-08-07"),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -36,6 +82,7 @@ impl Default for Settings {
             max_turns: 50,
             compaction_threshold: 0.75,
             context_window: 200_000,
+            context_mode: ContextMode::Standard,
         }
     }
 }
@@ -48,6 +95,15 @@ impl Settings {
             context_window,
             ..Default::default()
         }
+    }
+
+    /// Recalculate context_window based on current model + context_mode.
+    pub fn apply_context_mode(&mut self) {
+        let base = infer_context_window(&self.model);
+        self.context_window = match self.context_mode {
+            ContextMode::Extended if self.provider() == "anthropic" => 1_000_000,
+            _ => base,
+        };
     }
 
     pub fn model_short(&self) -> &str {

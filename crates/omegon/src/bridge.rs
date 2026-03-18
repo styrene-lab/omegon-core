@@ -149,6 +149,8 @@ pub struct StreamOptions {
     pub model: Option<String>,
     /// Reasoning/thinking level
     pub reasoning: Option<String>,
+    /// Extended context window (1M for Anthropic).
+    pub extended_context: bool,
 }
 
 /// Abstraction over how we call LLM providers.

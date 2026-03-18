@@ -304,6 +304,7 @@ impl App {
             self.footer_data.model_id = s.model.clone();
             self.footer_data.model_provider = s.provider().to_string();
             self.footer_data.context_window = s.context_window;
+            self.footer_data.context_mode = s.context_mode;
         }
         self.footer_data.turn = self.turn;
         self.footer_data.tool_calls = self.tool_calls;
@@ -399,6 +400,7 @@ impl App {
         ("stats",    "session telemetry",                    &[]),
         ("compact",  "trigger context compaction",           &[]),
         ("clear",    "clear conversation display",           &[]),
+        ("context",  "toggle context window (200k/1M)",       &["200k", "1m"]),
         ("sessions", "list saved sessions",                  &[]),
         ("memory",   "memory stats",                        &[]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
@@ -472,6 +474,38 @@ impl App {
                     self.footer_data.context_percent, s.context_window,
                     s.model_short(), s.thinking.icon(), s.thinking.as_str(),
                 ))
+            }
+
+            "context" => {
+                if args.is_empty() {
+                    // Toggle
+                    let current = self.settings().context_mode;
+                    let next = match current {
+                        crate::settings::ContextMode::Standard => crate::settings::ContextMode::Extended,
+                        crate::settings::ContextMode::Extended => crate::settings::ContextMode::Standard,
+                    };
+                    self.update_settings(|s| {
+                        s.context_mode = next;
+                        s.apply_context_mode();
+                    });
+                    let s = self.settings();
+                    self.footer_data.context_window = s.context_window;
+                    SlashResult::Display(format!(
+                        "Context → {} {} ({})",
+                        next.icon(), next.as_str(),
+                        if next == crate::settings::ContextMode::Extended { "Anthropic 1M beta" } else { "standard" }
+                    ))
+                } else if let Some(mode) = crate::settings::ContextMode::parse(args) {
+                    self.update_settings(|s| {
+                        s.context_mode = mode;
+                        s.apply_context_mode();
+                    });
+                    let s = self.settings();
+                    self.footer_data.context_window = s.context_window;
+                    SlashResult::Display(format!("Context → {} {}", mode.icon(), mode.as_str()))
+                } else {
+                    SlashResult::Display(format!("Unknown mode: {args}. Options: 200k, 1m"))
+                }
             }
 
             "compact" => {
