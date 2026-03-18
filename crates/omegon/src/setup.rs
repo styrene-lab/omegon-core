@@ -26,6 +26,7 @@ impl AgentSetup {
     /// Initialize tools, memory, lifecycle context, and conversation.
     pub async fn new(cwd: &Path, resume: Option<Option<&str>>) -> anyhow::Result<Self> {
         let cwd = std::fs::canonicalize(cwd)?;
+        let is_child = std::env::var("OMEGON_CHILD").is_ok();
 
         // ─── Tools ──────────────────────────────────────────────────────
         let core_tools = tools::CoreTools::new(cwd.clone());
@@ -43,36 +44,43 @@ impl AgentSetup {
         let db_path = memory_dir.join("facts.db");
         let jsonl_path = memory_dir.join("facts.jsonl");
 
-        // Memory: single backend, two providers (tools + context injection).
-        // Both share the same SQLite connection to avoid SQLITE_BUSY conflicts.
-        // The tool provider handles reads + writes; the context provider only reads.
+        // Memory: two access patterns with separate handles.
+        //
+        // Tool provider (read+write): registered for parent processes only.
+        //   Cleave children (OMEGON_CHILD=1) don't get memory_store/archive/supersede
+        //   to avoid SQLITE_BUSY contention across concurrent child processes.
+        //
+        // Context provider (read-only): registered for ALL processes.
+        //   WAL mode supports unlimited concurrent readers safely.
+        //   Children still get project facts injected into their system prompt.
         let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
 
         if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
-            tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
+            tracing::info!(mind = %mind, db = %db_path.display(), child = is_child, "memory backend loaded");
 
-            let stats = backend.stats(&mind).await.ok();
-            if stats.as_ref().is_none_or(|s| s.active_facts == 0)
-                && jsonl_path.exists()
-                && let Ok(jsonl) = std::fs::read_to_string(&jsonl_path)
-            {
-                match backend.import_jsonl(&jsonl).await {
-                    Ok(import) => tracing::info!(imported = import.imported, "imported facts.jsonl"),
-                    Err(e) => tracing::warn!("JSONL import failed: {e}"),
+            if !is_child {
+                // Parent: import JSONL if DB is empty, register tool provider
+                let stats = backend.stats(&mind).await.ok();
+                if stats.as_ref().is_none_or(|s| s.active_facts == 0)
+                    && jsonl_path.exists()
+                    && let Ok(jsonl) = std::fs::read_to_string(&jsonl_path)
+                {
+                    match backend.import_jsonl(&jsonl).await {
+                        Ok(import) => tracing::info!(imported = import.imported, "imported facts.jsonl"),
+                        Err(e) => tracing::warn!("JSONL import failed: {e}"),
+                    }
                 }
+
+                let provider = omegon_memory::MemoryProvider::new(
+                    backend,
+                    omegon_memory::MarkdownRenderer,
+                    mind.clone(),
+                );
+                tools.push(Box::new(provider));
             }
 
-            let provider = omegon_memory::MemoryProvider::new(
-                backend,
-                omegon_memory::MarkdownRenderer,
-                mind.clone(),
-            );
-            tools.push(Box::new(provider));
-
-            // Context injection: open a second read-only handle.
-            // SQLite WAL mode supports concurrent readers safely.
-            // This is read-only (list_facts, list_episodes, get_fact) —
-            // all writes go through the tool provider above.
+            // Context injection: read-only handle for all processes.
+            // SQLite WAL supports concurrent readers across processes safely.
             if let Ok(ctx_backend) = omegon_memory::SqliteBackend::open(&db_path) {
                 let ctx_provider = omegon_memory::MemoryProvider::new(
                     ctx_backend,
@@ -80,7 +88,7 @@ impl AgentSetup {
                     mind,
                 );
                 memory_context = Some(Box::new(ctx_provider));
-                tracing::info!("Memory context injection enabled (read-only handle)");
+                tracing::info!("Memory context injection enabled");
             }
         }
 

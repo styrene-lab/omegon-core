@@ -40,6 +40,9 @@ impl SqliteBackend {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        // busy_timeout: wait up to 5s for write lock instead of failing immediately.
+        // Critical for multi-process access (cleave children share the same DB file).
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
 
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS minds (

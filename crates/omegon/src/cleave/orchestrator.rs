@@ -398,6 +398,7 @@ async fn dispatch_child(
 
     let mut child = Command::new(config.agent_binary)
         .args(args)
+        .env("OMEGON_CHILD", "1") // Signal child mode — read-only memory, no session save
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
