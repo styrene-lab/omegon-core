@@ -423,26 +423,33 @@ fn auto_commit_worktree(wt_path: &Path, label: &str) {
         return;
     }
 
-    // Check for uncommitted changes
+    // Check for uncommitted changes (excluding .cleave-prompt.md which is always present)
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(wt_path)
         .output();
 
-    let has_changes = match status {
-        Ok(out) => !out.stdout.is_empty(),
+    let has_real_changes = match &status {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.lines().any(|line| {
+                let file = line.get(3..).unwrap_or("");
+                !file.starts_with(".cleave-prompt")
+            })
+        }
         Err(_) => false,
     };
 
-    if !has_changes {
+    if !has_real_changes {
+        tracing::info!(child = %label, "no real changes to auto-commit (only .cleave-prompt.md)");
         return;
     }
 
     tracing::info!(child = %label, "auto-committing uncommitted changes in worktree");
 
-    // Stage all changes
+    // Stage all changes except .cleave-prompt.md
     let _ = std::process::Command::new("git")
-        .args(["add", "-A"])
+        .args(["add", "-A", "--", ".", ":!.cleave-prompt.md"])
         .current_dir(wt_path)
         .output();
 
