@@ -23,6 +23,8 @@ pub struct ContextManager {
     recent_files: VecDeque<PathBuf>,
     phase: LifecyclePhase,
     session_start: Instant,
+    /// Context window size in tokens for budget calculations.
+    context_window: usize,
 }
 
 struct ActiveInjection {
@@ -40,7 +42,13 @@ impl ContextManager {
             recent_files: VecDeque::with_capacity(20),
             phase: LifecyclePhase::default(),
             session_start: Instant::now(),
+            context_window: 200_000, // Default for Anthropic models
         }
+    }
+
+    /// Set the context window size (in tokens) for budget calculations.
+    pub fn set_context_window(&mut self, tokens: usize) {
+        self.context_window = tokens;
     }
 
     /// Build the system prompt for this turn.
@@ -57,13 +65,19 @@ impl ContextManager {
         let recent_files_vec: Vec<PathBuf> =
             self.recent_files.iter().cloned().collect();
 
+        // Compute remaining budget for context injection.
+        // Reserve ~80% of the context window for conversation, 20% for system prompt.
+        // System prompt budget = context_window * 0.2 minus the base prompt size.
+        let system_budget = (self.context_window / 5)
+            .saturating_sub(self.base_prompt.len() / 4);
+
         let signals = ContextSignals {
             user_prompt,
             recent_tools: &recent_tools_vec,
             recent_files: &recent_files_vec,
             lifecycle_phase: &self.phase,
             turn_number: conversation.turn_count(),
-            context_budget_tokens: 4000, // TODO: compute from remaining budget
+            context_budget_tokens: system_budget,
         };
 
         // Collect injections from all providers
@@ -75,6 +89,9 @@ impl ContextManager {
                 });
             }
         }
+
+        // Inject file-type-specific guidance
+        self.inject_file_type_context();
 
         // Inject session HUD (high priority, always present, refreshed each turn)
         let hud = self.build_session_hud(conversation);
@@ -180,6 +197,51 @@ impl ContextManager {
                     ttl_turns: 1,
                 },
             });
+        }
+    }
+
+    /// Inject language-specific guidance based on recently-touched file types.
+    /// Only injects once per file type per session (avoids repetition).
+    fn inject_file_type_context(&mut self) {
+        // Check if we already have a file-type injection active
+        let already_injected: std::collections::HashSet<String> = self
+            .active_injections
+            .iter()
+            .filter(|a| a.injection.source.starts_with("file-type:"))
+            .map(|a| a.injection.source.clone())
+            .collect();
+
+        for file in self.recent_files.iter().rev().take(5) {
+            let ext = file
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let source_key = format!("file-type:{ext}");
+
+            if already_injected.contains(&source_key) {
+                continue;
+            }
+
+            let guidance = match ext {
+                "rs" => Some("Rust: use `cargo check` for type checking, `cargo clippy` for lints. Prefer `impl` blocks over free functions. Use `?` for error propagation. Tests go in `#[cfg(test)] mod tests` at the bottom of the file."),
+                "ts" | "tsx" => Some("TypeScript: use `npx tsc --noEmit` for type checking. Prefer strict types over `any`. Use `node:test` for testing. ESM imports."),
+                "py" => Some("Python: use `ruff check` for linting, `mypy` for type checking, `pytest` for tests. Prefer type hints. Use `pathlib` over `os.path`."),
+                "go" => Some("Go: use `go vet` for checking, `go test ./...` for tests. Exported names start with uppercase. Error handling via returned `error` values."),
+                "toml" if file.file_name().is_some_and(|n| n == "Cargo.toml") => Some("Cargo.toml: Rust workspace/package manifest. After dependency changes, run `cargo check`."),
+                _ => None,
+            };
+
+            if let Some(text) = guidance {
+                self.active_injections.push(ActiveInjection {
+                    remaining_turns: 8, // Persist for 8 turns
+                    injection: ContextInjection {
+                        source: source_key,
+                        content: format!("[Language context: {text}]"),
+                        priority: 50, // Lower than HUD/intent
+                        ttl_turns: 8,
+                    },
+                });
+            }
         }
     }
 

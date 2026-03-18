@@ -99,7 +99,7 @@ pub struct SessionStatsAccumulator {
 
 impl IntentDocument {
     /// Update from tool call activity — automatic population.
-    pub fn update_from_tools(&mut self, calls: &[ToolCall], _results: &[ToolResultEntry]) {
+    pub fn update_from_tools(&mut self, calls: &[ToolCall], results: &[ToolResultEntry]) {
         self.stats.tool_calls += calls.len() as u32;
 
         for call in calls {
@@ -113,9 +113,82 @@ impl IntentDocument {
                     if let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) {
                         self.files_modified.insert(PathBuf::from(path));
                     }
+                    // change tool may include multiple file paths in an edits array
+                    if let Some(edits) = call.arguments.get("edits").and_then(|v| v.as_array()) {
+                        for edit in edits {
+                            if let Some(path) = edit.get("file").and_then(|v| v.as_str()) {
+                                self.files_modified.insert(PathBuf::from(path));
+                            }
+                        }
+                    }
+                }
+                "bash" => {
+                    // Track if bash produced modifications via exit code 0 + common write commands
+                    if let Some(cmd) = call.arguments.get("command").and_then(|v| v.as_str()) {
+                        // Track git operations that indicate file state changes
+                        if cmd.starts_with("git add")
+                            || cmd.starts_with("git commit")
+                            || cmd.starts_with("git stash")
+                        {
+                            // Don't add to files_modified — these are meta-operations
+                        } else if cmd.contains("sed -i") || cmd.contains("tee ") {
+                            // Heuristic: bash writes are hard to track, but these are common
+                            // patterns. We note them in the stats but can't track specific files.
+                        }
+                    }
                 }
                 _ => {}
             }
+        }
+
+        // Track tool errors for failed-approach detection
+        for result in results {
+            if result.is_error {
+                // Don't auto-add failed approaches for individual tool errors —
+                // that's too granular. The agent marks failed approaches explicitly
+                // via omg:failed tags. But we do count error rate for the HUD.
+            }
+        }
+    }
+
+    /// Auto-populate current_task from the first user message if not set.
+    pub fn set_task_from_prompt(&mut self, prompt: &str) {
+        if self.current_task.is_some() {
+            return;
+        }
+        // Use first line, truncated to 200 chars
+        let first_line = prompt.lines().next().unwrap_or(prompt);
+        let task = if first_line.len() > 200 {
+            let mut end = 200;
+            while end > 0 && !first_line.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &first_line[..end])
+        } else {
+            first_line.to_string()
+        };
+        if !task.trim().is_empty() {
+            self.current_task = Some(task);
+        }
+    }
+
+    /// Add a constraint, deduplicating against existing entries.
+    pub fn add_constraint(&mut self, text: &str) {
+        let normalized = text.trim();
+        if !normalized.is_empty()
+            && !self.constraints_discovered.iter().any(|c| c == normalized)
+        {
+            self.constraints_discovered.push(normalized.to_string());
+        }
+    }
+
+    /// Add an open question, deduplicating against existing entries.
+    pub fn add_question(&mut self, text: &str) {
+        let normalized = text.trim();
+        if !normalized.is_empty()
+            && !self.open_questions.iter().any(|q| q == normalized)
+        {
+            self.open_questions.push(normalized.to_string());
         }
     }
 }
@@ -139,7 +212,12 @@ pub struct ConversationState {
     pub intent: IntentDocument,
 
     /// Decay window: messages older than this many turns get decayed.
+    /// Referenced tool results get an extra grace period.
     decay_window: usize,
+
+    /// Turn indices of tool results that the LLM has referenced (mentioned
+    /// paths or content from). These get an extended decay window.
+    referenced_turns: std::collections::HashSet<u32>,
 
     /// Compaction summary — if set, injected as the first message after compaction.
     /// Replaces evicted messages so the LLM has continuity.
@@ -152,6 +230,7 @@ impl ConversationState {
             canonical: Vec::new(),
             intent: IntentDocument::default(),
             decay_window: 10,
+            referenced_turns: std::collections::HashSet::new(),
             compaction_summary: None,
         }
     }
@@ -273,12 +352,79 @@ impl ConversationState {
 
     pub fn push_user(&mut self, text: String) {
         let turn = self.intent.stats.turns;
+        // Auto-populate current_task from the first non-system user message
+        if !text.starts_with("[System:") {
+            self.intent.set_task_from_prompt(&text);
+        }
         self.canonical.push(AgentMessage::User { text, turn });
     }
 
     pub fn push_assistant(&mut self, msg: AssistantMessage) {
         let turn = self.intent.stats.turns;
+        // Reference tracking: scan the assistant's text for paths and identifiers
+        // that appear in recent tool results. Referenced results decay slower.
+        self.track_references(&msg.text);
         self.canonical.push(AgentMessage::Assistant(msg, turn));
+    }
+
+    /// Scan assistant text for references to recent tool results.
+    /// If the assistant mentions a file path from a recent read/edit result,
+    /// mark that result's turn as "referenced" (extended decay window).
+    fn track_references(&mut self, assistant_text: &str) {
+        if assistant_text.is_empty() {
+            return;
+        }
+
+        for msg in self.canonical.iter().rev().take(30) {
+            match msg {
+                AgentMessage::ToolResult(result, turn) if !result.is_error => {
+                    // Check if the assistant mentions paths from tool results
+                    let text_content = result
+                        .content
+                        .iter()
+                        .filter_map(|c| c.as_text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    // For read/edit/write results, check if the result content
+                    // or known file paths are mentioned in the assistant text
+                    let referenced = match result.tool_name.as_str() {
+                        "read" | "edit" | "write" => {
+                            // Quick heuristic: if the assistant mentions an identifier
+                            // from the first few lines of the result, it's referenced.
+                            text_content
+                                .lines()
+                                .take(10)
+                                .filter(|l| l.len() > 8 && l.len() < 200)
+                                .any(|line| {
+                                    // Extract identifiers: sequences of [a-zA-Z0-9_] with length > 4
+                                    extract_identifiers(line)
+                                        .any(|ident| assistant_text.contains(ident))
+                                })
+                        }
+                        "bash" => {
+                            // Bash output is harder to track — check first/last lines
+                            text_content
+                                .lines()
+                                .take(3)
+                                .chain(text_content.lines().rev().take(3))
+                                .any(|line| {
+                                    let trimmed = line.trim();
+                                    trimmed.len() > 6
+                                        && trimmed.len() < 200
+                                        && assistant_text.contains(trimmed)
+                                })
+                        }
+                        _ => false,
+                    };
+
+                    if referenced {
+                        self.referenced_turns.insert(*turn);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn push_tool_result(&mut self, result: ToolResultEntry) {
@@ -327,7 +473,13 @@ impl ConversationState {
 
         for msg in &self.canonical {
             let turn_age = current_turn.saturating_sub(msg.turn());
-            if turn_age > self.decay_window as u32 {
+            // Referenced tool results get 2x the decay window
+            let effective_window = if self.referenced_turns.contains(&msg.turn()) {
+                self.decay_window as u32 * 2
+            } else {
+                self.decay_window as u32
+            };
+            if turn_age > effective_window {
                 messages.push(self.decay_message(msg));
             } else {
                 messages.push(self.to_llm_message(msg));
@@ -345,10 +497,10 @@ impl ConversationState {
         for capture in captures {
             match capture {
                 crate::lifecycle::capture::AmbientCapture::Constraint(text) => {
-                    self.intent.constraints_discovered.push(text.clone());
+                    self.intent.add_constraint(text);
                 }
                 crate::lifecycle::capture::AmbientCapture::Question(text) => {
-                    self.intent.open_questions.push(text.clone());
+                    self.intent.add_question(text);
                 }
                 crate::lifecycle::capture::AmbientCapture::Approach(text) => {
                     self.intent.approach = Some(text.clone());
@@ -357,28 +509,63 @@ impl ConversationState {
                     description,
                     reason,
                 } => {
-                    self.intent.failed_approaches.push(FailedApproach {
-                        description: description.clone(),
-                        reason: reason.clone(),
-                        turn: self.intent.stats.turns,
-                    });
+                    // Deduplicate failed approaches by description
+                    let normalized = description.trim();
+                    if !self
+                        .intent
+                        .failed_approaches
+                        .iter()
+                        .any(|fa| fa.description.trim() == normalized)
+                    {
+                        self.intent.failed_approaches.push(FailedApproach {
+                            description: description.clone(),
+                            reason: reason.clone(),
+                            turn: self.intent.stats.turns,
+                        });
+                    }
                 }
-                _ => {
-                    // Decision, Phase — handled by lifecycle engine
+                crate::lifecycle::capture::AmbientCapture::Phase(phase_str) => {
+                    let phase = match phase_str.trim().to_lowercase().as_str() {
+                        "explore" | "exploring" => {
+                            omegon_traits::LifecyclePhase::Exploring { node_id: None }
+                        }
+                        "specify" | "specifying" => {
+                            omegon_traits::LifecyclePhase::Specifying { change_id: None }
+                        }
+                        "decompose" | "decomposing" => {
+                            omegon_traits::LifecyclePhase::Decomposing
+                        }
+                        "implement" | "implementing" => {
+                            omegon_traits::LifecyclePhase::Implementing { change_id: None }
+                        }
+                        "verify" | "verifying" => {
+                            omegon_traits::LifecyclePhase::Verifying { change_id: None }
+                        }
+                        "idle" => omegon_traits::LifecyclePhase::Idle,
+                        _ => continue, // Unknown phase string — skip
+                    };
+                    self.intent.lifecycle_phase = phase;
+                }
+                crate::lifecycle::capture::AmbientCapture::Decision { .. } => {
+                    // Decisions are captured for lifecycle engine integration.
+                    // Currently logged — will be routed to design-tree when
+                    // the lifecycle store is implemented.
+                    tracing::debug!(
+                        "Ambient decision captured (not yet routed to lifecycle store)"
+                    );
                 }
             }
         }
     }
 
     /// Decay a message to a skeleton — strip bulk content, keep metadata.
+    /// The skeleton preserves enough to understand what happened without
+    /// the bulk content. Tool-specific metadata (file paths, exit codes,
+    /// line counts) is extracted before discarding the full content.
     fn decay_message(&self, msg: &AgentMessage) -> LlmMessage {
         match msg {
             AgentMessage::ToolResult(result, _) => {
-                let summary = if result.is_error {
-                    format!("[Tool {} errored]", result.tool_name)
-                } else {
-                    format!("[Tool {} completed successfully]", result.tool_name)
-                };
+                let summary = self.decay_tool_result(result);
                 LlmMessage::ToolResult {
                     call_id: result.call_id.clone(),
                     tool_name: result.tool_name.clone(),
@@ -501,8 +688,92 @@ impl ConversationState {
             canonical,
             intent: snapshot.intent,
             decay_window: snapshot.decay_window,
+            referenced_turns: std::collections::HashSet::new(),
             compaction_summary: snapshot.compaction_summary,
         })
+    }
+
+    /// Produce a rich skeleton for a decayed tool result.
+    /// Extracts tool-specific metadata so the LLM remembers *what* happened
+    /// without the bulk content consuming context budget.
+    fn decay_tool_result(&self, result: &ToolResultEntry) -> String {
+        let text = result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if result.is_error {
+            // Preserve error message — errors are high-signal
+            let error_preview = if text.len() > 300 {
+                let mut end = 300;
+                while end > 0 && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &text[..end])
+            } else {
+                text
+            };
+            return format!("[Tool {} ERROR: {}]", result.tool_name, error_preview);
+        }
+
+        match result.tool_name.as_str() {
+            "read" => {
+                let lines = text.lines().count();
+                let bytes = text.len();
+                // Try to extract the path from the result or just report size
+                format!("[Read: {lines} lines, {bytes} bytes]")
+            }
+            "bash" | "execute" => {
+                let lines = text.lines().count();
+                // Extract exit code if present in the result text
+                let exit_hint = if text.contains("exit code") || text.contains("exited with") {
+                    " (non-zero exit)"
+                } else {
+                    ""
+                };
+                // Preserve last 3 lines as signal (summary/errors often at end)
+                let tail: Vec<&str> = text.lines().rev().take(3).collect();
+                let tail_str: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+                if lines <= 5 {
+                    // Short output — keep it all
+                    format!("[bash{exit_hint}: {text}]")
+                } else {
+                    format!("[bash: {lines} lines{exit_hint}. Tail:\n{tail_str}]")
+                }
+            }
+            "edit" => {
+                // Edit results are usually "Successfully replaced text in <path>"
+                format!("[{text}]")
+            }
+            "write" => {
+                format!("[{text}]")
+            }
+            "web_search" => {
+                let lines = text.lines().count();
+                format!("[web_search: {lines} lines of results]")
+            }
+            _ => {
+                // Generic: line count + first line preview
+                let lines = text.lines().count();
+                let first_line = text.lines().next().unwrap_or("").trim();
+                let preview = if first_line.len() > 120 {
+                    let mut end = 120;
+                    while end > 0 && !first_line.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}…", &first_line[..end])
+                } else {
+                    first_line.to_string()
+                };
+                if lines <= 3 {
+                    format!("[{}: {}]", result.tool_name, text.trim())
+                } else {
+                    format!("[{}: {lines} lines. {preview}]", result.tool_name)
+                }
+            }
+        }
     }
 
     /// Convert a canonical message to Omegon's wire format.
@@ -554,6 +825,31 @@ impl ConversationState {
             }
         }
     }
+}
+
+/// Extract identifier-like tokens from a line of code.
+/// Returns sequences of `[a-zA-Z0-9_]` that are at least 5 chars long.
+fn extract_identifiers(line: &str) -> impl Iterator<Item = &str> {
+    let bytes = line.as_bytes();
+    let mut results = Vec::new();
+    let mut start = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start {
+            if i - s >= 5 {
+                results.push(&line[s..i]);
+            }
+            start = None;
+        }
+    }
+    // Handle identifier at end of line
+    if let Some(s) = start.filter(|&s| line.len() - s >= 5) {
+        results.push(&line[s..]);
+    }
+    results.into_iter()
 }
 
 #[cfg(test)]
@@ -624,7 +920,10 @@ mod tests {
         let view = conv.build_llm_view();
         if let LlmMessage::ToolResult { content, tool_name, .. } = &view[0] {
             assert_eq!(tool_name, "read");
-            assert!(content.contains("completed successfully"), "got: {content}");
+            // Rich decay skeleton includes line/byte counts
+            assert!(content.contains("Read:") && content.contains("bytes"), "got: {content}");
+            // Should NOT contain the original bulk content
+            assert!(!content.contains("xxxxx"), "should strip bulk content");
         } else {
             panic!("Expected ToolResult message");
         }
@@ -824,6 +1123,231 @@ mod tests {
         assert_eq!(intent.files_read.len(), 1);
         assert_eq!(intent.files_modified.len(), 2);
         assert_eq!(intent.stats.tool_calls, 4);
+    }
+
+    #[test]
+    fn auto_task_from_first_user_message() {
+        let mut conv = ConversationState::new();
+        assert!(conv.intent.current_task.is_none());
+
+        conv.push_user("Fix the authentication bug in src/auth.rs".into());
+        assert_eq!(
+            conv.intent.current_task.as_deref(),
+            Some("Fix the authentication bug in src/auth.rs")
+        );
+
+        // Second user message should NOT overwrite the task
+        conv.push_user("Also fix the tests".into());
+        assert_eq!(
+            conv.intent.current_task.as_deref(),
+            Some("Fix the authentication bug in src/auth.rs")
+        );
+    }
+
+    #[test]
+    fn system_messages_dont_set_task() {
+        let mut conv = ConversationState::new();
+        conv.push_user("[System: You've been running for 35 turns.]".into());
+        assert!(conv.intent.current_task.is_none(), "system messages should not set task");
+
+        conv.push_user("Now do the real work".into());
+        assert_eq!(conv.intent.current_task.as_deref(), Some("Now do the real work"));
+    }
+
+    #[test]
+    fn constraint_deduplication() {
+        let mut intent = IntentDocument::default();
+        intent.add_constraint("OAuth tokens expire in 30 minutes");
+        intent.add_constraint("OAuth tokens expire in 30 minutes");
+        intent.add_constraint("  OAuth tokens expire in 30 minutes  ");
+        assert_eq!(intent.constraints_discovered.len(), 1);
+
+        intent.add_constraint("Different constraint");
+        assert_eq!(intent.constraints_discovered.len(), 2);
+    }
+
+    #[test]
+    fn question_deduplication() {
+        let mut intent = IntentDocument::default();
+        intent.add_question("How does caching work?");
+        intent.add_question("How does caching work?");
+        assert_eq!(intent.open_questions.len(), 1);
+    }
+
+    #[test]
+    fn empty_constraint_ignored() {
+        let mut intent = IntentDocument::default();
+        intent.add_constraint("");
+        intent.add_constraint("   ");
+        assert!(intent.constraints_discovered.is_empty());
+    }
+
+    #[test]
+    fn decay_bash_preserves_tail() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0;
+
+        let output = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "bash".into(),
+            content: vec![omegon_traits::ContentBlock::Text { text: output }],
+            is_error: false,
+        });
+        conv.intent.stats.turns = 1;
+
+        let view = conv.build_llm_view();
+        if let LlmMessage::ToolResult { content, .. } = &view[0] {
+            assert!(content.contains("20 lines"), "should report line count, got: {content}");
+            assert!(content.contains("line 20"), "should preserve tail");
+            assert!(!content.contains("line 5"), "should strip middle");
+        }
+    }
+
+    #[test]
+    fn decay_error_preserves_message() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0;
+
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "bash".into(),
+            content: vec![omegon_traits::ContentBlock::Text {
+                text: "command not found: foobar".into(),
+            }],
+            is_error: true,
+        });
+        conv.intent.stats.turns = 1;
+
+        let view = conv.build_llm_view();
+        if let LlmMessage::ToolResult { content, .. } = &view[0] {
+            assert!(content.contains("ERROR"), "should indicate error");
+            assert!(content.contains("command not found"), "should preserve error text");
+        }
+    }
+
+    #[test]
+    fn decay_edit_preserves_path_info() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 0;
+
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "edit".into(),
+            content: vec![omegon_traits::ContentBlock::Text {
+                text: "Successfully replaced text in src/auth.rs".into(),
+            }],
+            is_error: false,
+        });
+        conv.intent.stats.turns = 1;
+
+        let view = conv.build_llm_view();
+        if let LlmMessage::ToolResult { content, .. } = &view[0] {
+            assert!(content.contains("src/auth.rs"), "should preserve path, got: {content}");
+        }
+    }
+
+    #[test]
+    fn referenced_results_decay_slower() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 2;
+        conv.intent.stats.turns = 1;
+
+        // Turn 1: read a file with identifiable content
+        conv.push_tool_result(ToolResultEntry {
+            call_id: "t1".into(),
+            tool_name: "read".into(),
+            content: vec![omegon_traits::ContentBlock::Text {
+                text: "pub fn authenticate_user(token: AuthToken) -> Result<User> {\n    validate_token(token)\n}".into(),
+            }],
+            is_error: false,
+        });
+
+        // Turn 2: assistant references the function name
+        conv.intent.stats.turns = 2;
+        conv.push_assistant(AssistantMessage {
+            text: "I can see the authenticate_user function validates tokens.".into(),
+            thinking: None,
+            tool_calls: vec![],
+            raw: Value::Null,
+        });
+
+        // Turn 1's tool result should now be in referenced_turns
+        assert!(conv.referenced_turns.contains(&1), "turn 1 should be marked as referenced");
+
+        // At turn 5 (age 4 for turn-1 result), with decay_window=2:
+        // Unreferenced: 4 > 2 → decayed
+        // Referenced: 4 > 4 (2*2) → NOT decayed
+        conv.intent.stats.turns = 5;
+        let view = conv.build_llm_view();
+        // The tool result at turn 1 should NOT be decayed (referenced, extended window = 4)
+        if let LlmMessage::ToolResult { content, .. } = &view[0] {
+            assert!(
+                content.contains("authenticate_user"),
+                "referenced result should preserve full content at age 4, got: {content}"
+            );
+        }
+
+        // At turn 6 (age 5), even referenced results should decay (5 > 4)
+        conv.intent.stats.turns = 6;
+        let view = conv.build_llm_view();
+        if let LlmMessage::ToolResult { content, .. } = &view[0] {
+            assert!(
+                !content.contains("authenticate_user"),
+                "referenced result should be decayed at age 5"
+            );
+        }
+    }
+
+    #[test]
+    fn change_tool_tracks_multi_file_edits() {
+        let mut intent = IntentDocument::default();
+        let calls = vec![ToolCall {
+            id: "1".into(),
+            name: "change".into(),
+            arguments: serde_json::json!({
+                "edits": [
+                    {"file": "src/a.rs", "old": "x", "new": "y"},
+                    {"file": "src/b.rs", "old": "x", "new": "y"},
+                ]
+            }),
+        }];
+        intent.update_from_tools(&calls, &[]);
+        assert!(intent.files_modified.contains(&PathBuf::from("src/a.rs")));
+        assert!(intent.files_modified.contains(&PathBuf::from("src/b.rs")));
+    }
+
+    #[test]
+    fn ambient_phase_capture() {
+        let mut conv = ConversationState::new();
+        let captures = vec![
+            crate::lifecycle::capture::AmbientCapture::Phase("implement".into()),
+        ];
+        conv.apply_ambient_captures(&captures);
+        assert!(matches!(
+            conv.intent.lifecycle_phase,
+            omegon_traits::LifecyclePhase::Implementing { .. }
+        ));
+    }
+
+    #[test]
+    fn ambient_capture_deduplicates() {
+        let mut conv = ConversationState::new();
+        let captures = vec![
+            crate::lifecycle::capture::AmbientCapture::Constraint("same thing".into()),
+            crate::lifecycle::capture::AmbientCapture::Constraint("same thing".into()),
+            crate::lifecycle::capture::AmbientCapture::Failed {
+                description: "approach A".into(),
+                reason: "didn't work".into(),
+            },
+            crate::lifecycle::capture::AmbientCapture::Failed {
+                description: "approach A".into(),
+                reason: "still doesn't work".into(),
+            },
+        ];
+        conv.apply_ambient_captures(&captures);
+        assert_eq!(conv.intent.constraints_discovered.len(), 1);
+        assert_eq!(conv.intent.failed_approaches.len(), 1);
     }
 
     #[test]
