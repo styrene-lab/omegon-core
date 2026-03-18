@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_cleave_command(
     cli: &Cli,
     plan_path: &Path,
@@ -324,10 +325,10 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     }
 
     // Save session
-    if !cli.no_session {
-        if let Err(e) = session::save_session(&agent.conversation, &agent.cwd) {
-            tracing::debug!("Session save failed: {e}");
-        }
+    if !cli.no_session
+        && let Err(e) = session::save_session(&agent.conversation, &agent.cwd)
+    {
+        tracing::debug!("Session save failed: {e}");
     }
 
     bridge.shutdown().await;

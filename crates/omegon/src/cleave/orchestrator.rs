@@ -178,14 +178,17 @@ pub async fn run_cleave(
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = dispatch_child(
-                    &agent_binary,
-                    &bridge_path,
-                    &node,
-                    &model,
+                let dispatch_config = ChildDispatchConfig {
+                    agent_binary: &agent_binary,
+                    bridge_path: &bridge_path,
+                    node: &node,
+                    model: &model,
                     max_turns,
                     timeout_secs,
                     idle_timeout_secs,
+                };
+                let result = dispatch_child(
+                    &dispatch_config,
                     &info.wt_path,
                     &info.label,
                     &info.prompt,
@@ -346,15 +349,20 @@ struct ChildOutput {
     stdout: String,
 }
 
-/// Dispatch a single omegon-agent child process.
-async fn dispatch_child(
-    agent_binary: &Path,
-    bridge_path: &Path,
-    node: &str,
-    model: &str,
+/// Configuration for dispatching a child agent process.
+struct ChildDispatchConfig<'a> {
+    agent_binary: &'a Path,
+    bridge_path: &'a Path,
+    node: &'a str,
+    model: &'a str,
     max_turns: u32,
     timeout_secs: u64,
     idle_timeout_secs: u64,
+}
+
+/// Dispatch a single omegon-agent child process.
+async fn dispatch_child(
+    config: &ChildDispatchConfig<'_>,
     cwd: &Path,
     label: &str,
     prompt: &str,
@@ -363,7 +371,7 @@ async fn dispatch_child(
     let started = Instant::now();
 
     tracing::info!(child = %label, cwd = %cwd.display(), "spawning omegon-agent");
-    tracing::info!(child = %label, binary = %agent_binary.display(), bridge = %bridge_path.display(), node = %node, model = %model, max_turns, "dispatch params");
+    tracing::info!(child = %label, binary = %config.agent_binary.display(), bridge = %config.bridge_path.display(), node = %config.node, model = %config.model, max_turns = config.max_turns, "dispatch params");
 
     // Verify cwd exists
     if !cwd.exists() {
@@ -377,17 +385,18 @@ async fn dispatch_child(
     std::fs::write(&prompt_file, prompt)
         .context(format!("Failed to write prompt file for child '{label}'"))?;
 
+    let max_turns_str = config.max_turns.to_string();
     let args = [
         "--prompt-file", prompt_file.to_str().unwrap(),
         "--cwd", cwd.to_str().unwrap(),
-        "--bridge", bridge_path.to_str().unwrap(),
-        "--node", node,
-        "--model", model,
-        "--max-turns", &max_turns.to_string(),
+        "--bridge", config.bridge_path.to_str().unwrap(),
+        "--node", config.node,
+        "--model", config.model,
+        "--max-turns", &max_turns_str,
     ];
     tracing::info!(child = %label, args = ?args, "spawn args");
 
-    let mut child = Command::new(agent_binary)
+    let mut child = Command::new(config.agent_binary)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -407,18 +416,18 @@ async fn dispatch_child(
     let stderr = child.stderr.take().unwrap();
     let mut reader = BufReader::new(stderr).lines();
 
-    let wall_timeout = tokio::time::Duration::from_secs(timeout_secs);
-    let idle_timeout = tokio::time::Duration::from_secs(idle_timeout_secs);
+    let wall_timeout = tokio::time::Duration::from_secs(config.timeout_secs);
+    let idle_timeout = tokio::time::Duration::from_secs(config.idle_timeout_secs);
 
     let mut last_activity = Instant::now();
     let mut last_activity_event = Instant::now() - std::time::Duration::from_secs(2); // allow first event immediately
 
-    tracing::info!(child = %label, wall_timeout_secs = timeout_secs, idle_timeout_secs, "entering IO loop");
+    tracing::info!(child = %label, wall_timeout_secs = config.timeout_secs, idle_timeout_secs = config.idle_timeout_secs, "entering IO loop");
 
     let io_result = tokio::select! {
         _ = tokio::time::sleep(wall_timeout) => {
-            tracing::warn!(child = %label, "wall-clock timeout ({timeout_secs}s)");
-            Err(anyhow::anyhow!("Wall-clock timeout after {timeout_secs}s"))
+            tracing::warn!(child = %label, timeout = config.timeout_secs, "wall-clock timeout");
+            Err(anyhow::anyhow!("Wall-clock timeout after {}s", config.timeout_secs))
         }
         _ = cancel.cancelled() => {
             tracing::warn!(child = %label, "cancelled");
@@ -457,7 +466,7 @@ async fn dispatch_child(
                         let idle_secs = last_activity.elapsed().as_secs();
                         tracing::warn!(child = %label, idle_secs, line_count, "idle timeout");
                         return Err(anyhow::anyhow!(
-                            "Idle timeout — no output for {idle_timeout_secs}s"
+                            "Idle timeout — no output for {}s", config.idle_timeout_secs
                         ));
                     }
                 }

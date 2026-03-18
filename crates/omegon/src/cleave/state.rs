@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn child_status_deserializes_from_snake_case() {
-        let json = r#"{"child_id":0,"label":"a","description":"d","scope":[],"depends_on":[],"status":"completed","backend":"native"}"#;
+        let _json = r#"{"child_id":0,"label":"a","description":"d","scope":[],"depends_on":[],"status":"completed","backend":"native"}"#;
         // camelCase version
         let json_camel = r#"{"childId":0,"label":"a","description":"d","scope":[],"dependsOn":[],"status":"completed","backend":"native"}"#;
         let child: ChildState = serde_json::from_str(json_camel).unwrap();

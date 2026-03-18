@@ -47,15 +47,13 @@ impl AgentSetup {
             tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
 
             let stats = backend.stats(&mind).await.ok();
-            if stats.as_ref().map_or(true, |s| s.active_facts == 0) && jsonl_path.exists() {
-                if let Ok(jsonl) = std::fs::read_to_string(&jsonl_path) {
-                    match backend.import_jsonl(&jsonl).await {
-                        Ok(import) => tracing::info!(
-                            imported = import.imported,
-                            "imported facts.jsonl"
-                        ),
-                        Err(e) => tracing::warn!("JSONL import failed: {e}"),
-                    }
+            if stats.as_ref().is_none_or(|s| s.active_facts == 0)
+                && jsonl_path.exists()
+                && let Ok(jsonl) = std::fs::read_to_string(&jsonl_path)
+            {
+                match backend.import_jsonl(&jsonl).await {
+                    Ok(import) => tracing::info!(imported = import.imported, "imported facts.jsonl"),
+                    Err(e) => tracing::warn!("JSONL import failed: {e}"),
                 }
             }
 
@@ -116,22 +114,22 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
         }
         if git_path.is_file() {
             // Worktree: .git file contains "gitdir: /main/repo/.git/worktrees/name"
-            if let Ok(content) = std::fs::read_to_string(&git_path) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir = gitdir.trim();
-                    let gitdir_path = if Path::new(gitdir).is_absolute() {
-                        PathBuf::from(gitdir)
-                    } else {
-                        dir.join(gitdir)
-                    };
-                    // .git/worktrees/<name> → .git → repo root
-                    if let Some(repo) = gitdir_path
-                        .parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.parent())
-                    {
-                        return repo.to_path_buf();
-                    }
+            if let Ok(content) = std::fs::read_to_string(&git_path)
+                && let Some(gitdir) = content.strip_prefix("gitdir: ")
+            {
+                let gitdir = gitdir.trim();
+                let gitdir_path = if Path::new(gitdir).is_absolute() {
+                    PathBuf::from(gitdir)
+                } else {
+                    dir.join(gitdir)
+                };
+                // .git/worktrees/<name> → .git → repo root
+                if let Some(repo) = gitdir_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                {
+                    return repo.to_path_buf();
                 }
             }
             return dir; // fallback

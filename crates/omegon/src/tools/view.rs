@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn view_nonexistent_file() {
-        let provider = ViewProvider::new(PathBuf::from("/tmp"));
+        let _provider = ViewProvider::new(PathBuf::from("/tmp"));
         // Can't call async execute in sync test, but we can test the classify function
         assert!(matches!(classify(Path::new("nonexistent.rs")), FileKind::Code));
     }
