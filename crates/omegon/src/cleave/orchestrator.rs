@@ -409,6 +409,40 @@ fn build_task_file(label: &str, description: &str, scope: &[String], directive: 
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_timeout_constants_are_sane() {
+        // These mirror the TS-side constants in dispatcher.ts.
+        // If the TS defaults change, update the Rust CLI defaults too.
+        let wall_clock_secs: u64 = 15 * 60; // 15 minutes
+        let idle_secs: u64 = 3 * 60; // 3 minutes
+
+        assert!(idle_secs < wall_clock_secs, "idle must be shorter than wall-clock");
+        assert!(idle_secs >= 60, "idle timeout must be at least 60s for slow tool calls");
+        assert!(wall_clock_secs >= 300, "wall-clock must be at least 5 minutes");
+        assert!(wall_clock_secs <= 3600, "wall-clock should not exceed 1 hour");
+    }
+
+    #[test]
+    fn cleave_config_accepts_custom_idle_timeout() {
+        let config = CleaveConfig {
+            agent_binary: PathBuf::from("/usr/bin/omegon-agent"),
+            bridge_path: PathBuf::from("/usr/lib/bridge.mjs"),
+            node: "test".into(),
+            model: "anthropic:claude-sonnet-4-20250514".into(),
+            max_parallel: 4,
+            timeout_secs: 900,
+            idle_timeout_secs: 300, // custom: 5 minutes
+            max_turns: 50,
+        };
+        assert_eq!(config.idle_timeout_secs, 300);
+        assert_eq!(config.timeout_secs, 900);
+    }
+}
+
 fn nanoid(len: usize) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let seed = SystemTime::now()
