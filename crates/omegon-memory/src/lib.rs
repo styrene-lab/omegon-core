@@ -24,6 +24,7 @@ pub mod hash;
 pub mod vectors;
 pub mod backend;
 pub mod inmemory;
+pub mod sqlite;
 pub mod provider;
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ mod tests;
 // Re-exports for convenience
 pub use backend::{MemoryBackend, ContextRenderer, MemoryError};
 pub use inmemory::InMemoryBackend;
+pub use sqlite::SqliteBackend;
 pub use provider::MemoryProvider;
 pub use types::*;
 pub use decay::{compute_confidence, DecayProfile};
