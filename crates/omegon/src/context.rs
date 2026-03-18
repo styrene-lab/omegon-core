@@ -90,7 +90,8 @@ impl ContextManager {
             }
         }
 
-        // Inject file-type-specific guidance
+        // Inject tool-group and file-type guidance based on recent activity
+        self.inject_tool_group_context();
         self.inject_file_type_context();
 
         // Inject session HUD (high priority, always present, refreshed each turn)
@@ -200,6 +201,86 @@ impl ContextManager {
         }
     }
 
+    /// Inject tool-group guidelines based on which tools were recently called.
+    /// Only injects once per group — removed after TTL expires.
+    fn inject_tool_group_context(&mut self) {
+        let already_injected: std::collections::HashSet<String> = self
+            .active_injections
+            .iter()
+            .filter(|a| a.injection.source.starts_with("tool-group:"))
+            .map(|a| a.injection.source.clone())
+            .collect();
+
+        for tool in self.recent_tools.iter() {
+            let (group, guidance) = match tool.as_str() {
+                // Memory tools — inject memory best practices
+                "memory_store" | "memory_recall" | "memory_query" | "memory_supersede"
+                | "memory_archive" | "memory_focus" | "memory_episodes" | "memory_connect" => (
+                    "memory",
+                    "Memory guidelines:\n\
+                     - Use memory_recall(query) for targeted retrieval — cheaper than memory_query\n\
+                     - Store conclusions, not investigation steps. Current state, not transitions.\n\
+                     - Before storing, check if an existing fact covers it — use memory_supersede\n\
+                     - Prefer pointer facts ('X does Y. See path/to/file') over inlining details",
+                ),
+
+                // Design tree — inject lifecycle guidance
+                "design_tree" | "design_tree_update" => (
+                    "design",
+                    "Design tree guidelines:\n\
+                     - Use 'node' to read full content. Use 'frontier' to find open questions.\n\
+                     - Use 'branch' to spawn child nodes from open questions.\n\
+                     - Transition: seed → exploring → resolved → decided → implementing.\n\
+                     - Use 'focus' to inject a node's context into the conversation.",
+                ),
+
+                // Cleave — inject decomposition guidance
+                "cleave_assess" | "cleave_run" => (
+                    "cleave",
+                    "Cleave guidelines:\n\
+                     - cleave_assess determines complexity. Score ≥ 2.0 suggests decomposition.\n\
+                     - When using OpenSpec, pass openspec_change_path to cleave_run.\n\
+                     - After cleave_run, reconcile tasks.md and design-tree status.",
+                ),
+
+                // OpenSpec — inject lifecycle guidance
+                "openspec_manage" => (
+                    "openspec",
+                    "OpenSpec guidelines:\n\
+                     - The lifecycle: propose → spec → fast_forward → /cleave → /assess spec → archive\n\
+                     - Specs define what must be true BEFORE code is written.\n\
+                     - For tracked changes, use design_tree_update(implement) from a decided node.",
+                ),
+
+                // Local inference — inject model guidance
+                "ask_local_model" | "list_local_models" | "manage_ollama" => (
+                    "local-inference",
+                    "Local inference guidelines:\n\
+                     - Include ALL necessary context in prompts — local models can't see our conversation.\n\
+                     - Use manage_ollama(start) if Ollama isn't running.\n\
+                     - Use for boilerplate, summaries, transforms — not accuracy-critical work.",
+                ),
+
+                _ => continue,
+            };
+
+            let source_key = format!("tool-group:{group}");
+            if already_injected.contains(&source_key) {
+                continue;
+            }
+
+            self.active_injections.push(ActiveInjection {
+                remaining_turns: 10,
+                injection: ContextInjection {
+                    source: source_key,
+                    content: format!("[{guidance}]"),
+                    priority: 80, // Between file-type (50) and HUD (200)
+                    ttl_turns: 10,
+                },
+            });
+        }
+    }
+
     /// Inject language-specific guidance based on recently-touched file types.
     /// Only injects once per file type per session (avoids repetition).
     fn inject_file_type_context(&mut self) {
@@ -293,5 +374,86 @@ mod tests {
         cm.record_file_access(PathBuf::from("bar.rs"));
         cm.record_file_access(PathBuf::from("foo.rs"));
         assert_eq!(cm.recent_files.len(), 3); // foo, bar, foo (not 4)
+    }
+
+    #[test]
+    fn tool_group_injection_on_memory_use() {
+        let mut cm = ContextManager::new("base".into(), vec![]);
+        // Before calling memory tool — no memory guidelines
+        let conv = ConversationState::new();
+        let prompt = cm.build_system_prompt("test", &conv);
+        assert!(!prompt.contains("Memory guidelines"), "should not inject before tool use");
+
+        // Record a memory tool call
+        cm.record_tool_call("memory_store");
+        let prompt = cm.build_system_prompt("test", &conv);
+        assert!(prompt.contains("Memory guidelines"), "should inject after memory tool use");
+        assert!(prompt.contains("memory_recall"), "should include recall guidance");
+    }
+
+    #[test]
+    fn tool_group_injection_deduplicates() {
+        let mut cm = ContextManager::new("base".into(), vec![]);
+        let conv = ConversationState::new();
+
+        cm.record_tool_call("memory_store");
+        let _ = cm.build_system_prompt("test", &conv);
+        cm.record_tool_call("memory_recall");
+        let _ = cm.build_system_prompt("test", &conv);
+        cm.record_tool_call("memory_query");
+        let prompt = cm.build_system_prompt("test", &conv);
+
+        // Should only appear once despite 3 memory tool calls
+        assert_eq!(
+            prompt.matches("Memory guidelines").count(),
+            1,
+            "memory guidelines should appear exactly once"
+        );
+    }
+
+    #[test]
+    fn tool_group_injection_expires() {
+        let mut cm = ContextManager::new("base".into(), vec![]);
+        let mut conv = ConversationState::new();
+
+        cm.record_tool_call("memory_store");
+        let prompt = cm.build_system_prompt("test", &conv);
+        assert!(prompt.contains("Memory guidelines"));
+
+        // Clear recent tools — simulates the agent not calling memory tools anymore
+        cm.recent_tools.clear();
+
+        // Advance 11 turns (TTL is 10) — each build_system_prompt decrements remaining_turns
+        for i in 1..=11 {
+            conv.intent.stats.turns = i;
+            let _ = cm.build_system_prompt("test", &conv);
+        }
+
+        let prompt = cm.build_system_prompt("test", &conv);
+        assert!(!prompt.contains("Memory guidelines"), "should expire after TTL");
+    }
+
+    #[test]
+    fn file_type_injection_on_rust_file() {
+        let mut cm = ContextManager::new("base".into(), vec![]);
+        let conv = ConversationState::new();
+
+        cm.record_file_access(PathBuf::from("src/main.rs"));
+        let prompt = cm.build_system_prompt("test", &conv);
+        assert!(prompt.contains("cargo check"), "should inject Rust guidance for .rs files");
+    }
+
+    #[test]
+    fn no_injection_for_unknown_tools() {
+        let mut cm = ContextManager::new("base".into(), vec![]);
+        let conv = ConversationState::new();
+
+        cm.record_tool_call("bash");
+        cm.record_tool_call("read");
+        cm.record_tool_call("edit");
+        let prompt = cm.build_system_prompt("test", &conv);
+
+        // Core tools don't trigger group injection (they have static guidelines)
+        assert!(!prompt.contains("guidelines:"), "core tools should not trigger group injection");
     }
 }
