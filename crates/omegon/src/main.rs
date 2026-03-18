@@ -365,9 +365,16 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<tui::TuiCommand>(16);
 
     // ─── Launch TUI ─────────────────────────────────────────────────────
-    let tui_model = cli.model.clone();
+    let is_oauth = providers::resolve_api_key_sync(
+        cli.model.split(':').next().unwrap_or("anthropic")
+    ).map_or(false, |(_, oauth)| oauth);
+    let tui_config = tui::TuiConfig {
+        model: cli.model.clone(),
+        cwd: agent.cwd.to_string_lossy().to_string(),
+        is_oauth,
+    };
     let tui_handle = tokio::spawn(async move {
-        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_model).await {
+        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_config).await {
             tracing::error!("TUI error: {e}");
         }
     });

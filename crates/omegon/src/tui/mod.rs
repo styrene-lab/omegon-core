@@ -13,6 +13,7 @@
 pub mod conversation;
 pub mod dashboard;
 pub mod editor;
+pub mod footer;
 pub mod theme;
 
 use std::io;
@@ -31,6 +32,7 @@ use omegon_traits::AgentEvent;
 
 use self::conversation::ConversationView;
 use self::dashboard::DashboardState;
+use self::footer::FooterData;
 use self::editor::Editor;
 
 /// Messages from TUI to the agent coordinator.
@@ -64,12 +66,16 @@ pub struct App {
     history_idx: Option<usize>,
     /// Dashboard state.
     dashboard: DashboardState,
+    /// Footer card data.
+    footer_data: FooterData,
     /// Theme for all rendering.
     theme: Box<dyn theme::Theme>,
 }
 
 impl App {
     pub fn new(model: String) -> Self {
+        let provider = model.split(':').next().unwrap_or("anthropic").to_string();
+        let model_id = model.clone();
         Self {
             editor: Editor::new(),
             conversation: ConversationView::new(),
@@ -81,6 +87,11 @@ impl App {
             history: Vec::new(),
             history_idx: None,
             dashboard: DashboardState::default(),
+            footer_data: FooterData {
+                model_id,
+                model_provider: provider,
+                ..Default::default()
+            },
             theme: theme::default_theme(),
         }
     }
@@ -140,7 +151,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),    // conversation
-                Constraint::Length(1), // footer
+                Constraint::Length(4), // footer cards (header + 2 content lines + separator)
                 Constraint::Length(3), // editor
             ])
             .split(main_area);
@@ -160,29 +171,11 @@ impl App {
             self.dashboard.render_themed(dash, frame, t.as_ref());
         }
 
-        // Footer — styled HUD line
-        let status_icon = if self.agent_active { "⟳" } else { "●" };
-        let status_color = if self.agent_active { t.warning() } else { t.success() };
-        let model_short = self.model.split(':').next_back().unwrap_or(&self.model);
-        let tc = self.tool_calls;
-        let sep = Span::styled("│ ", Style::default().fg(t.dim()));
-        let footer_spans = vec![
-            Span::styled(" Ω ", t.style_accent_bold()),
-            Span::styled(format!("{model_short} "), Style::default().fg(t.muted())),
-            sep.clone(),
-            Span::styled(format!("turn {} ", self.turn), Style::default().fg(t.muted())),
-            sep.clone(),
-            Span::styled(format!("{tc} tool{} ", if tc == 1 { "" } else { "s" }), Style::default().fg(t.muted())),
-            sep,
-            Span::styled(format!("{status_icon} "), Style::default().fg(status_color)),
-            Span::styled(
-                if self.agent_active { "working" } else { "idle" },
-                Style::default().fg(status_color),
-            ),
-        ];
-        let footer = Paragraph::new(Line::from(footer_spans))
-            .style(Style::default().bg(t.card_bg()));
-        frame.render_widget(footer, chunks[1]);
+        // Footer — summary cards
+        self.footer_data.turn = self.turn;
+        self.footer_data.tool_calls = self.tool_calls;
+        self.footer_data.compactions = self.dashboard.compactions;
+        self.footer_data.render(chunks[1], frame, t.as_ref());
 
         // Editor
         let editor_block = Block::default()
@@ -303,10 +296,17 @@ impl App {
 ///
 /// This spawns the ratatui event loop and communicates with the agent
 /// coordinator through channels.
+/// Configuration for the TUI — passed from main.
+pub struct TuiConfig {
+    pub model: String,
+    pub cwd: String,
+    pub is_oauth: bool,
+}
+
 pub async fn run_tui(
     mut events_rx: broadcast::Receiver<AgentEvent>,
     command_tx: mpsc::Sender<TuiCommand>,
-    model: String,
+    config: TuiConfig,
 ) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -322,7 +322,9 @@ pub async fn run_tui(
         original_hook(info);
     }));
 
-    let mut app = App::new(model);
+    let mut app = App::new(config.model.clone());
+    app.footer_data.cwd = config.cwd;
+    app.footer_data.is_oauth = config.is_oauth;
     app.conversation.push_system(
         "Ω Omegon interactive session\n\
          Type a message and press Enter. /help for commands. Ctrl+C to cancel/quit."
