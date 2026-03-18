@@ -25,6 +25,7 @@ use bridge::SubprocessBridge;
 use context::ContextManager;
 use conversation::ConversationState;
 use omegon_traits::AgentEvent;
+use omegon_memory::MemoryBackend as _; // bring trait methods into scope
 use tools::CoreTools;
 
 #[derive(Parser)]
@@ -320,11 +321,9 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
 
     // ─── Set up memory ──────────────────────────────────────────────────
-    // Mind name = project directory name (for logging/identification)
-    let mind = cwd.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("default")
-        .to_string();
+    // Mind name — use "default" to match the TS factstore convention.
+    // The TS extension always uses "default" as the mind for project-local facts.
+    let mind = "default".to_string();
 
     // DB path: <cwd>/.pi/memory/facts.db — matches TS factstore convention.
     // For cleave children (cwd is a worktree), walk up to the git repo root
@@ -334,19 +333,37 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let _ = std::fs::create_dir_all(&memory_dir);
     let db_path = memory_dir.join("facts.db");
 
+    let jsonl_path = memory_dir.join("facts.jsonl");
     match omegon_memory::SqliteBackend::open(&db_path) {
         Ok(backend) => {
             tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
+
+            // Import JSONL on startup if DB is empty and facts.jsonl exists
+            // (bootstraps the Rust DB from the TS-managed JSONL git-sync file)
+            let stats = backend.stats(&mind).await.ok();
+            if stats.as_ref().map_or(true, |s| s.active_facts == 0) && jsonl_path.exists() {
+                if let Ok(jsonl) = std::fs::read_to_string(&jsonl_path) {
+                    match backend.import_jsonl(&jsonl).await {
+                        Ok(import) => tracing::info!(
+                            imported = import.imported,
+                            reinforced = import.reinforced,
+                            skipped = import.skipped,
+                            "imported facts.jsonl into empty DB"
+                        ),
+                        Err(e) => tracing::warn!("JSONL import failed (non-fatal): {e}"),
+                    }
+                }
+            }
+
             let provider = omegon_memory::MemoryProvider::new(
                 backend,
                 omegon_memory::MarkdownRenderer,
-                mind,
+                mind.clone(),
             );
             tools.push(Box::new(provider));
         }
         Err(e) => {
             tracing::warn!("memory backend failed to open (non-fatal): {e}");
-            // Continue without memory — core tools still work
         }
     }
 
@@ -440,6 +457,25 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         let session_path = cwd.join(".cleave-session.json");
         if let Err(e) = conversation.save_session(&session_path) {
             tracing::debug!("Session save failed (non-fatal): {e}");
+        }
+    }
+
+    // Export JSONL for git sync — reopen the DB briefly to export
+    if db_path.exists() && jsonl_path.parent().map_or(false, |p| p.exists()) {
+        match omegon_memory::SqliteBackend::open(&db_path) {
+            Ok(export_backend) => {
+                match export_backend.export_jsonl(&mind).await {
+                    Ok(jsonl) if !jsonl.is_empty() => {
+                        if let Err(e) = std::fs::write(&jsonl_path, &jsonl) {
+                            tracing::debug!("JSONL export failed (non-fatal): {e}");
+                        } else {
+                            tracing::info!(path = %jsonl_path.display(), lines = jsonl.lines().count(), "exported facts.jsonl");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => tracing::debug!("JSONL export: couldn't reopen DB (non-fatal): {e}"),
         }
     }
 
