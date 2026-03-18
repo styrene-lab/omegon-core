@@ -213,7 +213,7 @@ pub async fn run_cleave(
     tracing::info!("merge phase starting");
     let mut merge_results = Vec::new();
 
-    for child in &state.children {
+    for child in &mut state.children {
         if child.status != ChildStatus::Completed {
             merge_results.push((
                 child.label.clone(),
@@ -240,10 +240,15 @@ pub async fn run_cleave(
                 merge_results.push((child.label.clone(), MergeOutcome::Conflict(detail)));
             }
             Ok(worktree::MergeResult::Failed(detail)) => {
-                tracing::error!(child = %child.label, "merge failed");
+                tracing::error!(child = %child.label, detail = %detail, "merge failed — demoting child to failed");
+                child.status = ChildStatus::Failed;
+                child.error = Some(detail.clone());
+                let _ = worktree::delete_branch(repo_path, branch);
                 merge_results.push((child.label.clone(), MergeOutcome::Failed(detail)));
             }
             Err(e) => {
+                child.status = ChildStatus::Failed;
+                child.error = Some(format!("{e}"));
                 merge_results.push((child.label.clone(), MergeOutcome::Failed(format!("{e}"))));
             }
         }

@@ -59,12 +59,8 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<()> {
         tracing::warn!("git worktree remove warning: {}", stderr.trim());
     }
 
-    // Also delete the branch
-    // (don't fail if branch deletion fails — worktree removal is the priority)
-    let _ = Command::new("git")
-        .args(["branch", "-D"])
-        .current_dir(repo_path)
-        .output();
+    // Note: branch deletion is handled separately by delete_branch() after merge.
+    // We don't delete the branch here because the caller may still need to merge it.
 
     Ok(())
 }
@@ -78,6 +74,12 @@ pub fn merge_branch(repo_path: &Path, branch: &str) -> Result<MergeResult> {
         .context("Failed to run git merge")?;
 
     if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("Already up to date") {
+            return Ok(MergeResult::Failed(
+                "Branch has no new commits — child did not produce any work".to_string(),
+            ));
+        }
         Ok(MergeResult::Success)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
