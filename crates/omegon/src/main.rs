@@ -382,9 +382,19 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     // ─── Shared state ─────────────────────────────────────────────────
     let shared_cancel: tui::SharedCancel = std::sync::Arc::new(std::sync::Mutex::new(None));
     let shared_settings = settings::shared(&cli.model);
-    // Set initial settings from CLI
+
+    // Load project profile → apply to settings (model, thinking, max_turns)
+    let profile = settings::Profile::load(&agent.cwd);
     if let Ok(mut s) = shared_settings.lock() {
-        s.max_turns = cli.max_turns;
+        profile.apply_to(&mut s);
+        // CLI flags override profile
+        if cli.max_turns != 50 { // 50 is the default — only override if explicitly set
+            s.max_turns = cli.max_turns;
+        }
+        tracing::info!(
+            model = %s.model, thinking = %s.thinking.as_str(),
+            max_turns = s.max_turns, "settings initialized from profile"
+        );
     }
 
     let is_oauth = providers::resolve_api_key_sync(
@@ -419,6 +429,10 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 if let Ok(mut s) = shared_settings.lock() {
                     s.model = model;
                     s.context_window = settings::Settings::new(&s.model).context_window;
+                    // Persist to project profile
+                    let mut profile = settings::Profile::load(&agent.cwd);
+                    profile.capture_from(&s);
+                    let _ = profile.save(&agent.cwd);
                 }
             }
 
@@ -486,11 +500,16 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         }
     }
 
-    // Save session
+    // Save session + profile
     if !cli.no_session
-        && let Err(e) = session::save_session(&agent.conversation, &agent.cwd)
-    {
-        tracing::debug!("Session save failed: {e}");
+        && let Err(e) = session::save_session(&agent.conversation, &agent.cwd) {
+            tracing::debug!("Session save failed: {e}");
+        }
+    // Always persist profile on exit (captures thinking level changes, etc.)
+    if let Ok(s) = shared_settings.lock() {
+        let mut profile = settings::Profile::load(&agent.cwd);
+        profile.capture_from(&s);
+        let _ = profile.save(&agent.cwd);
     }
 
     bridge.shutdown().await;

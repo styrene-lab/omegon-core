@@ -132,6 +132,104 @@ pub fn shared(model: &str) -> SharedSettings {
     Arc::new(Mutex::new(Settings::new(model)))
 }
 
+// ─── Profile persistence ────────────────────────────────────────────────────
+
+/// Profile: settings that persist with the project in .pi/config.json.
+/// Read on startup, written on change. Travels with git.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_model: Option<ProfileModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileModel {
+    pub provider: String,
+    pub model_id: String,
+}
+
+impl Profile {
+    /// Load profile. Project-level (`.omegon/profile.json`) overrides
+    /// global (`~/.config/omegon/profile.json`). Both are optional.
+    pub fn load(cwd: &std::path::Path) -> Self {
+        // Project-level first
+        let project_path = cwd.join(".omegon/profile.json");
+        if let Ok(content) = std::fs::read_to_string(&project_path)
+            && let Ok(profile) = serde_json::from_str(&content) {
+                tracing::debug!(path = %project_path.display(), "project profile loaded");
+                return profile;
+            }
+
+        // Global fallback
+        if let Some(global_path) = global_profile_path()
+            && let Ok(content) = std::fs::read_to_string(&global_path)
+                && let Ok(profile) = serde_json::from_str(&content) {
+                    tracing::debug!(path = %global_path.display(), "global profile loaded");
+                    return profile;
+                }
+
+        Self { last_used_model: None, thinking_level: None, max_turns: None }
+    }
+
+    /// Save to the project-level profile.
+    pub fn save(&self, cwd: &std::path::Path) -> anyhow::Result<()> {
+        let dir = cwd.join(".omegon");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("profile.json");
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json)?;
+        tracing::debug!(path = %path.display(), "project profile saved");
+        Ok(())
+    }
+
+    /// Save to the global profile (~/.config/omegon/profile.json).
+    pub fn save_global(&self) -> anyhow::Result<()> {
+        let path = global_profile_path()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine config directory"))?;
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json)?;
+        tracing::debug!(path = %path.display(), "global profile saved");
+        Ok(())
+    }
+
+    /// Apply profile to settings (called at startup).
+    pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(ref m) = self.last_used_model {
+            settings.model = format!("{}:{}", m.provider, m.model_id);
+            settings.context_window = infer_context_window(&settings.model);
+        }
+        if let Some(ref t) = self.thinking_level
+            && let Some(level) = ThinkingLevel::parse(t) {
+                settings.thinking = level;
+            }
+        if let Some(turns) = self.max_turns {
+            settings.max_turns = turns;
+        }
+    }
+
+    /// Capture current settings into the profile (called on change).
+    pub fn capture_from(&mut self, settings: &Settings) {
+        self.last_used_model = Some(ProfileModel {
+            provider: settings.provider().to_string(),
+            model_id: settings.model_short().to_string(),
+        });
+        self.thinking_level = Some(settings.thinking.as_str().to_string());
+        self.max_turns = Some(settings.max_turns);
+    }
+}
+
+fn global_profile_path() -> Option<std::path::PathBuf> {
+    // XDG on Linux, ~/Library/Application Support on macOS
+    dirs::config_dir().map(|d| d.join("omegon/profile.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
