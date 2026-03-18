@@ -20,6 +20,49 @@ pub struct AgentSetup {
     pub context_manager: ContextManager,
     pub conversation: ConversationState,
     pub cwd: PathBuf,
+    /// Snapshot of lifecycle + memory state at startup for TUI pre-population.
+    pub(crate) startup_snapshot: StartupSnapshot,
+}
+
+/// Pre-computed state gathered during setup for TUI initial display.
+pub(crate) struct StartupSnapshot {
+    pub total_facts: usize,
+    pub lifecycle: LifecycleSnapshot,
+}
+
+/// Snapshot of design-tree + openspec state, extracted before boxing the provider.
+pub(crate) struct LifecycleSnapshot {
+    pub focused_node: Option<crate::tui::dashboard::FocusedNodeSummary>,
+    pub active_changes: Vec<crate::tui::dashboard::ChangeSummary>,
+}
+
+impl LifecycleSnapshot {
+    fn from_provider(lp: &lifecycle::context::LifecycleContextProvider) -> Self {
+        let focused_node = lp.focused_node_id().and_then(|id| {
+            lp.get_node(id).map(|n| {
+                let sections = lifecycle::design::read_node_sections(n);
+                crate::tui::dashboard::FocusedNodeSummary {
+                    id: n.id.clone(),
+                    title: n.title.clone(),
+                    status: n.status,
+                    open_questions: n.open_questions.len(),
+                    decisions: sections.map(|s| s.decisions.len()).unwrap_or(0),
+                }
+            })
+        });
+
+        let active_changes: Vec<_> = lp.changes().iter()
+            .filter(|c| !matches!(c.stage, lifecycle::types::ChangeStage::Archived))
+            .map(|c| crate::tui::dashboard::ChangeSummary {
+                name: c.name.clone(),
+                stage: c.stage,
+                done_tasks: c.done_tasks,
+                total_tasks: c.total_tasks,
+            })
+            .collect();
+
+        Self { focused_node, active_changes }
+    }
 }
 
 impl AgentSetup {
@@ -54,9 +97,16 @@ impl AgentSetup {
         //   WAL mode supports unlimited concurrent readers safely.
         //   Children still get project facts injected into their system prompt.
         let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
+        let mut initial_fact_count: usize = 0;
 
         if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
             tracing::info!(mind = %mind, db = %db_path.display(), child = is_child, "memory backend loaded");
+
+            // Snapshot fact count for TUI initial display
+            if let Ok(stats) = backend.stats(&mind).await {
+                initial_fact_count = stats.active_facts;
+                tracing::info!(facts = initial_fact_count, "memory snapshot for TUI");
+            }
 
             if !is_child {
                 // Parent: import JSONL if DB is empty, register tool provider
@@ -96,6 +146,10 @@ impl AgentSetup {
         let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
         let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
         let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
+
+        // Snapshot lifecycle state for TUI initial display (before boxing)
+        let lifecycle_snapshot = LifecycleSnapshot::from_provider(&lifecycle_provider);
+
         let mut context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> =
             vec![Box::new(lifecycle_provider)];
         if let Some(mc) = memory_context {
@@ -122,12 +176,27 @@ impl AgentSetup {
             ConversationState::new()
         };
 
+        let startup_snapshot = StartupSnapshot {
+            total_facts: initial_fact_count,
+            lifecycle: lifecycle_snapshot,
+        };
+
         Ok(Self {
             tools,
             context_manager,
             conversation,
             cwd,
+            startup_snapshot,
         })
+    }
+
+    /// Gather initial state for the TUI so the first frame has real data.
+    pub fn initial_tui_state(&self) -> crate::tui::TuiInitialState {
+        crate::tui::TuiInitialState {
+            total_facts: self.startup_snapshot.total_facts,
+            focused_node: self.startup_snapshot.lifecycle.focused_node.clone(),
+            active_changes: self.startup_snapshot.lifecycle.active_changes.clone(),
+        }
     }
 }
 

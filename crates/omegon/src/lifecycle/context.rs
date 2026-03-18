@@ -51,6 +51,11 @@ impl LifecycleContextProvider {
         self.focused_node = node_id;
     }
 
+    /// Get the focused node ID (if any).
+    pub fn focused_node_id(&self) -> Option<&str> {
+        self.focused_node.as_deref()
+    }
+
     /// Get a design node by id.
     pub fn get_node(&self, id: &str) -> Option<&DesignNode> {
         self.nodes.get(id)

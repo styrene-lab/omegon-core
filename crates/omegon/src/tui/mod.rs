@@ -609,6 +609,17 @@ impl App {
 pub struct TuiConfig {
     pub cwd: String,
     pub is_oauth: bool,
+    /// Pre-populated initial state so the first frame isn't empty.
+    pub initial: TuiInitialState,
+}
+
+/// Initial state snapshot gathered during setup, before the TUI event loop starts.
+/// Populates footer cards and dashboard on the very first frame.
+#[derive(Default)]
+pub struct TuiInitialState {
+    pub total_facts: usize,
+    pub focused_node: Option<dashboard::FocusedNodeSummary>,
+    pub active_changes: Vec<dashboard::ChangeSummary>,
 }
 
 fn sel_opt(value: &str, label: &str, desc: &str, current: &str) -> selector::SelectOption {
@@ -645,6 +656,12 @@ pub async fn run_tui(
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
     app.cancel = cancel;
+
+    // Pre-populate from initial state so first frame isn't empty
+    app.footer_data.total_facts = config.initial.total_facts;
+    app.dashboard.focused_node = config.initial.focused_node;
+    app.dashboard.active_changes = config.initial.active_changes;
+
     app.conversation.push_system(
         "Ω Omegon interactive session\n\
          Type a message and press Enter. /help for commands. Ctrl+C to cancel/quit."

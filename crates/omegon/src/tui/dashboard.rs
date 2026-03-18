@@ -22,6 +22,7 @@ pub struct DashboardState {
     pub compactions: u32,
 }
 
+#[derive(Clone)]
 pub struct FocusedNodeSummary {
     pub id: String,
     pub title: String,
@@ -30,6 +31,7 @@ pub struct FocusedNodeSummary {
     pub decisions: usize,
 }
 
+#[derive(Clone)]
 pub struct ChangeSummary {
     pub name: String,
     pub stage: ChangeStage,

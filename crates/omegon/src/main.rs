@@ -424,9 +424,11 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     ).is_some_and(|(_, oauth)| oauth);
 
     // ─── Launch TUI ─────────────────────────────────────────────────────
+    let initial = agent.initial_tui_state();
     let tui_config = tui::TuiConfig {
         cwd: agent.cwd.to_string_lossy().to_string(),
         is_oauth,
+        initial,
     };
     let tui_cancel = shared_cancel.clone();
     let tui_settings = shared_settings.clone();
