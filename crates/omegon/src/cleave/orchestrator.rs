@@ -289,22 +289,32 @@ async fn dispatch_child(
     let started = Instant::now();
 
     tracing::info!(child = %label, cwd = %cwd.display(), "spawning omegon-agent");
+    tracing::info!(child = %label, binary = %agent_binary.display(), bridge = %bridge_path.display(), node = %node, model = %model, max_turns, "dispatch params");
+
+    // Verify cwd exists
+    if !cwd.exists() {
+        anyhow::bail!("Child cwd does not exist: {}", cwd.display());
+    }
 
     // Write prompt to a temp file to avoid CLI arg parsing issues
     // (task file content starting with --- breaks clap's arg parser)
     let prompt_file = cwd.join(".cleave-prompt.md");
+    tracing::info!(child = %label, prompt_file = %prompt_file.display(), prompt_len = prompt.len(), "writing prompt file");
     std::fs::write(&prompt_file, prompt)
         .context(format!("Failed to write prompt file for child '{label}'"))?;
 
+    let args = [
+        "--prompt-file", prompt_file.to_str().unwrap(),
+        "--cwd", cwd.to_str().unwrap(),
+        "--bridge", bridge_path.to_str().unwrap(),
+        "--node", node,
+        "--model", model,
+        "--max-turns", &max_turns.to_string(),
+    ];
+    tracing::info!(child = %label, args = ?args, "spawn args");
+
     let mut child = Command::new(agent_binary)
-        .args([
-            "--prompt-file", prompt_file.to_str().unwrap(),
-            "--cwd", cwd.to_str().unwrap(),
-            "--bridge", bridge_path.to_str().unwrap(),
-            "--node", node,
-            "--model", model,
-            "--max-turns", &max_turns.to_string(),
-        ])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -322,6 +332,8 @@ async fn dispatch_child(
 
     let mut last_activity = Instant::now();
 
+    tracing::info!(child = %label, wall_timeout_secs = timeout_secs, idle_timeout_secs, "entering IO loop");
+
     let io_result = tokio::select! {
         _ = tokio::time::sleep(wall_timeout) => {
             tracing::warn!(child = %label, "wall-clock timeout ({timeout_secs}s)");
@@ -332,20 +344,29 @@ async fn dispatch_child(
             Err(anyhow::anyhow!("Cancelled"))
         }
         result = async {
+            let mut line_count = 0u64;
             loop {
                 match tokio::time::timeout(idle_timeout, reader.next_line()).await {
                     Ok(Ok(Some(line))) => {
                         last_activity = Instant::now();
-                        tracing::debug!(child = %label, "{line}");
+                        line_count += 1;
+                        if line_count <= 5 || line_count % 50 == 0 {
+                            tracing::info!(child = %label, line_count, "stderr: {line}");
+                        } else {
+                            tracing::debug!(child = %label, "{line}");
+                        }
                     }
-                    Ok(Ok(None)) => break, // EOF — process exited
+                    Ok(Ok(None)) => {
+                        tracing::info!(child = %label, line_count, "stderr EOF — child exited");
+                        break;
+                    }
                     Ok(Err(e)) => {
                         tracing::warn!(child = %label, "stderr read error: {e}");
                         break;
                     }
                     Err(_) => {
                         let idle_secs = last_activity.elapsed().as_secs();
-                        tracing::warn!(child = %label, idle_secs, "idle timeout");
+                        tracing::warn!(child = %label, idle_secs, line_count, "idle timeout");
                         return Err(anyhow::anyhow!(
                             "Idle timeout — no output for {idle_timeout_secs}s"
                         ));
@@ -361,6 +382,7 @@ async fn dispatch_child(
     // kill_on_drop will handle cleanup, but be explicit
     let _ = child.kill().await;
     let exit = child.wait().await?;
+    tracing::info!(child = %label, exit_code = ?exit.code(), success = exit.success(), "child process exited");
 
     let mut stdout_buf = String::new();
     if let Some(mut stdout) = child.stdout.take() {
