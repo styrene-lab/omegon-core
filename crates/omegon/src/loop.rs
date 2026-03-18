@@ -160,16 +160,22 @@ pub async fn run(
         );
 
         // ─── Stream LLM response with retry ─────────────────────────
-        let assistant_msg = stream_with_retry(
-            bridge,
-            &system_prompt,
-            &llm_messages,
-            &tool_defs,
-            &stream_options,
-            events,
-            config,
-        )
-        .await?;
+        let assistant_msg = tokio::select! {
+            result = stream_with_retry(
+                bridge,
+                &system_prompt,
+                &llm_messages,
+                &tool_defs,
+                &stream_options,
+                events,
+                config,
+            ) => result?,
+            _ = cancel.cancelled() => {
+                tracing::info!("Agent loop cancelled during LLM streaming");
+                let _ = events.send(AgentEvent::TurnEnd { turn });
+                break;
+            }
+        };
 
         // ─── Parse ambient capture blocks (omg: tags) ───────────────
         let captured =

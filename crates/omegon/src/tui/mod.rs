@@ -880,12 +880,16 @@ pub async fn run_tui(
                     (KeyCode::Esc, _) => {
                         if app.agent_active {
                             app.interrupt();
+                            app.agent_active = false; // Unblock editor immediately
+                            app.conversation.finalize_message();
                             app.conversation.push_system("⎋ Interrupted");
                         }
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         if app.agent_active {
                             app.interrupt();
+                            app.agent_active = false; // Unblock editor immediately
+                            app.conversation.finalize_message();
                             app.conversation.push_system("⎋ Interrupted (Ctrl+C)");
                         } else {
                             let now = std::time::Instant::now();
