@@ -7,6 +7,8 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone)]
 enum Message {
     User(String),
+    /// System/info message (from slash commands, etc.)
+    System(String),
     /// Assistant text (possibly still streaming).
     Assistant {
         text: String,
@@ -41,7 +43,12 @@ impl ConversationView {
 
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(Message::User(text.to_string()));
-        self.scroll = 0; // Auto-scroll to bottom
+        self.scroll = 0;
+    }
+
+    pub fn push_system(&mut self, text: &str) {
+        self.messages.push(Message::System(text.to_string()));
+        self.scroll = 0;
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
@@ -137,6 +144,15 @@ impl ConversationView {
                             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                         ),
                     ]));
+                    lines.push(Line::from(""));
+                }
+                Message::System(text) => {
+                    for line in text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                        )));
+                    }
                     lines.push(Line::from(""));
                 }
                 Message::Assistant {

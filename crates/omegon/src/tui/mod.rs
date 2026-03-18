@@ -11,6 +11,7 @@
 //!   - AgentEvent broadcast → TUI receives streaming updates
 
 pub mod conversation;
+pub mod dashboard;
 pub mod editor;
 
 use std::io;
@@ -28,6 +29,7 @@ use tokio::sync::{broadcast, mpsc};
 use omegon_traits::AgentEvent;
 
 use self::conversation::ConversationView;
+use self::dashboard::DashboardState;
 use self::editor::Editor;
 
 /// Messages from TUI to the agent coordinator.
@@ -59,6 +61,8 @@ pub struct App {
     history: Vec<String>,
     /// History navigation index (None = not navigating).
     history_idx: Option<usize>,
+    /// Dashboard state.
+    dashboard: DashboardState,
 }
 
 impl App {
@@ -73,18 +77,69 @@ impl App {
             tool_calls: 0,
             history: Vec::new(),
             history_idx: None,
+            dashboard: DashboardState::default(),
         }
     }
 
-    fn draw(&self, frame: &mut Frame) {
+    /// Update the dashboard with lifecycle context.
+    pub fn update_dashboard_from_lifecycle(
+        &mut self,
+        nodes: &std::collections::HashMap<String, crate::lifecycle::types::DesignNode>,
+        changes: &[crate::lifecycle::types::ChangeInfo],
+        focused_id: Option<&str>,
+    ) {
+        self.dashboard.focused_node = focused_id.and_then(|id| {
+            nodes.get(id).map(|n| {
+                let sections = crate::lifecycle::design::read_node_sections(n);
+                dashboard::FocusedNodeSummary {
+                    id: n.id.clone(),
+                    title: n.title.clone(),
+                    status: n.status,
+                    open_questions: n.open_questions.len(),
+                    decisions: sections.map(|s| s.decisions.len()).unwrap_or(0),
+                }
+            })
+        });
+        self.dashboard.active_changes = changes
+            .iter()
+            .filter(|c| !matches!(c.stage, crate::lifecycle::types::ChangeStage::Archived))
+            .map(|c| dashboard::ChangeSummary {
+                name: c.name.clone(),
+                stage: c.stage,
+                done_tasks: c.done_tasks,
+                total_tasks: c.total_tasks,
+            })
+            .collect();
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
+        // Update dashboard stats
+        self.dashboard.turns = self.turn;
+        self.dashboard.tool_calls = self.tool_calls;
+
+        let area = frame.area();
+        let show_dashboard = area.width >= 100;
+
+        // Top-level horizontal split: main area | dashboard
+        let (main_area, dash_area) = if show_dashboard {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(60), Constraint::Length(30)])
+                .split(area);
+            (h[0], Some(h[1]))
+        } else {
+            (area, None)
+        };
+
+        // Vertical split within main area
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),    // conversation (takes remaining space)
+                Constraint::Min(3),    // conversation
                 Constraint::Length(1), // footer
                 Constraint::Length(3), // editor
             ])
-            .split(frame.area());
+            .split(main_area);
 
         // Conversation view
         let conv_block = Block::default()
@@ -95,6 +150,11 @@ impl App {
             .wrap(Wrap { trim: false })
             .scroll((self.conversation.scroll_offset(), 0));
         frame.render_widget(conv_widget, chunks[0]);
+
+        // Dashboard (right panel)
+        if let Some(dash) = dash_area {
+            self.dashboard.render(dash, frame);
+        }
 
         // Footer
         let status_str = if self.agent_active { "working" } else { "idle" };
@@ -129,6 +189,35 @@ impl App {
                 cursor_x.min(editor_area.right().saturating_sub(1)),
                 cursor_y,
             ));
+        }
+    }
+
+    /// Handle slash commands that are processed locally (not sent to the agent).
+    /// Returns Some(response) if handled, None if not a recognized local command.
+    fn handle_slash_command(&self, text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+        let (cmd, _args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
+        match cmd {
+            "help" => Some(
+                "Available commands:\n\
+                 /help    — show this help\n\
+                 /model   — show current model\n\
+                 /stats   — show session statistics\n\
+                 /exit    — quit the session\n\
+                 \n\
+                 All other input is sent as a prompt to the agent."
+                    .into(),
+            ),
+            "model" => Some(format!("Current model: {}", self.model)),
+            "stats" => Some(format!(
+                "Session: {} turns, {} tool calls, {} compactions",
+                self.turn, self.tool_calls, self.dashboard.compactions,
+            )),
+            "exit" | "quit" => None, // handled by caller
+            _ => None,               // unknown slash command — send to agent
         }
     }
 
@@ -215,6 +304,10 @@ pub async fn run_tui(
     }));
 
     let mut app = App::new(model);
+    app.conversation.push_system(
+        "Ω Omegon interactive session\n\
+         Type a message and press Enter. /help for commands. Ctrl+C to cancel/quit."
+    );
 
     loop {
         // Draw
@@ -237,7 +330,9 @@ pub async fn run_tui(
                     (KeyCode::Enter, _) if !app.agent_active => {
                         let text = app.editor.take_text();
                         if !text.is_empty() {
-                            if text == "/exit" || text == "/quit" {
+                            if let Some(response) = app.handle_slash_command(&text) {
+                                app.conversation.push_system(&response);
+                            } else if text == "/exit" || text == "/quit" {
                                 app.should_quit = true;
                                 let _ = command_tx.send(TuiCommand::Quit).await;
                             } else {
