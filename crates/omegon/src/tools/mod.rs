@@ -5,10 +5,12 @@
 //!           that compose the primitives.
 
 pub mod bash;
+pub mod change;
 pub mod edit;
 pub mod local_inference;
 pub mod read;
 pub mod render;
+pub mod speculate;
 pub mod validate;
 pub mod view;
 pub mod web_search;
@@ -16,10 +18,8 @@ pub mod write;
 
 // Phase 0+ stubs:
 // pub mod understand;  // tree-sitter + scope graph
-// pub mod change;      // atomic edits + validation pipeline
 // pub mod execute;     // bash with progressive disclosure
 // pub mod remember;    // session scratchpad
-// pub mod speculate;   // git checkpoint/rollback
 
 use async_trait::async_trait;
 use omegon_traits::{ToolDefinition, ToolProvider, ToolResult};
@@ -196,6 +196,86 @@ impl ToolProvider for CoreTools {
                     "required": ["path", "oldText", "newText"]
                 }),
             },
+            ToolDefinition {
+                name: "change".into(),
+                label: "change".into(),
+                description: "Atomic multi-file edit with automatic validation. Accepts an array \
+                    of edits, applies all atomically (rollback on any failure), then runs type \
+                    checking. One tool call replaces multiple edits + validation."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "edits": {
+                            "type": "array",
+                            "description": "Array of edits to apply atomically",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "file": { "type": "string", "description": "File path" },
+                                    "oldText": { "type": "string", "description": "Exact text to find" },
+                                    "newText": { "type": "string", "description": "Replacement text" }
+                                },
+                                "required": ["file", "oldText", "newText"]
+                            }
+                        },
+                        "validate": {
+                            "type": "string",
+                            "description": "Validation mode: none, quick, standard (default), full (includes tests)",
+                            "default": "standard"
+                        }
+                    },
+                    "required": ["edits"]
+                }),
+            },
+            ToolDefinition {
+                name: "speculate_start".into(),
+                label: "speculate".into(),
+                description: "Create a git checkpoint for exploratory changes. Make changes freely, \
+                    then use speculate_commit to keep them or speculate_rollback to undo everything."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "Name for this speculation (e.g. 'try-approach-a')"
+                        }
+                    },
+                    "required": ["label"]
+                }),
+            },
+            ToolDefinition {
+                name: "speculate_check".into(),
+                label: "speculate".into(),
+                description: "Check the current speculation state — shows modified files and \
+                    runs validation against them."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            ToolDefinition {
+                name: "speculate_commit".into(),
+                label: "speculate".into(),
+                description: "Keep all changes made during speculation and discard the checkpoint."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            ToolDefinition {
+                name: "speculate_rollback".into(),
+                label: "speculate".into(),
+                description: "Revert all changes made during speculation back to the checkpoint."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
         ]
     }
 
@@ -245,6 +325,41 @@ impl ToolProvider for CoreTools {
                     .ok_or_else(|| anyhow::anyhow!("missing 'newText' argument"))?;
                 let path = self.resolve_path(path_str)?;
                 edit::execute(&path, old_text, new_text, &self.cwd).await
+            }
+            "change" => {
+                let edits_val = args.get("edits")
+                    .ok_or_else(|| anyhow::anyhow!("missing 'edits' argument"))?;
+                let edits: Vec<change::EditSpec> = serde_json::from_value(edits_val.clone())?;
+                let validate_mode = args.get("validate")
+                    .and_then(|v| v.as_str())
+                    .map(change::ValidationMode::from_str)
+                    .unwrap_or(change::ValidationMode::Standard);
+                let cwd = self.cwd.clone();
+                let cwd2 = cwd.clone();
+                change::execute(
+                    &edits,
+                    validate_mode,
+                    &cwd,
+                    move |p: &str| {
+                        let tools = CoreTools::new(cwd2.clone());
+                        tools.resolve_path(p)
+                    },
+                ).await
+            }
+            "speculate_start" => {
+                let label = args["label"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing 'label' argument"))?;
+                speculate::start(label, &self.cwd).await
+            }
+            "speculate_check" => {
+                speculate::check(&self.cwd).await
+            }
+            "speculate_commit" => {
+                speculate::commit(&self.cwd).await
+            }
+            "speculate_rollback" => {
+                speculate::rollback(&self.cwd).await
             }
             _ => anyhow::bail!("Unknown core tool: {tool_name}"),
         }
