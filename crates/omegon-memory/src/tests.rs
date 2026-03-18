@@ -21,6 +21,7 @@ pub async fn run_backend_tests(b: &dyn MemoryBackend) {
     test_edges(b).await;
     test_episodes(b).await;
     test_jsonl_round_trip(b).await;
+    test_jsonl_version_conflict(b).await;
     test_stats(b).await;
 }
 
@@ -306,6 +307,36 @@ async fn test_jsonl_round_trip(b: &dyn MemoryBackend) {
         let _: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("invalid JSON line: {e}\n{line}"));
     }
+}
+
+async fn test_jsonl_version_conflict(b: &dyn MemoryBackend) {
+    // Store a fact at version N
+    let stored = b.store_fact(StoreFact {
+        mind: "conflict-test".into(),
+        content: "Version conflict fact".into(),
+        section: Section::Architecture,
+        decay_profile: DecayProfileName::Standard,
+        source: None,
+    }).await.unwrap();
+
+    // Export, then modify the JSONL with a higher version
+    let jsonl = b.export_jsonl("conflict-test").await.unwrap();
+
+    // Import the same JSONL with a HIGHER version — should update
+    let modified = jsonl.replace(
+        &format!("\"version\":{}", stored.fact.version),
+        &format!("\"version\":{}", stored.fact.version + 100),
+    ).replace("Version conflict fact", "UPDATED content");
+    let stats = b.import_jsonl(&modified).await.unwrap();
+    assert!(stats.reinforced > 0 || stats.imported > 0, "higher version should update: {stats:?}");
+
+    // Import with a LOWER version — should skip
+    let old_version = jsonl.replace(
+        &format!("\"version\":{}", stored.fact.version),
+        "\"version\":0",
+    );
+    let stats2 = b.import_jsonl(&old_version).await.unwrap();
+    assert!(stats2.skipped > 0, "lower version should skip: {stats2:?}");
 }
 
 async fn test_stats(b: &dyn MemoryBackend) {

@@ -12,48 +12,8 @@ use std::sync::Mutex;
 use crate::backend::*;
 use crate::hash;
 use crate::types::*;
+use crate::util::{gen_id, now_iso};
 use crate::vectors;
-
-/// Generate a 12-char random hex ID matching the TS nanoid format.
-fn gen_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let r: u32 = (t as u32) ^ 0xDEAD_BEEF;
-    format!("{:08x}{:04x}", (t & 0xFFFF_FFFF) as u32, r & 0xFFFF)
-}
-
-fn now_iso() -> String {
-    // ISO 8601 UTC timestamp
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = d.as_secs();
-    // Reuse the epoch_to_ymd approach from prompt.rs but include time
-    let days = secs / 86400;
-    let day_secs = secs % 86400;
-    let h = day_secs / 3600;
-    let m = (day_secs % 3600) / 60;
-    let s = day_secs % 60;
-    let ms = d.subsec_millis();
-
-    let mut y = 1970i64;
-    let mut rem = days as i64;
-    loop {
-        let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-        if rem < yd { break; }
-        rem -= yd;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let md: [i64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut mo = 0usize;
-    for (i, &days_in_month) in md.iter().enumerate() {
-        if rem < days_in_month { mo = i; break; }
-        rem -= days_in_month;
-    }
-
-    format!("{y}-{:02}-{:02}T{h:02}:{m:02}:{s:02}.{ms:03}Z", mo + 1, rem + 1)
-}
 
 pub struct SqliteBackend {
     conn: Mutex<Connection>,
@@ -189,9 +149,25 @@ impl SqliteBackend {
                 INSERT INTO episodes_fts(episodes_fts, rowid, id, mind, title, narrative)
                 VALUES ('delete', OLD.rowid, OLD.id, OLD.mind, OLD.title, OLD.narrative);
             END;
+
+            -- Schema version tracking (TS compat — factstore.ts checks this)
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
         ")?;
 
-        // Ensure mind exists for non-default minds
+        // Mark schema version 4 (matches TS factstore.ts v4) if not already set
+        let current: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0)
+        ).unwrap_or(0);
+        if current < 4 {
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (4, datetime('now'))",
+                [],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -203,6 +179,10 @@ impl SqliteBackend {
     }
 
     fn next_version(&self, conn: &Connection) -> u64 {
+        Self::next_version_static(conn)
+    }
+
+    fn next_version_static(conn: &Connection) -> u64 {
         let max: u64 = conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM facts", [], |r| r.get(0)
         ).unwrap_or(0);
@@ -214,19 +194,31 @@ impl SqliteBackend {
         let status_str: String = row.get("status")?;
         let profile_str: String = row.get("decay_profile")?;
 
+        let section = serde_json::from_value::<Section>(serde_json::Value::String(section_str.clone()))
+            .unwrap_or_else(|_| {
+                tracing::warn!(section = %section_str, "unknown section in DB — defaulting to Architecture");
+                Section::Architecture
+            });
+        let status = serde_json::from_value::<FactStatus>(serde_json::Value::String(status_str.clone()))
+            .unwrap_or_else(|_| {
+                tracing::warn!(status = %status_str, "unknown status in DB — defaulting to Active");
+                FactStatus::Active
+            });
+
         Ok(Fact {
             id: row.get("id")?,
             mind: row.get("mind")?,
             content: row.get("content")?,
-            section: serde_json::from_value(serde_json::Value::String(section_str))
-                .unwrap_or(Section::Architecture),
-            status: serde_json::from_value(serde_json::Value::String(status_str))
-                .unwrap_or(FactStatus::Active),
+            section,
+            status,
             confidence: row.get("confidence")?,
             reinforcement_count: row.get::<_, u32>("reinforcement_count")?,
             decay_rate: row.get("decay_rate")?,
-            decay_profile: serde_json::from_value(serde_json::Value::String(profile_str))
-                .unwrap_or(DecayProfileName::Standard),
+            decay_profile: serde_json::from_value::<DecayProfileName>(serde_json::Value::String(profile_str.clone()))
+                .unwrap_or_else(|_| {
+                    tracing::warn!(profile = %profile_str, "unknown decay_profile in DB — defaulting to Standard");
+                    DecayProfileName::Standard
+                }),
             last_reinforced: row.get("last_reinforced")?,
             created_at: row.get("created_at")?,
             version: row.get::<_, i64>("version")? as u64,
@@ -296,25 +288,33 @@ impl MemoryBackend for SqliteBackend {
 
     async fn list_facts(&self, mind: &str, filter: FactFilter) -> Result<Vec<Fact>> {
         let conn = self.conn.lock().unwrap();
-        let status = filter.status.as_ref()
-            .map(|s| serde_json::to_string(s).unwrap_or_default())
-            .unwrap_or_else(|| "\"active\"".into());
-        let status = status.trim_matches('"');
+        let status_str = filter.status.as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default().trim_matches('"').to_string())
+            .unwrap_or_else(|| "active".into());
 
-        let mut sql = format!("SELECT * FROM facts WHERE mind = ?1 AND status = '{status}'");
+        let (sql, section_param);
         if let Some(ref sec) = filter.section {
-            let sec_str = serde_json::to_string(sec).unwrap_or_default();
-            let sec_str = sec_str.trim_matches('"');
-            sql.push_str(&format!(" AND section = '{sec_str}'"));
+            section_param = serde_json::to_string(sec).unwrap_or_default().trim_matches('"').to_string();
+            sql = "SELECT * FROM facts WHERE mind = ?1 AND status = ?2 AND section = ?3 ORDER BY created_at DESC";
+            let mut stmt = conn.prepare(sql).map_err(|e| MemoryError::Storage(e.into()))?;
+            let facts = stmt.query_map(params![mind, status_str, section_param], Self::row_to_fact)
+                .map_err(|e| MemoryError::Storage(e.into()))?
+                .filter_map(|r| {
+                    r.map_err(|e| tracing::debug!("row deser error: {e}")).ok()
+                })
+                .collect();
+            Ok(facts)
+        } else {
+            sql = "SELECT * FROM facts WHERE mind = ?1 AND status = ?2 ORDER BY created_at DESC";
+            let mut stmt = conn.prepare(sql).map_err(|e| MemoryError::Storage(e.into()))?;
+            let facts = stmt.query_map(params![mind, status_str], Self::row_to_fact)
+                .map_err(|e| MemoryError::Storage(e.into()))?
+                .filter_map(|r| {
+                    r.map_err(|e| tracing::debug!("row deser error: {e}")).ok()
+                })
+                .collect();
+            Ok(facts)
         }
-        sql.push_str(" ORDER BY created_at DESC");
-
-        let mut stmt = conn.prepare(&sql).map_err(|e| MemoryError::Storage(e.into()))?;
-        let facts = stmt.query_map(params![mind], Self::row_to_fact)
-            .map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(facts)
     }
 
     async fn reinforce_fact(&self, id: &str) -> Result<Fact> {
@@ -348,7 +348,7 @@ impl MemoryBackend for SqliteBackend {
     }
 
     async fn supersede_fact(&self, id: &str, replacement: StoreFact) -> Result<Fact> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         self.ensure_mind(&conn, &replacement.mind);
 
         // Check original exists
@@ -360,11 +360,14 @@ impl MemoryBackend for SqliteBackend {
         }
 
         let new_id = gen_id();
-        let version = self.next_version(&conn);
+        let version = Self::next_version_static(&conn);
 
-        // Archive original
-        conn.execute(
-            "UPDATE facts SET status = 'superseded', supersedes = NULL, version = ?1 WHERE id = ?2",
+        // Transaction: archive original + insert replacement atomically
+        let tx = conn.transaction().map_err(|e| MemoryError::Storage(e.into()))?;
+
+        // Archive original — matches TS behavior
+        tx.execute(
+            "UPDATE facts SET status = 'superseded', version = ?1 WHERE id = ?2",
             params![version as i64, id],
         ).map_err(|e| MemoryError::Storage(e.into()))?;
 
@@ -377,7 +380,7 @@ impl MemoryBackend for SqliteBackend {
         let ts = now_iso();
         let version2 = version + 1;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO facts (id, mind, section, content, status, created_at, source, \
              content_hash, confidence, last_reinforced, reinforcement_count, decay_rate, \
              decay_profile, version, supersedes) VALUES (?1,?2,?3,?4,'active',?5,?6,?7,1.0,?5,1,0.05,?8,?9,?10)",
@@ -385,8 +388,11 @@ impl MemoryBackend for SqliteBackend {
                     replacement.source.as_deref().unwrap_or("manual"), ch, profile_str, version2 as i64, id],
         ).map_err(|e| MemoryError::Storage(e.into()))?;
 
-        conn.query_row("SELECT * FROM facts WHERE id = ?1", params![new_id], Self::row_to_fact)
-            .map_err(|e| MemoryError::Storage(e.into()))
+        let fact = tx.query_row("SELECT * FROM facts WHERE id = ?1", params![new_id], Self::row_to_fact)
+            .map_err(|e| MemoryError::Storage(e.into()))?;
+
+        tx.commit().map_err(|e| MemoryError::Storage(e.into()))?;
+        Ok(fact)
     }
 
     async fn fts_search(&self, mind: &str, query: &str, k: usize) -> Result<Vec<ScoredFact>> {
@@ -416,7 +422,7 @@ impl MemoryBackend for SqliteBackend {
                 })
             },
         ).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
 
         Ok(results)
@@ -466,7 +472,7 @@ impl MemoryBackend for SqliteBackend {
             let fact = Self::row_to_fact(row)?;
             Ok((blob, fact))
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .filter_map(|(blob, fact)| {
                 let vec = vectors::blob_to_vector(&blob);
                 let sim = vectors::cosine_similarity(&vec, embedding);
@@ -547,7 +553,7 @@ impl MemoryBackend for SqliteBackend {
                 created_at: row.get("created_at")?,
             })
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         Ok(edges)
     }
@@ -591,7 +597,7 @@ impl MemoryBackend for SqliteBackend {
                 files_changed: vec![], tags: vec![], tool_calls_count: None,
             })
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         Ok(episodes)
     }
@@ -622,7 +628,7 @@ impl MemoryBackend for SqliteBackend {
                 files_changed: vec![], tags: vec![], tool_calls_count: None,
             })
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         Ok(episodes)
     }
@@ -637,7 +643,7 @@ impl MemoryBackend for SqliteBackend {
         ).map_err(|e| MemoryError::Storage(e.into()))?;
         let facts: Vec<Fact> = stmt.query_map(params![mind], Self::row_to_fact)
             .map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         for f in &facts {
             let record = JsonlRecord::Fact(JsonlFact {
@@ -661,7 +667,7 @@ impl MemoryBackend for SqliteBackend {
                 created_at: row.get("created_at")?,
             })
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         for e in &edges {
             lines.push(serde_json::to_string(&JsonlRecord::Edge(e.clone())).unwrap());
@@ -680,7 +686,7 @@ impl MemoryBackend for SqliteBackend {
                 files_changed: vec![], tags: vec![], tool_calls_count: None,
             })
         }).map_err(|e| MemoryError::Storage(e.into()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::debug!("row deser: {e}")).ok())
             .collect();
         for ep in &episodes {
             lines.push(serde_json::to_string(&JsonlRecord::Episode(ep.clone())).unwrap());
@@ -691,15 +697,16 @@ impl MemoryBackend for SqliteBackend {
 
     async fn import_jsonl(&self, jsonl: &str) -> Result<ImportStats> {
         let mut stats = ImportStats::default();
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| MemoryError::Storage(e.into()))?;
 
         for line in jsonl.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() { continue; }
             match serde_json::from_str::<JsonlRecord>(trimmed) {
                 Ok(JsonlRecord::Fact(jf)) => {
-                    self.ensure_mind(&conn, &jf.mind);
-                    let existing_version: Option<i64> = conn.query_row(
+                    self.ensure_mind(&*tx, &jf.mind);
+                    let existing_version: Option<i64> = tx.query_row(
                         "SELECT version FROM facts WHERE id = ?1", params![jf.id], |r| r.get(0),
                     ).optional().map_err(|e| MemoryError::Storage(e.into()))?.flatten();
 
@@ -707,7 +714,7 @@ impl MemoryBackend for SqliteBackend {
                         if (jf.version as i64) > ev {
                             let section_str = serde_json::to_string(&jf.section).unwrap_or_default();
                             let section_str = section_str.trim_matches('"');
-                            conn.execute(
+                            tx.execute(
                                 "UPDATE facts SET content = ?1, section = ?2, version = ?3 WHERE id = ?4",
                                 params![jf.content, section_str, jf.version as i64, jf.id],
                             ).map_err(|e| MemoryError::Storage(e.into()))?;
@@ -721,7 +728,7 @@ impl MemoryBackend for SqliteBackend {
                         let profile_str = serde_json::to_string(&jf.decay_profile).unwrap_or_default();
                         let profile_str = profile_str.trim_matches('"');
                         let ch = jf.content_hash.unwrap_or_else(|| hash::content_hash(&jf.content));
-                        conn.execute(
+                        tx.execute(
                             "INSERT INTO facts (id, mind, section, content, status, created_at, source, \
                              content_hash, confidence, last_reinforced, reinforcement_count, decay_rate, \
                              decay_profile, version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1.0,?6,1,0.05,?9,?10)",
@@ -734,8 +741,8 @@ impl MemoryBackend for SqliteBackend {
                     }
                 }
                 Ok(JsonlRecord::Episode(ep)) => {
-                    self.ensure_mind(&conn, &ep.mind);
-                    conn.execute(
+                    self.ensure_mind(&*tx, &ep.mind);
+                    tx.execute(
                         "INSERT OR IGNORE INTO episodes (id, mind, title, narrative, date, created_at) \
                          VALUES (?1,?2,?3,?4,?5,?6)",
                         params![ep.id, ep.mind, ep.title, ep.narrative, ep.date, ep.created_at],
@@ -743,7 +750,7 @@ impl MemoryBackend for SqliteBackend {
                     stats.imported += 1;
                 }
                 Ok(JsonlRecord::Edge(edge)) => {
-                    conn.execute(
+                    tx.execute(
                         "INSERT OR IGNORE INTO edges (id, source_fact_id, target_fact_id, relation, description, weight, created_at) \
                          VALUES (?1,?2,?3,?4,?5,?6,?7)",
                         params![edge.id, edge.source_id, edge.target_id, edge.relation,
@@ -755,6 +762,7 @@ impl MemoryBackend for SqliteBackend {
                 Err(_) => { stats.errors += 1; }
             }
         }
+        tx.commit().map_err(|e| MemoryError::Storage(e.into()))?;
         Ok(stats)
     }
 

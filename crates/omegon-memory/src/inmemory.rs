@@ -8,23 +8,8 @@ use std::sync::Mutex;
 use crate::backend::*;
 use crate::hash;
 use crate::types::*;
+use crate::util::{gen_id, now_iso};
 use crate::vectors;
-
-/// Generate a short random ID.
-fn gen_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    format!("{:x}", t & 0xFFFF_FFFF_FFFF)
-}
-
-fn now_iso() -> String {
-    // Simple ISO timestamp — good enough for in-memory backend
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("2026-01-01T00:00:{:02}Z", secs % 60) // placeholder
-}
 
 struct EmbeddingEntry {
     fact_id: String,
@@ -194,19 +179,18 @@ impl MemoryBackend for InMemoryBackend {
             last_reinforced: now_iso(),
             created_at: now_iso(),
             version: s.version_clock,
-            superseded_by: None,
+            superseded_by: Some(id.to_string()), // "I supersede old_id"
             source: replacement.source,
             content_hash: Some(ch),
             last_accessed: None,
         };
 
-        // Archive original and set superseded_by
+        // Archive original — matches TS: original gets status='superseded', no forward pointer.
         s.version_clock += 1;
         let vc = s.version_clock;
         {
             let original = s.facts.get_mut(id).unwrap();
             original.status = FactStatus::Superseded;
-            original.superseded_by = Some(new_id.clone());
             original.version = vc;
         }
 

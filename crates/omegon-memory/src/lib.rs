@@ -23,6 +23,7 @@ pub mod decay;
 pub mod hash;
 pub mod vectors;
 pub mod backend;
+pub mod util;
 pub mod inmemory;
 pub mod sqlite;
 pub mod provider;
