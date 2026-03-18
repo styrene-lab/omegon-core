@@ -72,6 +72,9 @@ pub struct Fact {
     pub superseded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Content hash for deduplication (16-char truncated sha256 hex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
     /// Set when this fact was last accessed by a recall/search operation.
     /// Used for soft decay timer reset.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,15 +243,60 @@ pub struct ImportStats {
 // ─── JSONL wire format ──────────────────────────────────────────────────────
 
 /// A single line in the JSONL git-sync format.
+/// Discriminated on `_type` (not `type`) to match the existing JSONL files on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "_type")]
 pub enum JsonlRecord {
     #[serde(rename = "fact")]
-    Fact(Fact),
+    Fact(JsonlFact),
     #[serde(rename = "episode")]
     Episode(Episode),
     #[serde(rename = "edge")]
     Edge(Edge),
+    #[serde(rename = "mind")]
+    Mind(MindRecord),
+}
+
+/// Minimal fact representation in the JSONL transport format.
+/// The JSONL contains a subset of the full Fact fields — DB-only fields
+/// (confidence, reinforcement_count, decay_rate, etc.) are NOT in the JSONL.
+/// These are reconstructed from defaults on import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonlFact {
+    pub id: String,
+    pub mind: String,
+    pub content: String,
+    pub section: Section,
+    pub status: FactStatus,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// In the JSONL, `supersedes` means "this fact supersedes fact Y".
+    /// Mapped to `Fact.superseded_by` (inverse perspective) on import.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Lamport version for conflict resolution. Default 0 for legacy files.
+    #[serde(default)]
+    pub version: u64,
+    /// Decay profile — additive field, default "standard" for legacy facts.
+    #[serde(default)]
+    pub decay_profile: DecayProfileName,
+}
+
+/// Mind record in the JSONL transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MindRecord {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 // ─── Embedding metadata ─────────────────────────────────────────────────────
@@ -258,4 +306,86 @@ pub struct EmbeddingMetadata {
     pub model_name: String,
     pub dims: u32,
     pub inserted_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_fact_round_trip() {
+        let fact = JsonlFact {
+            id: "abc123".into(),
+            mind: "default".into(),
+            content: "Some architecture fact".into(),
+            section: Section::Architecture,
+            status: FactStatus::Active,
+            created_at: "2026-03-18T00:00:00Z".into(),
+            source: Some("extraction".into()),
+            content_hash: Some("1234567890abcdef".into()),
+            supersedes: None,
+            version: 0,
+            decay_profile: DecayProfileName::Standard,
+        };
+        let record = JsonlRecord::Fact(fact);
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains(r#""_type":"fact"#), "should use _type: {json}");
+
+        let parsed: JsonlRecord = serde_json::from_str(&json).unwrap();
+        match parsed {
+            JsonlRecord::Fact(f) => {
+                assert_eq!(f.id, "abc123");
+                assert_eq!(f.section, Section::Architecture);
+            }
+            _ => panic!("expected Fact variant"),
+        }
+    }
+
+    #[test]
+    fn jsonl_deserializes_real_file_format() {
+        // This is the actual format from .pi/memory/facts.jsonl
+        let line = r#"{"_type":"fact","id":"scQZ59OF3fPW","mind":"default","section":"Architecture","content":"Some fact","status":"active","created_at":"2026-03-04T05:30:13.976Z","source":"extraction","content_hash":"497f84b1d8aecb70","supersedes":"JngamqHkF69o"}"#;
+        let record: JsonlRecord = serde_json::from_str(line).unwrap();
+        match record {
+            JsonlRecord::Fact(f) => {
+                assert_eq!(f.id, "scQZ59OF3fPW");
+                assert_eq!(f.supersedes, Some("JngamqHkF69o".into()));
+                assert_eq!(f.version, 0); // default for missing field
+                assert_eq!(f.decay_profile, DecayProfileName::Standard); // default
+            }
+            _ => panic!("expected Fact"),
+        }
+    }
+
+    #[test]
+    fn jsonl_mind_record() {
+        let line = r#"{"_type":"mind","name":"project-x","description":"A test project"}"#;
+        let record: JsonlRecord = serde_json::from_str(line).unwrap();
+        match record {
+            JsonlRecord::Mind(m) => assert_eq!(m.name, "project-x"),
+            _ => panic!("expected Mind"),
+        }
+    }
+
+    #[test]
+    fn section_serde_preserves_display_names() {
+        let s = Section::KnownIssues;
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#""Known Issues""#);
+        let parsed: Section = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Section::KnownIssues);
+    }
+
+    #[test]
+    fn decay_profile_name_defaults_to_standard() {
+        let name: DecayProfileName = Default::default();
+        assert_eq!(name, DecayProfileName::Standard);
+    }
+
+    #[test]
+    fn fact_status_snake_case() {
+        let s = FactStatus::Active;
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#""active""#);
+    }
 }

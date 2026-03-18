@@ -10,13 +10,17 @@ use crate::types::DecayProfileName;
 const MAX_HALF_LIFE_DAYS: f64 = 90.0;
 
 /// Decay profile parameters.
+///
+/// Note: `base_rate` and `minimum_confidence` are carried for TS compatibility
+/// but are NOT used by `compute_confidence`. The TS implementation has the same
+/// dead fields. Only `half_life_days` and `reinforcement_factor` affect computation.
 #[derive(Debug, Clone, Copy)]
 pub struct DecayProfile {
-    /// Base decay rate (ln(2) / half_life_days).
+    /// Base decay rate — UNUSED by compute_confidence. Carried for TS compat.
     pub base_rate: f64,
     /// Multiplier per reinforcement for extending half-life.
     pub reinforcement_factor: f64,
-    /// Floor below which confidence is clamped.
+    /// Confidence floor — UNUSED by compute_confidence. Carried for TS compat.
     pub minimum_confidence: f64,
     /// Base half-life in days before reinforcement scaling.
     pub half_life_days: f64,

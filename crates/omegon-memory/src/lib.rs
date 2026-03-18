@@ -20,9 +20,13 @@
 
 pub mod types;
 pub mod decay;
+pub mod hash;
+pub mod vectors;
 pub mod backend;
 
 // Re-exports for convenience
-pub use backend::MemoryBackend;
+pub use backend::{MemoryBackend, ContextRenderer, MemoryError};
 pub use types::*;
 pub use decay::{compute_confidence, DecayProfile};
+pub use hash::{content_hash, normalize_for_hash};
+pub use vectors::{cosine_similarity, vector_to_blob, blob_to_vector};

@@ -89,26 +89,16 @@ pub trait MemoryBackend: Send + Sync {
         embedding: &[f32],
     ) -> Result<()>;
 
-    /// Get the current embedding model metadata, if any vectors exist.
-    async fn embedding_metadata(&self) -> Result<Option<EmbeddingMetadata>>;
-
-    // ── Context rendering ────────────────────────────────────────────────
-
-    /// Render a pre-formatted context block for system prompt injection.
-    /// Selects facts by priority tier, respects character budget, and
-    /// includes episode summaries.
-    ///
-    /// This is the primary consumer-facing method — the agent loop calls
-    /// this once per turn (via ContextProvider) to get the memory block.
-    async fn render_context(&self, req: ContextRequest) -> Result<RenderedContext>;
+    /// Get the embedding model metadata for a mind, if any vectors exist.
+    async fn embedding_metadata(&self, mind: &str) -> Result<Option<EmbeddingMetadata>>;
 
     // ── Edges ────────────────────────────────────────────────────────────
 
     /// Create a directional relationship between two facts.
     async fn create_edge(&self, req: CreateEdge) -> Result<Edge>;
 
-    /// Get all edges involving a fact (as source or target).
-    async fn get_edges(&self, fact_id: &str) -> Result<Vec<Edge>>;
+    /// Get all edges involving a fact (as source or target) within a mind.
+    async fn get_edges(&self, mind: &str, fact_id: &str) -> Result<Vec<Edge>>;
 
     // ── Episodes ─────────────────────────────────────────────────────────
 
@@ -139,6 +129,29 @@ pub trait MemoryBackend: Send + Sync {
 
     /// Get summary statistics for a mind's memory store.
     async fn stats(&self, mind: &str) -> Result<MemoryStats>;
+}
+
+// ─── Context Rendering ──────────────────────────────────────────────────────
+
+/// Renders memory facts into a context block for injection.
+///
+/// Separated from `MemoryBackend` because rendering is a consumer concern,
+/// not a storage concern. Different consumers (LLM prompt, web UI, headless
+/// debug output) may want different formats from the same backend.
+///
+/// The default implementation (`MarkdownRenderer`) produces the markdown
+/// block used for LLM system prompt injection.
+pub trait ContextRenderer: Send + Sync {
+    /// Render a context block from the given backend.
+    /// Selects facts by priority tier, respects character budget, and
+    /// includes episode summaries.
+    fn render_context(
+        &self,
+        facts: &[Fact],
+        episodes: &[Episode],
+        working_memory: &[Fact],
+        max_chars: usize,
+    ) -> RenderedContext;
 }
 
 /// Summary statistics for a memory store.
