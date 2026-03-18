@@ -17,6 +17,7 @@ pub fn build_base_prompt(cwd: &Path, tools: &[ToolDefinition]) -> String {
     let date = utc_date();
     let tool_list = format_tool_list(tools);
     let tool_guidelines = build_tool_guidelines(tools);
+    let lifecycle_context = detect_lifecycle_context(cwd, tools);
     let global_directives = load_global_directives();
     let project_directives = load_project_directives(cwd);
     let project_conventions = detect_project_conventions(cwd);
@@ -36,12 +37,14 @@ Available tools:
 - Be direct. Don't narrate what you're about to do — just do it. Show file paths clearly.
 - When you disagree with the user's approach or see a better alternative, say so with your reasoning. Do not simply comply when you believe the request will produce a worse outcome.
 - If the user's instructions are ambiguous, ask for clarification rather than guessing. If you're uncertain about a technical detail, say so rather than confabulating.
+- Ground your claims in evidence. When you say "this function does X", cite the file and line. When you say "this won't work because Y", reference what you observed. Don't make assertions about code you haven't read.
+- When investigating a problem, distinguish what you've verified (read the file, ran the test) from what you're inferring. State your confidence level when making architectural recommendations.
 - Read files before editing. Edit requires exact text matches — if you guess at whitespace or formatting, the edit will fail.
 - Edit runs automatic validation (type check, lint). Read the validation result. If it shows errors, fix them before moving on.
 - Every non-trivial code change must include tests. Untested code is incomplete.
 - Commit your work with descriptive messages when the task is complete. Do NOT push.
 - When you complete the task, summarize what you did and what changed.
-{global_directives}{project_directives}{project_conventions}
+{lifecycle_context}{global_directives}{project_directives}{project_conventions}
 Current date: {date}
 Current working directory: {cwd}"#,
         cwd = cwd.display()
@@ -128,6 +131,83 @@ fn build_tool_guidelines(tools: &[ToolDefinition]) -> String {
     }
 
     guidelines.join("\n\n")
+}
+
+/// Detect lifecycle artifacts in the project and inject awareness.
+/// Only injects if design docs or openspec changes actually exist —
+/// projects without lifecycle artifacts get no lifecycle prompt.
+fn detect_lifecycle_context(cwd: &Path, tools: &[ToolDefinition]) -> String {
+    let repo_root = find_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let tool_names: std::collections::HashSet<&str> =
+        tools.iter().map(|t| t.name.as_str()).collect();
+
+    let has_design_tools = tool_names.contains("design_tree");
+    let has_openspec_tools = tool_names.contains("openspec_manage");
+    let has_cleave_tools = tool_names.contains("cleave_assess") || tool_names.contains("cleave_run");
+
+    let docs_dir = repo_root.join("docs");
+    let openspec_dir = repo_root.join("openspec");
+    let has_design_docs = docs_dir.is_dir()
+        && std::fs::read_dir(&docs_dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| {
+                e.path().extension().is_some_and(|ext| ext == "md")
+            }))
+            .unwrap_or(false);
+    let has_openspec = openspec_dir.is_dir();
+
+    // No lifecycle artifacts and no lifecycle tools → skip entirely
+    if !has_design_docs && !has_openspec && !has_design_tools {
+        return String::new();
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+
+    sections.push(
+        "This project uses structured lifecycle management. \
+         Design exploration, specification, and implementation are tracked as artifacts."
+            .into(),
+    );
+
+    if has_design_docs && has_design_tools {
+        let doc_count = std::fs::read_dir(&docs_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        sections.push(format!(
+            "design-tree: {doc_count} design doc(s) in docs/. Use design_tree to query nodes, \
+             track decisions, and manage open questions. Use design_tree_update to \
+             record decisions, add research, and transition node status \
+             (seed → exploring → resolved → decided)."
+        ));
+    }
+
+    if has_openspec && has_openspec_tools {
+        sections.push(
+            "openspec: Spec-driven implementation lifecycle. The full cycle is: \
+             design_tree_update(implement) → spec → fast_forward → /cleave → \
+             /assess spec → archive. Specs define what must be true BEFORE code is written."
+                .into(),
+        );
+    }
+
+    if has_cleave_tools {
+        sections.push(
+            "cleave: Task decomposition into parallel children. Use cleave_assess \
+             to check complexity (threshold 2.0). The loop auto-batches edit calls \
+             atomically — you don't need to worry about partial state."
+                .into(),
+        );
+    }
+
+    if sections.len() <= 1 {
+        return String::new();
+    }
+
+    format!("\n# Project Lifecycle\n\n{}\n", sections.join("\n\n"))
 }
 
 /// Load global operator directives from ~/.omegon/AGENTS.md
@@ -378,5 +458,52 @@ mod tests {
     fn load_directives_returns_empty_for_missing() {
         let directives = load_project_directives(Path::new("/tmp/nonexistent"));
         assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_context_detected_when_docs_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+
+        // Create a git repo with docs/
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("docs")).unwrap();
+        std::fs::write(cwd.join("docs/some-design.md"), "# Design").unwrap();
+
+        // With design_tree tools registered
+        let tools = vec![
+            ToolDefinition {
+                name: "design_tree".into(),
+                label: "dt".into(),
+                description: "query".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "design_tree_update".into(),
+                label: "dtu".into(),
+                description: "mutate".into(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+
+        let ctx = detect_lifecycle_context(cwd, &tools);
+        assert!(ctx.contains("Project Lifecycle"), "should detect lifecycle, got: {ctx}");
+        assert!(ctx.contains("design-tree"), "should mention design-tree");
+        assert!(ctx.contains("1 design doc"), "should count docs");
+    }
+
+    #[test]
+    fn lifecycle_context_empty_when_no_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = detect_lifecycle_context(dir.path(), &[]);
+        assert!(ctx.is_empty(), "no artifacts + no tools = no lifecycle section");
+    }
+
+    #[test]
+    fn evidence_grounding_in_prompt() {
+        let tools = vec![];
+        let prompt = build_base_prompt(Path::new("/tmp"), &tools);
+        assert!(prompt.contains("Ground your claims in evidence"), "should include evidence directive");
+        assert!(prompt.contains("distinguish what you've verified"), "should include verification distinction");
     }
 }
