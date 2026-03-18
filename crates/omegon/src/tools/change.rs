@@ -37,7 +37,7 @@ pub enum ValidationMode {
 }
 
 impl ValidationMode {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "none" | "false" | "off" => Self::None,
             "quick" => Self::Quick,
@@ -207,11 +207,16 @@ async fn run_affected_tests(cwd: &Path, files: &[&PathBuf]) -> Option<String> {
     // Find test files co-located with changed files
     let mut test_files = Vec::new();
     for file in files {
-        let stem = file.file_stem()?.to_str()?;
-        let ext = file.extension()?.to_str()?;
-        let parent = file.parent()?;
+        let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
+            continue; // Skip files without a stem (binary, extensionless)
+        };
+        let Some(ext) = file.extension().and_then(|e| e.to_str()) else {
+            continue; // Skip files without an extension
+        };
+        let Some(parent) = file.parent() else {
+            continue;
+        };
 
-        // Common test file patterns
         let patterns = [
             format!("{stem}.test.{ext}"),
             format!("{stem}_test.{ext}"),
@@ -230,8 +235,11 @@ async fn run_affected_tests(cwd: &Path, files: &[&PathBuf]) -> Option<String> {
         return None;
     }
 
-    // Determine test runner by file type
-    let ext = files.first()?.extension()?.to_str()?;
+    // Determine test runner by the first file's extension
+    let ext = match files.first().and_then(|f| f.extension()).and_then(|e| e.to_str()) {
+        Some(e) => e,
+        None => return None,
+    };
     let (cmd, args) = match ext {
         "rs" => ("cargo", vec!["test".to_string()]),
         "ts" | "tsx" => {

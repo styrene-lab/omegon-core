@@ -6,13 +6,11 @@
 use omegon_traits::ToolDefinition;
 use std::path::{Path, PathBuf};
 
-/// Build the base system prompt for headless mode.
-///
-/// Loads project directives (AGENTS.md) from the working directory if present.
 /// Build the base system prompt.
 ///
-/// Loads: global AGENTS.md (~/.omegon/), project AGENTS.md, project conventions.
-/// Includes rich tool guidelines that shape behavior, not just descriptions.
+/// Assembles: identity, tool list, tool guidelines, behavior directives,
+/// lifecycle context (if artifacts exist), global/project AGENTS.md,
+/// project conventions (auto-detected from config files).
 pub fn build_base_prompt(cwd: &Path, tools: &[ToolDefinition]) -> String {
     let date = utc_date();
     let tool_list = format_tool_list(tools);
@@ -147,15 +145,21 @@ fn detect_lifecycle_context(cwd: &Path, tools: &[ToolDefinition]) -> String {
 
     let docs_dir = repo_root.join("docs");
     let openspec_dir = repo_root.join("openspec");
-    let has_design_docs = docs_dir.is_dir()
-        && std::fs::read_dir(&docs_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| {
-                e.path().extension().is_some_and(|ext| ext == "md")
-            }))
-            .unwrap_or(false);
+    // Count design docs in a single pass
+    let design_doc_count = if docs_dir.is_dir() {
+        std::fs::read_dir(&docs_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+                    .count()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let has_design_docs = design_doc_count > 0;
     let has_openspec = openspec_dir.is_dir();
 
-    // No lifecycle artifacts and no lifecycle tools → skip entirely
     if !has_design_docs && !has_openspec && !has_design_tools {
         return String::new();
     }
@@ -169,13 +173,7 @@ fn detect_lifecycle_context(cwd: &Path, tools: &[ToolDefinition]) -> String {
     );
 
     if has_design_docs && has_design_tools {
-        let doc_count = std::fs::read_dir(&docs_dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                    .count()
-            })
-            .unwrap_or(0);
+        let doc_count = design_doc_count;
 
         sections.push(format!(
             "design-tree: {doc_count} design doc(s) in docs/. Use design_tree to query nodes, \
@@ -490,6 +488,25 @@ mod tests {
         assert!(ctx.contains("Project Lifecycle"), "should detect lifecycle, got: {ctx}");
         assert!(ctx.contains("design-tree"), "should mention design-tree");
         assert!(ctx.contains("1 design doc"), "should count docs");
+    }
+
+    #[test]
+    fn lifecycle_context_openspec_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("openspec")).unwrap();
+
+        let tools = vec![ToolDefinition {
+            name: "openspec_manage".into(),
+            label: "os".into(),
+            description: "manage".into(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let ctx = detect_lifecycle_context(cwd, &tools);
+        assert!(ctx.contains("openspec"), "should detect openspec, got: {ctx}");
+        assert!(ctx.contains("Spec-driven"), "should include spec guidance");
     }
 
     #[test]

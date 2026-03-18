@@ -43,6 +43,11 @@ impl AgentSetup {
         let db_path = memory_dir.join("facts.db");
         let jsonl_path = memory_dir.join("facts.jsonl");
 
+        // Memory: single backend, two providers (tools + context injection).
+        // Both share the same SQLite connection to avoid SQLITE_BUSY conflicts.
+        // The tool provider handles reads + writes; the context provider only reads.
+        let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
+
         if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
             tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
 
@@ -60,29 +65,23 @@ impl AgentSetup {
             let provider = omegon_memory::MemoryProvider::new(
                 backend,
                 omegon_memory::MarkdownRenderer,
-                mind,
+                mind.clone(),
             );
             tools.push(Box::new(provider));
-        }
 
-        // ─── Memory context injection ───────────────────────────────────
-        // Create a second backend handle for proactive fact injection.
-        // The MemoryProvider (above) handles tool calls; this handle
-        // injects relevant facts into the system prompt each turn.
-        let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
-        {
-            let memory_dir2 = project_root.join(".pi").join("memory");
-            let db_path2 = memory_dir2.join("facts.db");
-            if db_path2.exists()
-                && let Ok(backend2) = omegon_memory::SqliteBackend::open(&db_path2) {
-                    let provider2 = omegon_memory::MemoryProvider::new(
-                        backend2,
-                        omegon_memory::MarkdownRenderer,
-                        "default".to_string(),
-                    );
-                    memory_context = Some(Box::new(provider2));
-                    tracing::info!("Memory context injection enabled");
-                }
+            // Context injection: open a second read-only handle.
+            // SQLite WAL mode supports concurrent readers safely.
+            // This is read-only (list_facts, list_episodes, get_fact) —
+            // all writes go through the tool provider above.
+            if let Ok(ctx_backend) = omegon_memory::SqliteBackend::open(&db_path) {
+                let ctx_provider = omegon_memory::MemoryProvider::new(
+                    ctx_backend,
+                    omegon_memory::MarkdownRenderer,
+                    mind,
+                );
+                memory_context = Some(Box::new(ctx_provider));
+                tracing::info!("Memory context injection enabled (read-only handle)");
+            }
         }
 
         // ─── System prompt + context ────────────────────────────────────

@@ -332,7 +332,7 @@ impl ToolProvider for CoreTools {
                 let edits: Vec<change::EditSpec> = serde_json::from_value(edits_val.clone())?;
                 let validate_mode = args.get("validate")
                     .and_then(|v| v.as_str())
-                    .map(change::ValidationMode::from_str)
+                    .map(change::ValidationMode::parse)
                     .unwrap_or(change::ValidationMode::Standard);
                 let cwd = self.cwd.clone();
                 let cwd2 = cwd.clone();

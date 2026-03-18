@@ -125,21 +125,9 @@ impl IntentDocument {
                         }
                     }
                 }
-                "bash" => {
-                    // Track if bash produced modifications via exit code 0 + common write commands
-                    if let Some(cmd) = call.arguments.get("command").and_then(|v| v.as_str()) {
-                        // Track git operations that indicate file state changes
-                        if cmd.starts_with("git add")
-                            || cmd.starts_with("git commit")
-                            || cmd.starts_with("git stash")
-                        {
-                            // Don't add to files_modified — these are meta-operations
-                        } else if cmd.contains("sed -i") || cmd.contains("tee ") {
-                            // Heuristic: bash writes are hard to track, but these are common
-                            // patterns. We note them in the stats but can't track specific files.
-                        }
-                    }
-                }
+                // bash: can't reliably track which files are modified by arbitrary commands.
+                // File tracking for bash is inherently best-effort — the agent should use
+                // edit/write for trackable mutations. bash is for commands, not file writes.
                 _ => {}
             }
         }
@@ -759,7 +747,7 @@ impl ConversationState {
             }
             "web_search" => {
                 let lines = text.lines().count();
-                format!("[web_search: {lines} lines of results]")
+                format!("[web_search{ctx_suffix}: {lines} lines of results]")
             }
             _ => {
                 let lines = text.lines().count();
@@ -835,8 +823,11 @@ impl ConversationState {
 }
 
 /// Extract identifier-like tokens from a line of code.
-/// Returns sequences of `[a-zA-Z0-9_]` that are at least 5 chars long.
+/// Returns sequences of `[a-zA-Z0-9_]` that are at least 8 chars long.
+/// Threshold of 8 avoids false positives on common short identifiers
+/// (String, Error, value, token, state) that appear in most responses.
 fn extract_identifiers(line: &str) -> impl Iterator<Item = &str> {
+    const MIN_IDENT_LEN: usize = 8;
     let bytes = line.as_bytes();
     let mut results = Vec::new();
     let mut start = None;
@@ -846,14 +837,13 @@ fn extract_identifiers(line: &str) -> impl Iterator<Item = &str> {
                 start = Some(i);
             }
         } else if let Some(s) = start {
-            if i - s >= 5 {
+            if i - s >= MIN_IDENT_LEN {
                 results.push(&line[s..i]);
             }
             start = None;
         }
     }
-    // Handle identifier at end of line
-    if let Some(s) = start.filter(|&s| line.len() - s >= 5) {
+    if let Some(s) = start.filter(|&s| line.len() - s >= MIN_IDENT_LEN) {
         results.push(&line[s..]);
     }
     results.into_iter()

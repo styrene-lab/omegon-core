@@ -28,6 +28,8 @@ pub struct LoopConfig {
     pub retry_delay_ms: u64,
     /// Model string to pass to the bridge (e.g. "anthropic:claude-sonnet-4-20250514")
     pub model: String,
+    /// Working directory — used for path resolution in auto-batch rollback.
+    pub cwd: std::path::PathBuf,
 }
 
 impl Default for LoopConfig {
@@ -38,6 +40,7 @@ impl Default for LoopConfig {
             max_retries: 3,
             retry_delay_ms: 2000,
             model: "anthropic:claude-sonnet-4-20250514".into(),
+            cwd: std::env::current_dir().unwrap_or_default(),
         }
     }
 }
@@ -197,7 +200,7 @@ pub async fn run(
 
         // ─── Dispatch tool calls ────────────────────────────────────
         let results =
-            dispatch_tools(tools, &tool_index, tool_calls, events, cancel.clone()).await;
+            dispatch_tools(tools, &tool_index, tool_calls, events, cancel.clone(), &config.cwd).await;
 
         // Push tool results to conversation and update intent
         for result in &results {
@@ -495,6 +498,7 @@ async fn dispatch_tools(
     tool_calls: &[ToolCall],
     events: &broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
+    cwd: &std::path::Path,
 ) -> Vec<ToolResultEntry> {
     let mut results = Vec::with_capacity(tool_calls.len());
 
@@ -506,17 +510,24 @@ async fn dispatch_tools(
     let batch_mode = mutation_count >= 2;
 
     let mut snapshots: HashMap<std::path::PathBuf, String> = HashMap::new();
+    let mut created_files: Vec<std::path::PathBuf> = Vec::new(); // new files to delete on rollback
     let mut mutated_files: Vec<std::path::PathBuf> = Vec::new();
 
     if batch_mode {
         for call in tool_calls {
             if is_mutation_tool(&call.name)
-                && let Some(path) = extract_mutation_path(&call.arguments) {
-                    let full = std::path::Path::new(&path);
-                    if full.exists() && !snapshots.contains_key(full)
-                        && let Ok(content) = tokio::fs::read_to_string(full).await {
-                            snapshots.insert(full.to_path_buf(), content);
-                        }
+                && let Some(path_str) = extract_mutation_path(&call.arguments) {
+                    // Resolve against cwd — same as tools/mod.rs resolve_path
+                    let full = cwd.join(&path_str);
+                    if full.exists() {
+                        if !snapshots.contains_key(&full)
+                            && let Ok(content) = tokio::fs::read_to_string(&full).await {
+                                snapshots.insert(full, content);
+                            }
+                    } else {
+                        // File doesn't exist yet — mark for deletion on rollback
+                        created_files.push(full);
+                    }
                 }
         }
         if !snapshots.is_empty() {
@@ -570,8 +581,8 @@ async fn dispatch_tools(
 
         // Track which files were successfully mutated (for rollback)
         if !is_error && is_mutation_tool(&call.name)
-            && let Some(path) = extract_mutation_path(&call.arguments) {
-                mutated_files.push(std::path::PathBuf::from(path));
+            && let Some(path_str) = extract_mutation_path(&call.arguments) {
+                mutated_files.push(cwd.join(&path_str));
             }
 
         // ── Auto-batch rollback on mutation failure ─────────────────
@@ -590,6 +601,12 @@ async fn dispatch_tools(
                     match tokio::fs::write(file, original).await {
                         Ok(_) => rollback_report.push(format!("  ✓ restored {}", file.display())),
                         Err(e) => rollback_report.push(format!("  ✗ rollback failed {}: {e}", file.display())),
+                    }
+                } else if created_files.contains(file) {
+                    // File was newly created — delete it
+                    match tokio::fs::remove_file(file).await {
+                        Ok(_) => rollback_report.push(format!("  ✓ removed {}", file.display())),
+                        Err(e) => rollback_report.push(format!("  ✗ remove failed {}: {e}", file.display())),
                     }
                 }
             }
@@ -966,6 +983,16 @@ mod tests {
             })).as_deref(),
             Some("a.rs, b.rs")
         );
+        // Memory tools
+        assert_eq!(
+            summarize_tool_args("memory_recall", &serde_json::json!({"query": "auth architecture"})).as_deref(),
+            Some("auth architecture")
+        );
+        assert_eq!(
+            summarize_tool_args("memory_store", &serde_json::json!({"content": "Omegon uses ratatui"})).as_deref(),
+            Some("Omegon uses ratatui")
+        );
+
         // Long command gets truncated
         let long_cmd = "x".repeat(100);
         let summary = summarize_tool_args("bash", &serde_json::json!({"command": long_cmd})).unwrap();
@@ -1055,7 +1082,7 @@ mod tests {
             },
         ];
 
-        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel).await;
+        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel, dir.path()).await;
 
         // The second edit should have failed
         assert!(results[1].is_error, "second edit should fail");
@@ -1071,11 +1098,8 @@ mod tests {
 
     #[tokio::test]
     async fn single_edit_has_no_batch_overhead() {
-        // With only one edit, there should be no snapshotting or rollback
-        // (batch_mode = false when mutation_count < 2)
-        // This is a structural test — we verify by checking that a single
-        // successful edit doesn't produce rollback messaging
         use omegon_traits::ToolResult;
+        let dir = tempfile::tempdir().unwrap();
 
         struct PassProvider;
 
@@ -1117,7 +1141,7 @@ mod tests {
             arguments: serde_json::json!({"path": "/tmp/fake.rs", "oldText": "a", "newText": "b"}),
         }];
 
-        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel).await;
+        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel, dir.path()).await;
         assert!(!results[0].is_error);
         let text = results[0].content[0].as_text().unwrap();
         assert!(!text.contains("rollback"), "single edit should have no batch overhead");

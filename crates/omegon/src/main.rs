@@ -496,6 +496,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     max_retries: cli.max_retries,
                     retry_delay_ms: 2000,
                     model,
+                    cwd: agent.cwd.clone(),
                 };
 
                 let cancel = CancellationToken::new();
@@ -575,6 +576,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         max_retries: cli.max_retries,
         retry_delay_ms: 2000,
         model: cli.model.clone(),
+        cwd: agent.cwd.clone(),
     };
 
     // ─── LLM provider ──────────────────────────────────────────────────
