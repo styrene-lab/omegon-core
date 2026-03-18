@@ -6,6 +6,7 @@
 
 pub mod bash;
 pub mod edit;
+pub mod local_inference;
 pub mod read;
 pub mod validate;
 pub mod web_search;

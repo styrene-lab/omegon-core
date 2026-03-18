@@ -302,6 +302,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     let core_tools = CoreTools::new(cwd.clone());
     let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
     tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
+    tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
 
     // Memory
     let mind = "default".to_string();
@@ -464,6 +465,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let core_tools = CoreTools::new(cwd.clone());
     let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
     tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
+    tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
 
     // ─── Set up memory ──────────────────────────────────────────────────
     // Mind name — use "default" to match the TS factstore convention.
