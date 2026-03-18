@@ -31,7 +31,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            model: "anthropic:claude-sonnet-4-20250514".into(),
+            model: "anthropic:claude-sonnet-4-6".into(),
             thinking: ThinkingLevel::Medium,
             max_turns: 50,
             compaction_threshold: 0.75,
@@ -117,11 +117,14 @@ impl ThinkingLevel {
 /// Infer context window from model identifier.
 fn infer_context_window(model: &str) -> usize {
     let name = model.split(':').next_back().unwrap_or(model);
+    // Anthropic — all current models are 200k
     if name.contains("opus") { return 200_000; }
     if name.contains("sonnet") { return 200_000; }
     if name.contains("haiku") { return 200_000; }
-    if name.contains("gpt-4") { return 128_000; }
-    if name.contains("o3") { return 200_000; }
+    // OpenAI — GPT-5.x is 1M, GPT-4.1 is 1M, o-series is 200k
+    if name.contains("gpt-5") { return 1_000_000; }
+    if name.contains("gpt-4.1") { return 1_000_000; }
+    if name.contains("o3") || name.contains("o4") { return 200_000; }
     200_000 // safe default
 }
 
@@ -243,8 +246,8 @@ mod tests {
 
     #[test]
     fn model_short_extracts_name() {
-        let s = Settings::new("anthropic:claude-opus-4-20250514");
-        assert_eq!(s.model_short(), "claude-opus-4-20250514");
+        let s = Settings::new("anthropic:claude-opus-4-6");
+        assert_eq!(s.model_short(), "claude-opus-4-6");
         assert_eq!(s.provider(), "anthropic");
     }
 
@@ -258,8 +261,13 @@ mod tests {
 
     #[test]
     fn context_window_inference() {
-        assert_eq!(infer_context_window("anthropic:claude-sonnet-4-20250514"), 200_000);
-        assert_eq!(infer_context_window("openai:gpt-4.1"), 128_000);
+        assert_eq!(infer_context_window("anthropic:claude-sonnet-4-6"), 200_000);
+        assert_eq!(infer_context_window("anthropic:claude-opus-4-6"), 200_000);
+        assert_eq!(infer_context_window("anthropic:claude-haiku-4-5-20251001"), 200_000);
+        assert_eq!(infer_context_window("openai:gpt-5.4"), 1_000_000);
+        assert_eq!(infer_context_window("openai:gpt-4.1"), 1_000_000);
+        assert_eq!(infer_context_window("openai:o3"), 200_000);
+        assert_eq!(infer_context_window("openai:o4-mini"), 200_000);
     }
 
     #[test]

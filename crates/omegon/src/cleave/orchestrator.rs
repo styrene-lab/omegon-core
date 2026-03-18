@@ -725,7 +725,7 @@ mod tests {
             agent_binary: PathBuf::from("/usr/bin/omegon-agent"),
             bridge_path: PathBuf::from("/usr/lib/bridge.mjs"),
             node: "test".into(),
-            model: "anthropic:claude-sonnet-4-20250514".into(),
+            model: "anthropic:claude-sonnet-4-6".into(),
             max_parallel: 4,
             timeout_secs: 900,
             idle_timeout_secs: 300, // custom: 5 minutes

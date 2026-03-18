@@ -304,7 +304,7 @@ impl LlmBridge for AnthropicClient {
 
         let model = options.model.as_deref()
             .and_then(|m| m.strip_prefix("anthropic:"))
-            .unwrap_or("claude-sonnet-4-20250514");
+            .unwrap_or("claude-sonnet-4-6");
 
         // OAuth requires Claude Code identity prefix + array format
         let system_value = if self.is_oauth {

@@ -145,16 +145,18 @@ impl App {
         let openai_auth = crate::providers::resolve_api_key_sync("openai");
 
         if let Some((_, is_oauth)) = anthropic_auth {
-            let auth = if is_oauth { "subscription" } else { "api-key" };
-            options.push(sel_opt("anthropic:claude-sonnet-4-20250514", "Claude Sonnet 4", &format!("balanced · 200k · {auth}"), &current));
-            options.push(sel_opt("anthropic:claude-opus-4-20250514", "Claude Opus 4", &format!("strongest · 200k · {auth}"), &current));
+            let auth = if is_oauth { "oauth" } else { "key" };
+            options.push(sel_opt("anthropic:claude-sonnet-4-6",          "Sonnet 4.6",  &format!("Anthropic · balanced · 200k · {auth}"), &current));
+            options.push(sel_opt("anthropic:claude-opus-4-6",            "Opus 4.6",    &format!("Anthropic · strongest · 200k · {auth}"), &current));
+            options.push(sel_opt("anthropic:claude-haiku-4-5-20251001",  "Haiku 4.5",   &format!("Anthropic · fast · cheap · 200k · {auth}"), &current));
         }
 
         if let Some((_, is_oauth)) = openai_auth {
-            let auth = if is_oauth { "subscription" } else { "api-key" };
-            options.push(sel_opt("openai:o3", "o3", &format!("reasoning · 200k · {auth}"), &current));
-            options.push(sel_opt("openai:gpt-4.1", "GPT-4.1", &format!("coding · 1M · {auth}"), &current));
-            options.push(sel_opt("openai:o4-mini", "o4-mini", &format!("fast reasoning · 200k · {auth}"), &current));
+            let auth = if is_oauth { "oauth" } else { "key" };
+            options.push(sel_opt("openai:gpt-5.4",   "GPT-5.4",   &format!("OpenAI · frontier · 1M · {auth}"), &current));
+            options.push(sel_opt("openai:o3",         "o3",        &format!("OpenAI · reasoning · 200k · {auth}"), &current));
+            options.push(sel_opt("openai:o4-mini",    "o4-mini",   &format!("OpenAI · fast reasoning · 200k · {auth}"), &current));
+            options.push(sel_opt("openai:gpt-4.1",    "GPT-4.1",  &format!("OpenAI · coding · 1M · {auth}"), &current));
         }
 
         if options.is_empty() {
@@ -430,7 +432,7 @@ impl App {
                     self.open_model_selector();
                     SlashResult::Handled
                 } else {
-                    // Direct switch: /model anthropic:claude-opus-4-20250514
+                    // Direct switch: /model anthropic:claude-opus-4-6
                     self.update_settings(|s| {
                         s.model = args.to_string();
                         s.context_window = crate::settings::Settings::new(args).context_window;

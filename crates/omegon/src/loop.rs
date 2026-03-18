@@ -26,7 +26,7 @@ pub struct LoopConfig {
     pub max_retries: u32,
     /// Initial retry delay in milliseconds.
     pub retry_delay_ms: u64,
-    /// Model string to pass to the bridge (e.g. "anthropic:claude-sonnet-4-20250514")
+    /// Model string to pass to the bridge (e.g. "anthropic:claude-sonnet-4-6")
     pub model: String,
     /// Working directory — used for path resolution in auto-batch rollback.
     pub cwd: std::path::PathBuf,
@@ -39,7 +39,7 @@ impl Default for LoopConfig {
             soft_limit_turns: 35,
             max_retries: 3,
             retry_delay_ms: 2000,
-            model: "anthropic:claude-sonnet-4-20250514".into(),
+            model: "anthropic:claude-sonnet-4-6".into(),
             cwd: std::env::current_dir().unwrap_or_default(),
         }
     }

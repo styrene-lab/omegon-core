@@ -392,9 +392,9 @@ fn read_yaml_as_json(path: &Path) -> Option<Value> {
 
 fn expand_anthropic_model(short: &str) -> String {
     match short {
-        "opus" | "opus4" => "anthropic:claude-opus-4-20250514",
-        "sonnet" | "sonnet4" => "anthropic:claude-sonnet-4-20250514",
-        "haiku" | "haiku3" => "anthropic:claude-haiku-3-20250307",
+        "opus" | "opus4" | "opus4.6" => "anthropic:claude-opus-4-6",
+        "sonnet" | "sonnet4" | "sonnet4.6" => "anthropic:claude-sonnet-4-6",
+        "haiku" | "haiku4.5" => "anthropic:claude-haiku-4-5-20251001",
         other => {
             if other.contains(':') { return other.to_string(); }
             if other.starts_with("claude") { return format!("anthropic:{other}"); }

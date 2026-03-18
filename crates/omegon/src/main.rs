@@ -53,7 +53,7 @@ struct Cli {
     node: String,
 
     /// Model identifier (provider:model format)
-    #[arg(short, long, default_value = "anthropic:claude-sonnet-4-20250514", global = true)]
+    #[arg(short, long, default_value = "anthropic:claude-sonnet-4-6", global = true)]
     model: String,
 
     // ── Agent mode args (used when no subcommand) ───────────────────────

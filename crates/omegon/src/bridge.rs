@@ -145,7 +145,7 @@ struct BridgeRequest {
 /// Options for an LLM stream request.
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
-    /// Model identifier (e.g. "anthropic:claude-sonnet-4-20250514")
+    /// Model identifier (e.g. "anthropic:claude-sonnet-4-6")
     pub model: Option<String>,
     /// Reasoning/thinking level
     pub reasoning: Option<String>,
@@ -318,7 +318,7 @@ impl LlmBridge for SubprocessBridge {
         let model = options
             .model
             .as_deref()
-            .unwrap_or("anthropic:claude-sonnet-4-20250514");
+            .unwrap_or("anthropic:claude-sonnet-4-6");
         let reasoning = options.reasoning.as_deref().unwrap_or("medium");
 
         let params = serde_json::json!({
