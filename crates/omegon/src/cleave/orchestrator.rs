@@ -389,12 +389,8 @@ async fn dispatch_child(
         child: label.to_string(),
         pid,
     });
-    progress::emit_progress(&ProgressEvent::ChildStatus {
-        child: label.to_string(),
-        status: ChildProgressStatus::Running,
-        duration_secs: None,
-        error: None,
-    });
+    // Note: child_spawned already signals "running" to the TS handler.
+    // No separate child_status(Running) needed.
 
     let stderr = child.stderr.take().unwrap();
     let mut reader = BufReader::new(stderr).lines();

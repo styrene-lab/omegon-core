@@ -319,13 +319,17 @@ impl ConversationState {
             "session loaded"
         );
 
-        // Reconstruct canonical from the saved LLM view
+        // Reconstruct canonical from the saved LLM view.
+        // Assign all messages to the last turn so they stay within the decay window
+        // on the next build_llm_view() call. (Original per-message turns are lost
+        // through the LLM view serialization, but that's acceptable — the saved
+        // view was already decay-processed at save time.)
+        let last_turn = snapshot.intent.stats.turns;
         let canonical: Vec<AgentMessage> = snapshot
             .messages
             .into_iter()
-            .enumerate()
-            .map(|(i, msg)| {
-                let turn = i as u32;
+            .map(|msg| {
+                let turn = last_turn;
                 match msg {
                     LlmMessage::User { content } => AgentMessage::User { text: content, turn },
                     LlmMessage::Assistant { text, thinking, tool_calls, raw } => {

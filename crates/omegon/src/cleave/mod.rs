@@ -13,4 +13,3 @@ pub mod orchestrator;
 
 pub use orchestrator::run_cleave;
 pub use plan::CleavePlan;
-pub use state::{CleaveState, ChildStatus};

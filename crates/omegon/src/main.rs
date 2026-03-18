@@ -357,10 +357,13 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     )
     .await;
 
-    // Save session for potential resume
-    let session_path = cwd.join(".cleave-session.json");
-    if let Err(e) = conversation.save_session(&session_path) {
-        tracing::debug!("Session save failed (non-fatal): {e}");
+    // Save session for potential resume — only if running inside a cleave worktree
+    // (detected by the presence of .cleave-prompt.md written by the orchestrator).
+    if cwd.join(".cleave-prompt.md").exists() {
+        let session_path = cwd.join(".cleave-session.json");
+        if let Err(e) = conversation.save_session(&session_path) {
+            tracing::debug!("Session save failed (non-fatal): {e}");
+        }
     }
 
     // Graceful bridge shutdown — send "shutdown" before kill_on_drop fires
