@@ -380,6 +380,7 @@ impl App {
         ("clear",    "clear conversation display",           &[]),
         ("sessions", "list saved sessions",                  &[]),
         ("memory",   "memory stats",                        &[]),
+        ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
 
@@ -473,6 +474,13 @@ impl App {
                     self.footer_data.total_facts, self.footer_data.injected_facts,
                     self.footer_data.working_memory, self.footer_data.memory_tokens_est,
                 ))
+            }
+
+            "migrate" => {
+                let source = if args.is_empty() { "auto" } else { args };
+                let cwd = std::path::Path::new(&self.footer_data.cwd);
+                let report = crate::migrate::run(source, cwd);
+                Some(report.summary())
             }
 
             "exit" | "quit" => None,

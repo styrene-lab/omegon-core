@@ -18,6 +18,7 @@ mod auth;
 mod bridge;
 mod cleave;
 mod context;
+mod migrate;
 
 mod conversation;
 mod lifecycle;
@@ -102,6 +103,14 @@ enum Commands {
         /// Provider to log in to (anthropic or openai). Default: anthropic.
         #[arg(default_value = "anthropic")]
         provider: String,
+    },
+
+    /// Migrate settings from another CLI agent tool.
+    /// Usage: omegon-agent migrate [auto|claude-code|pi|codex|cursor|aider|continue|copilot|windsurf]
+    Migrate {
+        /// Source to migrate from. "auto" detects all available tools.
+        #[arg(default_value = "auto")]
+        source: String,
     },
 
     /// Run a cleave orchestration — dispatch multiple agent children in parallel.
@@ -211,6 +220,12 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Interactive) => run_interactive_command(&cli).await,
+        Some(Commands::Migrate { ref source }) => {
+            let cwd = std::fs::canonicalize(&cli.cwd)?;
+            let report = migrate::run(source, &cwd);
+            println!("{}", report.summary());
+            Ok(())
+        }
         Some(Commands::Login { ref provider }) => {
             let result = match provider.as_str() {
                 "anthropic" | "claude" => auth::login_anthropic().await,
