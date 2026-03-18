@@ -81,11 +81,11 @@ struct Cli {
     no_session: bool,
 
     /// Log level: error, warn, info, debug, trace. Overrides RUST_LOG.
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", global = true)]
     log_level: String,
 
     /// Write logs to a file in addition to stderr.
-    #[arg(long)]
+    #[arg(long, global = true)]
     log_file: Option<PathBuf>,
 }
 
