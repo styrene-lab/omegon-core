@@ -290,9 +290,15 @@ async fn dispatch_child(
 
     tracing::info!(child = %label, cwd = %cwd.display(), "spawning omegon-agent");
 
+    // Write prompt to a temp file to avoid CLI arg parsing issues
+    // (task file content starting with --- breaks clap's arg parser)
+    let prompt_file = cwd.join(".cleave-prompt.md");
+    std::fs::write(&prompt_file, prompt)
+        .context(format!("Failed to write prompt file for child '{label}'"))?;
+
     let mut child = Command::new(agent_binary)
         .args([
-            "--prompt", prompt,
+            "--prompt-file", prompt_file.to_str().unwrap(),
             "--cwd", cwd.to_str().unwrap(),
             "--bridge", bridge_path.to_str().unwrap(),
             "--node", node,

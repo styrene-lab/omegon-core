@@ -55,6 +55,10 @@ struct Cli {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Read prompt from a file instead of CLI argument
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
+
     /// Maximum turns before forced stop (0 = no limit)
     #[arg(long, default_value = "50")]
     max_turns: u32,
@@ -225,12 +229,21 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::fs::canonicalize(&cli.cwd)?;
     tracing::info!(cwd = %cwd.display(), model = %cli.model, "omegon-agent starting");
 
-    let Some(prompt_text) = &cli.prompt else {
-        eprintln!("Usage: omegon-agent --prompt \"<task>\" [--cwd <path>]");
-        eprintln!("       omegon-agent cleave --plan <plan.json> --directive \"<task>\" --workspace <dir>");
-        eprintln!();
-        eprintln!("Headless coding agent — executes a task and exits.");
-        std::process::exit(1);
+    // Resolve prompt from --prompt or --prompt-file
+    let prompt_text = match (&cli.prompt, &cli.prompt_file) {
+        (Some(p), _) => p.clone(),
+        (None, Some(path)) => {
+            std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read prompt file {}: {}", path.display(), e))?
+        }
+        (None, None) => {
+            eprintln!("Usage: omegon-agent --prompt \"<task>\" [--cwd <path>]");
+            eprintln!("       omegon-agent --prompt-file <path> [--cwd <path>]");
+            eprintln!("       omegon-agent cleave --plan <plan.json> --directive \"<task>\" --workspace <dir>");
+            eprintln!();
+            eprintln!("Headless coding agent — executes a task and exits.");
+            std::process::exit(1);
+        }
     };
 
     // ─── Build loop config ──────────────────────────────────────────────
