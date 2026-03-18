@@ -114,6 +114,11 @@ fn view_image(path: &Path) -> ToolResult {
     }
 }
 
+/// Encode bytes as base64 (public for reuse by render tools).
+pub fn base64_encode_bytes(data: &[u8]) -> String {
+    base64_encode(data)
+}
+
 fn base64_encode(data: &[u8]) -> String {
     use std::io::Write;
     let mut buf = Vec::new();

@@ -304,6 +304,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
     tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
     tools.push(Box::new(tools::view::ViewProvider::new(cwd.clone())));
+    tools.push(Box::new(tools::render::RenderProvider::new()));
 
     // Memory
     let mind = "default".to_string();
@@ -468,6 +469,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
     tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
     tools.push(Box::new(tools::view::ViewProvider::new(cwd.clone())));
+    tools.push(Box::new(tools::render::RenderProvider::new()));
 
     // ─── Set up memory ──────────────────────────────────────────────────
     // Mind name — use "default" to match the TS factstore convention.

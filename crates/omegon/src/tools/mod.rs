@@ -8,6 +8,7 @@ pub mod bash;
 pub mod edit;
 pub mod local_inference;
 pub mod read;
+pub mod render;
 pub mod validate;
 pub mod view;
 pub mod web_search;
