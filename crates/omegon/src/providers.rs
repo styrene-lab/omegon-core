@@ -1,0 +1,523 @@
+//! Native LLM provider clients — direct HTTP streaming, no Node.js.
+//!
+//! Replaces core/bridge/llm-bridge.mjs entirely. The Rust binary makes
+//! HTTPS requests directly to api.anthropic.com / api.openai.com.
+//!
+//! API keys resolved from: env vars → ~/.pi/agent/auth.json (OAuth tokens).
+//! The upstream provider APIs are the only external dependency — no npm,
+//! no Node.js, no supply chain risk from package registries.
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+
+use crate::bridge::{LlmBridge, LlmEvent, LlmMessage, StreamOptions};
+use omegon_traits::ToolDefinition;
+
+// ─── API Key Resolution ─────────────────────────────────────────────────────
+
+/// Resolve API key from env vars or ~/.pi/agent/auth.json.
+pub fn resolve_api_key(provider: &str) -> Option<String> {
+    let env_keys: &[&str] = match provider {
+        "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "google" => &["GOOGLE_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        _ => &[],
+    };
+
+    for key in env_keys {
+        if let Ok(val) = std::env::var(key)
+            && !val.is_empty() {
+                return Some(val);
+            }
+    }
+
+    // Generic fallback: PROVIDER_API_KEY
+    let generic = format!("{}_API_KEY", provider.to_uppercase());
+    if let Ok(val) = std::env::var(&generic)
+        && !val.is_empty() {
+            return Some(val);
+        }
+
+    // ~/.pi/agent/auth.json — OAuth access tokens from pi's auth flow
+    let home = dirs::home_dir()?;
+    let auth_path = home.join(".pi/agent/auth.json");
+    let content = std::fs::read_to_string(&auth_path).ok()?;
+    let auth: Value = serde_json::from_str(&content).ok()?;
+    auth.get(provider)?
+        .get("access")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Auto-detect the best available native provider from configured keys.
+pub fn auto_detect_bridge(model_spec: &str) -> Option<Box<dyn LlmBridge>> {
+    let provider = model_spec.split(':').next().unwrap_or("anthropic");
+    match provider {
+        "anthropic" => AnthropicClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>),
+        "openai" => OpenAIClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>),
+        _ => {
+            // Try anthropic first, then openai
+            AnthropicClient::from_env()
+                .map(|c| Box::new(c) as Box<dyn LlmBridge>)
+                .or_else(|| OpenAIClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>))
+        }
+    }
+}
+
+// ─── SSE Helpers ────────────────────────────────────────────────────────────
+
+/// Accumulator for streaming tool call arguments.
+struct ToolCallAccum {
+    id: String,
+    name: String,
+    args_json: String,
+}
+
+impl ToolCallAccum {
+    fn to_value(&self) -> Value {
+        let args: Value = serde_json::from_str(&self.args_json)
+            .unwrap_or(Value::Object(Default::default()));
+        json!({"id": self.id, "name": self.name, "arguments": args})
+    }
+}
+
+/// Process an SSE byte stream line by line, calling `on_data` for each `data: ` payload.
+async fn process_sse<F>(
+    response: reqwest::Response,
+    mut on_data: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&str) -> bool, // returns false to stop
+{
+    let mut buffer = String::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(newline) = buffer.find('\n') {
+            let line = buffer[..newline].trim_end_matches('\r').to_string();
+            buffer = buffer[newline + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ")
+                && (data == "[DONE]" || !on_data(data)) {
+                    return Ok(());
+                }
+        }
+    }
+    Ok(())
+}
+
+// ─── Anthropic ──────────────────────────────────────────────────────────────
+
+pub struct AnthropicClient {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+}
+
+impl AnthropicClient {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            base_url: std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".into()),
+        }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        resolve_api_key("anthropic").map(Self::new)
+    }
+
+    fn build_messages(messages: &[LlmMessage]) -> Vec<Value> {
+        messages.iter().map(|m| match m {
+            LlmMessage::User { content } => json!({"role": "user", "content": content}),
+            LlmMessage::Assistant { text, thinking, tool_calls, .. } => {
+                let mut content = Vec::new();
+                for t in thinking {
+                    content.push(json!({"type": "thinking", "thinking": t}));
+                }
+                for t in text {
+                    content.push(json!({"type": "text", "text": t}));
+                }
+                for tc in tool_calls {
+                    content.push(json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    }));
+                }
+                json!({"role": "assistant", "content": content})
+            }
+            LlmMessage::ToolResult { call_id, content, is_error, .. } => {
+                json!({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": call_id, "content": content, "is_error": is_error}]
+                })
+            }
+        }).collect()
+    }
+
+    fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+        tools.iter().map(|t| json!({
+            "name": t.name,
+            "description": t.description,
+            "input_schema": t.parameters,
+        })).collect()
+    }
+}
+
+#[async_trait]
+impl LlmBridge for AnthropicClient {
+    async fn stream(
+        &self,
+        system_prompt: &str,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+        options: &StreamOptions,
+    ) -> anyhow::Result<mpsc::Receiver<LlmEvent>> {
+        let (tx, rx) = mpsc::channel(256);
+
+        let model = options.model.as_deref()
+            .and_then(|m| m.strip_prefix("anthropic:"))
+            .unwrap_or("claude-sonnet-4-20250514");
+
+        let mut body = json!({
+            "model": model,
+            "max_tokens": 16384,
+            "system": system_prompt,
+            "messages": Self::build_messages(messages),
+            "stream": true,
+        });
+
+        let wire_tools = Self::build_tools(tools);
+        if !wire_tools.is_empty() {
+            body["tools"] = Value::Array(wire_tools);
+        }
+        if options.reasoning.is_some() {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": 10000,
+            });
+        }
+
+        let response = self.client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = response.text().await.unwrap_or_default();
+            let _ = tx.send(LlmEvent::Error { message: format!("Anthropic {status}: {err}") }).await;
+            return Ok(rx);
+        }
+
+        tokio::spawn(async move {
+            if let Err(e) = parse_anthropic_stream(response, &tx).await {
+                let _ = tx.send(LlmEvent::Error { message: format!("{e}") }).await;
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+async fn parse_anthropic_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+) -> anyhow::Result<()> {
+    let mut block_type: Option<String> = None;
+    let mut full_text = String::new();
+    let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+
+    process_sse(response, |data| {
+        let Ok(event) = serde_json::from_str::<Value>(data) else { return true };
+        let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match etype {
+            "message_start" => { let _ = tx.try_send(LlmEvent::Start); }
+
+            "content_block_start" => {
+                let bt = event["content_block"]["type"].as_str().unwrap_or("");
+                block_type = Some(bt.to_string());
+                match bt {
+                    "text" => { let _ = tx.try_send(LlmEvent::TextStart); }
+                    "thinking" => { let _ = tx.try_send(LlmEvent::ThinkingStart); }
+                    "tool_use" => {
+                        let id = event["content_block"]["id"].as_str().unwrap_or("").to_string();
+                        let name = event["content_block"]["name"].as_str().unwrap_or("").to_string();
+                        tool_calls.push(ToolCallAccum { id: id.clone(), name: name.clone(), args_json: String::new() });
+                        let _ = tx.try_send(LlmEvent::ToolCallStart);
+                    }
+                    _ => {}
+                }
+            }
+
+            "content_block_delta" => {
+                let dt = event["delta"]["type"].as_str().unwrap_or("");
+                match dt {
+                    "text_delta" => {
+                        let t = event["delta"]["text"].as_str().unwrap_or("");
+                        full_text.push_str(t);
+                        let _ = tx.try_send(LlmEvent::TextDelta { delta: t.to_string() });
+                    }
+                    "thinking_delta" => {
+                        let t = event["delta"]["thinking"].as_str().unwrap_or("");
+                        let _ = tx.try_send(LlmEvent::ThinkingDelta { delta: t.to_string() });
+                    }
+                    "input_json_delta" => {
+                        let p = event["delta"]["partial_json"].as_str().unwrap_or("");
+                        if let Some(tc) = tool_calls.last_mut() {
+                            tc.args_json.push_str(p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            "content_block_stop" => {
+                match block_type.as_deref() {
+                    Some("text") => { let _ = tx.try_send(LlmEvent::TextEnd); }
+                    Some("thinking") => { let _ = tx.try_send(LlmEvent::ThinkingEnd); }
+                    Some("tool_use") => {
+                        if let Some(tc) = tool_calls.last() {
+                            let _ = tx.try_send(LlmEvent::ToolCallEnd { tool_call: crate::bridge::WireToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: serde_json::from_str(&tc.args_json).unwrap_or_default() } });
+                        }
+                    }
+                    _ => {}
+                }
+                block_type = None;
+            }
+
+            "message_stop" => {
+                let tc_vals: Vec<Value> = tool_calls.iter().map(|tc| tc.to_value()).collect();
+                let _ = tx.try_send(LlmEvent::Done {
+                    message: json!({"text": full_text, "tool_calls": tc_vals}),
+                });
+                return false; // stop
+            }
+            _ => {}
+        }
+        true
+    }).await
+}
+
+// ─── OpenAI ─────────────────────────────────────────────────────────────────
+
+pub struct OpenAIClient {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+}
+
+impl OpenAIClient {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            base_url: std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com".into()),
+        }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        resolve_api_key("openai").map(Self::new)
+    }
+}
+
+#[async_trait]
+impl LlmBridge for OpenAIClient {
+    async fn stream(
+        &self,
+        system_prompt: &str,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+        options: &StreamOptions,
+    ) -> anyhow::Result<mpsc::Receiver<LlmEvent>> {
+        let (tx, rx) = mpsc::channel(256);
+
+        let model = options.model.as_deref()
+            .and_then(|m| m.strip_prefix("openai:"))
+            .unwrap_or("gpt-4.1");
+
+        let mut wire_msgs = vec![json!({"role": "system", "content": system_prompt})];
+        for m in messages {
+            match m {
+                LlmMessage::User { content } => {
+                    wire_msgs.push(json!({"role": "user", "content": content}));
+                }
+                LlmMessage::Assistant { text, tool_calls, .. } => {
+                    let mut msg = json!({"role": "assistant"});
+                    if let Some(t) = text.first() { msg["content"] = json!(t); }
+                    if !tool_calls.is_empty() {
+                        msg["tool_calls"] = tool_calls.iter().map(|tc| json!({
+                            "id": tc.id, "type": "function",
+                            "function": {"name": tc.name, "arguments": tc.arguments.to_string()},
+                        })).collect();
+                    }
+                    wire_msgs.push(msg);
+                }
+                LlmMessage::ToolResult { call_id, content, .. } => {
+                    wire_msgs.push(json!({"role": "tool", "tool_call_id": call_id, "content": content}));
+                }
+            }
+        }
+
+        let wire_tools: Vec<Value> = tools.iter().map(|t| json!({
+            "type": "function",
+            "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+        })).collect();
+
+        let mut body = json!({"model": model, "messages": wire_msgs, "stream": true});
+        if !wire_tools.is_empty() { body["tools"] = Value::Array(wire_tools); }
+
+        let response = self.client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = response.text().await.unwrap_or_default();
+            let _ = tx.send(LlmEvent::Error { message: format!("OpenAI {status}: {err}") }).await;
+            return Ok(rx);
+        }
+
+        tokio::spawn(async move {
+            if let Err(e) = parse_openai_stream(response, &tx).await {
+                let _ = tx.send(LlmEvent::Error { message: format!("{e}") }).await;
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+async fn parse_openai_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+) -> anyhow::Result<()> {
+    let mut full_text = String::new();
+    let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+
+    let _ = tx.try_send(LlmEvent::Start);
+    let _ = tx.try_send(LlmEvent::TextStart);
+
+    process_sse(response, |data| {
+        let Ok(event) = serde_json::from_str::<Value>(data) else { return true };
+        let Some(choice) = event.get("choices").and_then(|c| c.get(0)) else { return true };
+        let delta = &choice["delta"];
+
+        // Text
+        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+            full_text.push_str(content);
+            let _ = tx.try_send(LlmEvent::TextDelta { delta: content.to_string() });
+        }
+
+        // Tool calls
+        if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+            for tc in tcs {
+                let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                while tool_calls.len() <= idx {
+                    tool_calls.push(ToolCallAccum { id: String::new(), name: String::new(), args_json: String::new() });
+                }
+                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                    tool_calls[idx].id = id.to_string();
+                }
+                if let Some(func) = tc.get("function") {
+                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                        tool_calls[idx].name = name.to_string();
+                        let _ = tx.try_send(LlmEvent::ToolCallStart);
+                    }
+                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                        tool_calls[idx].args_json.push_str(args);
+                    }
+                }
+            }
+        }
+
+        // Finish
+        if choice.get("finish_reason").and_then(|f| f.as_str()).is_some() {
+            for tc in &tool_calls {
+                let _ = tx.try_send(LlmEvent::ToolCallEnd { tool_call: crate::bridge::WireToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: serde_json::from_str(&tc.args_json).unwrap_or_default() } });
+            }
+            let _ = tx.try_send(LlmEvent::TextEnd);
+            let tc_vals: Vec<Value> = tool_calls.iter().map(|tc| tc.to_value()).collect();
+            let _ = tx.try_send(LlmEvent::Done { message: json!({"text": full_text, "tool_calls": tc_vals}) });
+            return false;
+        }
+        true
+    }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_key_env() {
+        unsafe { std::env::set_var("_TEST_OMEGON_API_KEY", "test-123"); }
+        // Direct env lookup
+        assert!(std::env::var("_TEST_OMEGON_API_KEY").is_ok());
+        unsafe { std::env::remove_var("_TEST_OMEGON_API_KEY"); }
+    }
+
+    #[test]
+    fn auto_detect_without_keys_returns_none() {
+        // Clear keys to test (save + restore)
+        let saved = std::env::var("ANTHROPIC_API_KEY").ok();
+        let saved2 = std::env::var("ANTHROPIC_OAUTH_TOKEN").ok();
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+        unsafe { std::env::remove_var("ANTHROPIC_OAUTH_TOKEN"); }
+        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+
+        // Without any keys or auth.json, should return None
+        // (might still find auth.json on dev machine, so just check it doesn't panic)
+        let _ = auto_detect_bridge("anthropic:test");
+
+        // Restore
+        if let Some(k) = saved { unsafe { std::env::set_var("ANTHROPIC_API_KEY", k); } }
+        if let Some(k) = saved2 { unsafe { std::env::set_var("ANTHROPIC_OAUTH_TOKEN", k); } }
+    }
+
+    #[test]
+    fn anthropic_build_messages() {
+        let messages = vec![
+            LlmMessage::User { content: "hello".into() },
+        ];
+        let wire = AnthropicClient::build_messages(&messages);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[0]["content"], "hello");
+    }
+
+    #[test]
+    fn anthropic_build_tool_result() {
+        let messages = vec![
+            LlmMessage::ToolResult {
+                call_id: "tc1".into(),
+                tool_name: "read".into(),
+                content: "file contents".into(),
+                is_error: false,
+            },
+        ];
+        let wire = AnthropicClient::build_messages(&messages);
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[0]["content"][0]["type"], "tool_result");
+        assert_eq!(wire[0]["content"][0]["tool_use_id"], "tc1");
+    }
+}

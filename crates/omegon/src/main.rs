@@ -19,12 +19,13 @@ mod conversation;
 mod lifecycle;
 mod r#loop;
 mod prompt;
+mod providers;
 mod session;
 mod setup;
 mod tools;
 mod tui;
 
-use bridge::SubprocessBridge;
+use bridge::{LlmBridge, SubprocessBridge};
 use omegon_traits::AgentEvent;
 
 #[derive(Parser)]
@@ -257,12 +258,25 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     let resume = cli.resume.as_ref().map(|r| r.as_deref());
     let mut agent = setup::AgentSetup::new(&cli.cwd, resume).await?;
 
-    // ─── Spawn LLM bridge ───────────────────────────────────────────────
-    let bridge_path = cli
-        .bridge
-        .clone()
-        .unwrap_or_else(SubprocessBridge::default_bridge_path);
-    let bridge = SubprocessBridge::spawn(&bridge_path, &cli.node).await?;
+    // ─── LLM provider ──────────────────────────────────────────────────
+    // Native Rust clients by default. --bridge flag forces the Node.js subprocess.
+    let bridge: Box<dyn LlmBridge> = if let Some(ref bridge_path) = cli.bridge {
+        tracing::info!(bridge = %bridge_path.display(), "using Node.js LLM bridge");
+        Box::new(SubprocessBridge::spawn(bridge_path, &cli.node).await?)
+    } else {
+        match providers::auto_detect_bridge(&cli.model) {
+            Some(native) => {
+                tracing::info!("using native LLM provider (no Node.js)");
+                native
+            }
+            None => {
+                // Fall back to subprocess bridge
+                let bridge_path = SubprocessBridge::default_bridge_path();
+                tracing::info!(bridge = %bridge_path.display(), "no native provider — falling back to Node.js bridge");
+                Box::new(SubprocessBridge::spawn(&bridge_path, &cli.node).await?)
+            }
+        }
+    };
 
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
@@ -309,7 +323,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 let cancel = CancellationToken::new();
                 active_cancel = Some(cancel.clone());
                 if let Err(e) = r#loop::run(
-                    &bridge,
+                    bridge.as_ref(),
                     &agent.tools,
                     &mut agent.context_manager,
                     &mut agent.conversation,
@@ -374,15 +388,23 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         model: cli.model.clone(),
     };
 
-    // ─── Spawn LLM bridge ───────────────────────────────────────────────
-    let bridge_path = cli
-        .bridge
-        .clone()
-        .unwrap_or_else(SubprocessBridge::default_bridge_path);
-
-    tracing::info!(bridge = %bridge_path.display(), "spawning LLM bridge");
-    let bridge = SubprocessBridge::spawn(&bridge_path, &cli.node).await?;
-    tracing::info!("LLM bridge ready");
+    // ─── LLM provider ──────────────────────────────────────────────────
+    let bridge: Box<dyn LlmBridge> = if let Some(ref bridge_path) = cli.bridge {
+        tracing::info!(bridge = %bridge_path.display(), "using Node.js LLM bridge");
+        Box::new(SubprocessBridge::spawn(bridge_path, &cli.node).await?)
+    } else {
+        match providers::auto_detect_bridge(&cli.model) {
+            Some(native) => {
+                tracing::info!("using native LLM provider (no Node.js)");
+                native
+            }
+            None => {
+                let path = SubprocessBridge::default_bridge_path();
+                tracing::info!(bridge = %path.display(), "falling back to Node.js bridge");
+                Box::new(SubprocessBridge::spawn(&path, &cli.node).await?)
+            }
+        }
+    };
 
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(256);
@@ -447,7 +469,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     });
 
     let result = r#loop::run(
-        &bridge,
+        bridge.as_ref(),
         &agent.tools,
         &mut agent.context_manager,
         &mut agent.conversation,

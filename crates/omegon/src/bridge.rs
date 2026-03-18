@@ -160,6 +160,9 @@ pub trait LlmBridge: Send + Sync {
         tools: &[ToolDefinition],
         options: &StreamOptions,
     ) -> anyhow::Result<mpsc::Receiver<LlmEvent>>;
+
+    /// Graceful shutdown. Default no-op for native clients.
+    async fn shutdown(&self) {}
 }
 
 // ─── Subprocess bridge ─────────────────────────────────────────────────────
