@@ -218,6 +218,11 @@ async fn run_cleave_command(
         }
     }
 
+    // Post-merge guardrails
+    if let Some(ref report) = result.guardrail_report {
+        println!("\n### Post-Merge Guardrails\n{report}");
+    }
+
     // Exit with error if any children failed
     if failed > 0 {
         std::process::exit(1);

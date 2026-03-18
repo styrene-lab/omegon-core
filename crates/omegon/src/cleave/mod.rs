@@ -4,6 +4,7 @@
 //! Spawns omegon-agent children in git worktrees, manages dependency waves,
 //! tracks state, and merges results.
 
+pub mod guardrails;
 mod plan;
 pub mod progress;
 pub mod state;

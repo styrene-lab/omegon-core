@@ -3,6 +3,7 @@
 //! Spawns omegon-agent children in git worktrees, manages dependency waves,
 //! tracks state, and merges results.
 
+use super::guardrails;
 use super::plan::CleavePlan;
 use super::progress::{self, ProgressEvent, ChildProgressStatus};
 use super::state::{ChildStatus, CleaveState};
@@ -35,6 +36,8 @@ pub struct CleaveResult {
     pub state: CleaveState,
     pub merge_results: Vec<(String, MergeOutcome)>,
     pub duration_secs: f64,
+    /// Post-merge guardrail report (if guardrails were discovered and all merges succeeded).
+    pub guardrail_report: Option<String>,
 }
 
 pub enum MergeOutcome {
@@ -84,6 +87,10 @@ pub async fn run_cleave(
 
     let semaphore = Arc::new(Semaphore::new(config.max_parallel));
 
+    // Discover project guardrails once for all children
+    let guardrail_checks = guardrails::discover_guardrails(repo_path);
+    let guardrail_section = guardrails::format_guardrail_section(&guardrail_checks);
+
     for (wave_idx, wave) in waves.iter().enumerate() {
         if cancel.is_cancelled() {
             tracing::warn!("cleave cancelled");
@@ -131,7 +138,10 @@ pub async fn run_cleave(
                     } else {
                         let description = &state.children[child_idx].description;
                         let scope = &state.children[child_idx].scope;
-                        let content = build_task_file(&label, description, scope, directive);
+                        let content = build_task_file(
+                            child_idx, &label, description, scope, directive,
+                            &state.children, &guardrail_section,
+                        );
                         std::fs::write(&task_path, &content)?;
                         content
                     };
@@ -315,6 +325,16 @@ pub async fn run_cleave(
 
     let completed = state.children.iter().filter(|c| c.status == ChildStatus::Completed).count();
     let failed = state.children.iter().filter(|c| c.status == ChildStatus::Failed).count();
+
+    // Run post-merge guardrails if all merges succeeded
+    let all_merged = merge_results.iter().all(|(_, o)| matches!(o, MergeOutcome::Success));
+    let guardrail_report = if all_merged && !guardrail_checks.is_empty() {
+        tracing::info!("running post-merge guardrails");
+        Some(guardrails::run_guardrails(repo_path, &guardrail_checks))
+    } else {
+        None
+    };
+
     progress::emit_progress(&ProgressEvent::Done {
         completed,
         failed,
@@ -325,6 +345,7 @@ pub async fn run_cleave(
         state,
         merge_results,
         duration_secs,
+        guardrail_report,
     })
 }
 
@@ -581,35 +602,87 @@ fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) -> usize 
     }
 }
 
-fn build_task_file(label: &str, description: &str, scope: &[String], directive: &str) -> String {
+fn build_task_file(
+    child_idx: usize,
+    label: &str,
+    description: &str,
+    scope: &[String],
+    directive: &str,
+    siblings: &[super::state::ChildState],
+    guardrail_section: &str,
+) -> String {
     let scope_list = scope
         .iter()
         .map(|s| format!("- `{s}`"))
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Sibling info
+    let _sibling_list: String = siblings.iter()
+        .filter(|s| s.label != label)
+        .map(|s| format!("- **{}**: {}", s.label, s.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let depends_on = &siblings.iter()
+        .find(|s| s.label == label)
+        .map(|s| &s.depends_on)
+        .cloned()
+        .unwrap_or_default();
+    let dep_note = if depends_on.is_empty() {
+        "**Depends on:** none (independent)".to_string()
+    } else {
+        format!("**Depends on:** {}", depends_on.join(", "))
+    };
+
     format!(
-        r#"# Task: {label}
+        r#"---
+task_id: {child_idx}
+label: {label}
+siblings: [{sibling_refs}]
+---
 
-## Directive
+# Task {child_idx}: {label}
 
-{directive}
+## Root Directive
 
-## Your Assignment
+> {directive}
+
+## Mission
 
 {description}
 
-## File Scope
+## Scope
 
 {scope_list}
 
+{dep_note}
+{guardrail_section}
 ## Contract
 
-- Work ONLY within the files listed in File Scope
-- Commit your changes with a descriptive message
-- If the task is already done or not applicable, commit a no-op and report completion
-- Do NOT modify files outside your scope
-"#
+1. Only work on files within your scope
+2. Write tests for new functions and changed behavior — co-locate as *.test.ts
+3. Update the Result section below when done
+4. Commit your work with clear messages — do not push
+5. If the task is too complex, set status to NEEDS_DECOMPOSITION
+
+## Result
+
+**Status:** PENDING
+
+**Summary:**
+
+**Artifacts:**
+
+**Decisions Made:**
+
+**Assumptions:**
+"#,
+        sibling_refs = siblings.iter()
+            .filter(|s| s.label != label)
+            .map(|s| format!("{}:{}", s.child_id, s.label))
+            .collect::<Vec<_>>()
+            .join(", "),
     )
 }
 
