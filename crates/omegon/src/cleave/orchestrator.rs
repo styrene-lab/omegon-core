@@ -199,7 +199,11 @@ pub async fn run_cleave(
                     // Auto-commit any uncommitted changes in the worktree.
                     // Children may create files but forget to git commit.
                     if let Some(wt) = &state.children[child_idx].worktree_path {
-                        auto_commit_worktree(Path::new(wt), &state.children[child_idx].label);
+                        auto_commit_worktree(
+                            Path::new(wt),
+                            &state.children[child_idx].label,
+                            &state.children[child_idx].scope,
+                        );
                     }
                 }
                 Err(e) => {
@@ -418,7 +422,9 @@ async fn dispatch_child(
 
 /// Auto-commit any uncommitted changes in a child's worktree.
 /// This catches the case where the child agent creates files but doesn't run `git commit`.
-fn auto_commit_worktree(wt_path: &Path, label: &str) {
+/// Only stages files matching the child's declared `scope` prefixes (plus the task file).
+/// Files outside scope are left unstaged to avoid polluting the merge.
+fn auto_commit_worktree(wt_path: &Path, label: &str, scope: &[String]) {
     if !wt_path.exists() {
         return;
     }
@@ -429,27 +435,60 @@ fn auto_commit_worktree(wt_path: &Path, label: &str) {
         .current_dir(wt_path)
         .output();
 
-    let has_real_changes = match &status {
+    let changed_files: Vec<String> = match &status {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout.lines().any(|line| {
-                let file = line.get(3..).unwrap_or("");
-                !file.starts_with(".cleave-prompt")
-            })
+            stdout.lines()
+                .filter_map(|line| {
+                    let file = line.get(3..)?.trim();
+                    if file.is_empty() || file.starts_with(".cleave-prompt") {
+                        None
+                    } else {
+                        Some(file.to_string())
+                    }
+                })
+                .collect()
         }
-        Err(_) => false,
+        Err(_) => return,
     };
 
-    if !has_real_changes {
+    if changed_files.is_empty() {
         tracing::info!(child = %label, "no real changes to auto-commit (only .cleave-prompt.md)");
         return;
     }
 
-    tracing::info!(child = %label, "auto-committing uncommitted changes in worktree");
+    // Filter to files matching the child's scope (if scope is non-empty).
+    // An empty scope means "any file is fine" (trust the child).
+    let in_scope: Vec<&String> = if scope.is_empty() {
+        changed_files.iter().collect()
+    } else {
+        changed_files.iter().filter(|f| {
+            scope.iter().any(|s| f.starts_with(s.trim_end_matches('/')))
+        }).collect()
+    };
 
-    // Stage all changes except .cleave-prompt.md
+    let out_of_scope = changed_files.len() - in_scope.len();
+    if out_of_scope > 0 {
+        tracing::warn!(
+            child = %label,
+            out_of_scope,
+            "skipping {out_of_scope} file(s) outside declared scope"
+        );
+    }
+
+    if in_scope.is_empty() {
+        tracing::info!(child = %label, "no in-scope changes to auto-commit");
+        return;
+    }
+
+    tracing::info!(child = %label, files = in_scope.len(), "auto-committing uncommitted changes in worktree");
+
+    // Stage only in-scope files
+    let mut add_args = vec!["add", "--"];
+    let in_scope_strs: Vec<&str> = in_scope.iter().map(|s| s.as_str()).collect();
+    add_args.extend(in_scope_strs);
     let _ = std::process::Command::new("git")
-        .args(["add", "-A", "--", ".", ":!.cleave-prompt.md"])
+        .args(&add_args)
         .current_dir(wt_path)
         .output();
 

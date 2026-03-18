@@ -95,7 +95,12 @@ pub fn merge_branch(repo_path: &Path, branch: &str) -> Result<MergeResult> {
                 .args(["merge", "--abort"])
                 .current_dir(repo_path)
                 .output();
-            Ok(MergeResult::Failed(stderr.to_string()))
+            let detail = stderr.trim().to_string();
+            Ok(MergeResult::Failed(if detail.is_empty() {
+                format!("git merge failed with exit code {}", output.status.code().unwrap_or(-1))
+            } else {
+                detail
+            }))
         }
     }
 }
