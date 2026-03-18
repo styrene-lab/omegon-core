@@ -17,8 +17,44 @@ use omegon_traits::ToolDefinition;
 
 // ─── API Key Resolution ─────────────────────────────────────────────────────
 
-/// Resolve API key from env vars or ~/.pi/agent/auth.json.
-pub fn resolve_api_key(provider: &str) -> Option<String> {
+/// Resolve API key synchronously — env vars and unexpired auth.json tokens.
+/// Returns (key, is_oauth).
+pub fn resolve_api_key_sync(provider: &str) -> Option<(String, bool)> {
+    // Env vars (not OAuth)
+    let env_keys: &[&str] = match provider {
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        _ => &[],
+    };
+    for key in env_keys {
+        if let Ok(val) = std::env::var(key)
+            && !val.is_empty() {
+                return Some((val, false));
+            }
+    }
+
+    // OAuth token from env
+    if provider == "anthropic"
+        && let Ok(val) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
+            && !val.is_empty() {
+                return Some((val, true));
+            }
+
+    // auth.json — only if not expired
+    let creds = crate::auth::read_credentials(provider)?;
+    if creds.cred_type == "oauth" && !creds.is_expired() {
+        return Some((creds.access, true));
+    }
+    if creds.cred_type != "oauth" {
+        return Some((creds.access, false));
+    }
+
+    // Expired OAuth — caller should use resolve_with_refresh
+    None
+}
+
+/// Resolve API key from env vars or ~/.pi/agent/auth.json (legacy, no refresh).
+fn resolve_api_key(provider: &str) -> Option<String> {
     let env_keys: &[&str] = match provider {
         "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
@@ -53,16 +89,27 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
 }
 
 /// Auto-detect the best available native provider from configured keys.
-pub fn auto_detect_bridge(model_spec: &str) -> Option<Box<dyn LlmBridge>> {
+/// Tries sync resolution first, then async (with token refresh) if needed.
+pub async fn auto_detect_bridge(model_spec: &str) -> Option<Box<dyn LlmBridge>> {
     let provider = model_spec.split(':').next().unwrap_or("anthropic");
     match provider {
-        "anthropic" => AnthropicClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>),
+        "anthropic" => {
+            // Try sync first (fast path — env var or unexpired token)
+            if let Some(client) = AnthropicClient::from_env() {
+                return Some(Box::new(client));
+            }
+            // Try async (token refresh)
+            AnthropicClient::from_env_async().await.map(|c| Box::new(c) as Box<dyn LlmBridge>)
+        }
         "openai" => OpenAIClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>),
         _ => {
-            // Try anthropic first, then openai
-            AnthropicClient::from_env()
-                .map(|c| Box::new(c) as Box<dyn LlmBridge>)
-                .or_else(|| OpenAIClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>))
+            if let Some(client) = AnthropicClient::from_env() {
+                return Some(Box::new(client));
+            }
+            if let Some(client) = AnthropicClient::from_env_async().await {
+                return Some(Box::new(client));
+            }
+            OpenAIClient::from_env().map(|c| Box::new(c) as Box<dyn LlmBridge>)
         }
     }
 }
@@ -117,21 +164,31 @@ where
 pub struct AnthropicClient {
     client: reqwest::Client,
     api_key: String,
+    is_oauth: bool,
     base_url: String,
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, is_oauth: bool) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key,
+            is_oauth,
             base_url: std::env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".into()),
         }
     }
 
     pub fn from_env() -> Option<Self> {
-        resolve_api_key("anthropic").map(Self::new)
+        // Try sync resolution first (env vars, unexpired tokens)
+        let (key, is_oauth) = resolve_api_key_sync("anthropic")?;
+        Some(Self::new(key, is_oauth))
+    }
+
+    /// Create from async resolution (with token refresh).
+    pub async fn from_env_async() -> Option<Self> {
+        let (key, is_oauth) = crate::auth::resolve_with_refresh("anthropic").await?;
+        Some(Self::new(key, is_oauth))
     }
 
     fn build_messages(messages: &[LlmMessage]) -> Vec<Value> {
@@ -209,8 +266,19 @@ impl LlmBridge for AnthropicClient {
 
         let response = self.client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
+            .header(
+                if self.is_oauth { "Authorization" } else { "x-api-key" },
+                if self.is_oauth { format!("Bearer {}", self.api_key) } else { self.api_key.clone() },
+            )
             .header("anthropic-version", "2023-06-01")
+            .header(
+                "anthropic-beta",
+                if self.is_oauth {
+                    "claude-code-20250219,oauth-2025-04-20"
+                } else {
+                    "claude-code-20250219"
+                },
+            )
             .header("content-type", "application/json")
             .json(&body)
             .send()

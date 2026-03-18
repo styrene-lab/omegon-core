@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+mod auth;
 mod bridge;
 mod cleave;
 mod context;
@@ -83,6 +84,9 @@ enum Commands {
     /// Run interactive TUI session — ratatui-based terminal interface.
     Interactive,
 
+    /// Log in to Anthropic (Claude Pro/Max subscription) via OAuth.
+    Login,
+
     /// Run a cleave orchestration — dispatch multiple agent children in parallel.
     Cleave {
         /// Path to the plan JSON file
@@ -131,6 +135,15 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Interactive) => run_interactive_command(&cli).await,
+        Some(Commands::Login) => {
+            match auth::login_anthropic().await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    eprintln!("Login failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Commands::Cleave {
             ref plan,
             ref directive,
@@ -264,7 +277,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         tracing::info!(bridge = %bridge_path.display(), "using Node.js LLM bridge");
         Box::new(SubprocessBridge::spawn(bridge_path, &cli.node).await?)
     } else {
-        match providers::auto_detect_bridge(&cli.model) {
+        match providers::auto_detect_bridge(&cli.model).await {
             Some(native) => {
                 tracing::info!("using native LLM provider (no Node.js)");
                 native
@@ -393,7 +406,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         tracing::info!(bridge = %bridge_path.display(), "using Node.js LLM bridge");
         Box::new(SubprocessBridge::spawn(bridge_path, &cli.node).await?)
     } else {
-        match providers::auto_detect_bridge(&cli.model) {
+        match providers::auto_detect_bridge(&cli.model).await {
             Some(native) => {
                 tracing::info!("using native LLM provider (no Node.js)");
                 native
