@@ -14,6 +14,7 @@ pub mod conversation;
 pub mod dashboard;
 pub mod editor;
 pub mod footer;
+pub mod selector;
 pub mod theme;
 
 use std::io;
@@ -76,6 +77,16 @@ pub struct App {
     last_ctrl_c: Option<std::time::Instant>,
     /// Session start time for /stats.
     session_start: std::time::Instant,
+    /// Active selector popup (model picker, think level, etc.)
+    selector: Option<selector::Selector>,
+    /// What the selector is for — determines what happens on confirm.
+    selector_kind: Option<SelectorKind>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectorKind {
+    Model,
+    ThinkingLevel,
 }
 
 impl App {
@@ -104,6 +115,65 @@ impl App {
             cancel: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_ctrl_c: None,
             session_start: std::time::Instant::now(),
+            selector: None,
+            selector_kind: None,
+        }
+    }
+
+    fn open_model_selector(&mut self) {
+        let current = self.settings().model.clone();
+        let options = vec![
+            sel_opt("anthropic:claude-sonnet-4-20250514", "Sonnet 4", "fast, 200k context", &current),
+            sel_opt("anthropic:claude-opus-4-20250514", "Opus 4", "strongest reasoning, 200k", &current),
+            sel_opt("anthropic:claude-haiku-3-20250307", "Haiku 3", "fastest, cheapest", &current),
+            sel_opt("openai:gpt-4.1", "GPT-4.1", "OpenAI flagship", &current),
+            sel_opt("openai:o3", "o3", "OpenAI reasoning", &current),
+        ];
+        self.selector = Some(selector::Selector::new("Select Model", options));
+        self.selector_kind = Some(SelectorKind::Model);
+    }
+
+    fn open_thinking_selector(&mut self) {
+        let current = self.settings().thinking;
+        let options = crate::settings::ThinkingLevel::all().iter().map(|level| {
+            selector::SelectOption {
+                value: level.as_str().to_string(),
+                label: format!("{} {}", level.icon(), level.as_str()),
+                description: match level {
+                    crate::settings::ThinkingLevel::Off => "no extended thinking".into(),
+                    crate::settings::ThinkingLevel::Low => "~5k token budget".into(),
+                    crate::settings::ThinkingLevel::Medium => "~10k token budget".into(),
+                    crate::settings::ThinkingLevel::High => "~50k token budget".into(),
+                },
+                active: *level == current,
+            }
+        }).collect();
+        self.selector = Some(selector::Selector::new("Thinking Level", options));
+        self.selector_kind = Some(SelectorKind::ThinkingLevel);
+    }
+
+    fn confirm_selector(&mut self, tx: &mpsc::Sender<TuiCommand>) -> Option<String> {
+        let sel = self.selector.take()?;
+        let kind = self.selector_kind.take()?;
+        let value = sel.selected_value().to_string();
+
+        match kind {
+            SelectorKind::Model => {
+                self.update_settings(|s| {
+                    s.model = value.clone();
+                    s.context_window = crate::settings::Settings::new(&value).context_window;
+                });
+                let _ = tx.try_send(TuiCommand::SetModel(value.clone()));
+                Some(format!("Model → {value}"))
+            }
+            SelectorKind::ThinkingLevel => {
+                if let Some(level) = crate::settings::ThinkingLevel::parse(&value) {
+                    self.update_settings(|s| s.thinking = level);
+                    Some(format!("Thinking → {} {}", level.icon(), level.as_str()))
+                } else {
+                    Some(format!("Unknown level: {value}"))
+                }
+            }
         }
     }
 
@@ -271,6 +341,11 @@ impl App {
                 cursor_y,
             ));
         }
+
+        // Selector popup (overlays everything when active)
+        if let Some(ref sel) = self.selector {
+            sel.render(area, frame, t.as_ref());
+        }
     }
 
     /// Command registry: (name, description, subcommands).
@@ -308,44 +383,29 @@ impl App {
             }
 
             "model" => {
-                let s = self.settings();
                 if args.is_empty() {
-                    Some(format!(
-                        "Model:    {}\nProvider: {}\nAuth:     {}\nContext:  {} tokens\n\n/model <provider:id> to switch\n/model list for options",
-                        s.model_short(), s.provider(),
-                        if self.footer_data.is_oauth { "subscription" } else { "api-key" },
-                        s.context_window,
-                    ))
-                } else if args == "list" {
-                    Some("Native providers:\n\n\
-                          Anthropic:\n\
-                          \x20 anthropic:claude-sonnet-4-20250514\n\
-                          \x20 anthropic:claude-opus-4-20250514\n\
-                          \x20 anthropic:claude-haiku-3-20250307\n\n\
-                          OpenAI:\n\
-                          \x20 openai:gpt-4.1\n\
-                          \x20 openai:o3\n\n\
-                          /model <id> to switch".into())
+                    // No args → open interactive selector
+                    self.open_model_selector();
+                    None // selector handles the rest
                 } else {
+                    // Direct switch: /model anthropic:claude-opus-4-20250514
                     self.update_settings(|s| {
                         s.model = args.to_string();
                         s.context_window = crate::settings::Settings::new(args).context_window;
                     });
                     let _ = tx.try_send(TuiCommand::SetModel(args.to_string()));
-                    Some(format!("Switched to: {args}"))
+                    Some(format!("Model → {args}"))
                 }
             }
 
             "think" => {
-                let s = self.settings();
                 if args.is_empty() {
-                    Some(format!(
-                        "Thinking: {} {}\n\n/think off|low|medium|high",
-                        s.thinking.icon(), s.thinking.as_str(),
-                    ))
+                    // No args → open interactive selector
+                    self.open_thinking_selector();
+                    None
                 } else if let Some(level) = crate::settings::ThinkingLevel::parse(args) {
                     self.update_settings(|s| s.thinking = level);
-                    Some(format!("Thinking set to: {} {}", level.icon(), level.as_str()))
+                    Some(format!("Thinking → {} {}", level.icon(), level.as_str()))
                 } else {
                     Some(format!("Unknown level: {args}. Options: off, low, medium, high"))
                 }
@@ -497,6 +557,15 @@ pub struct TuiConfig {
     pub is_oauth: bool,
 }
 
+fn sel_opt(value: &str, label: &str, desc: &str, current: &str) -> selector::SelectOption {
+    selector::SelectOption {
+        value: value.to_string(),
+        label: label.to_string(),
+        description: desc.to_string(),
+        active: value == current,
+    }
+}
+
 pub async fn run_tui(
     mut events_rx: broadcast::Receiver<AgentEvent>,
     command_tx: mpsc::Sender<TuiCommand>,
@@ -536,6 +605,25 @@ pub async fn run_tui(
 
         if has_terminal_event
             && let Event::Key(key) = event::read()? {
+                // ── Selector popup intercepts all keys when open ────
+                if app.selector.is_some() {
+                    match key.code {
+                        KeyCode::Up => { if let Some(ref mut s) = app.selector { s.move_up(); } }
+                        KeyCode::Down => { if let Some(ref mut s) = app.selector { s.move_down(); } }
+                        KeyCode::Enter => {
+                            if let Some(msg) = app.confirm_selector(&command_tx) {
+                                app.conversation.push_system(&msg);
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.selector = None;
+                            app.selector_kind = None;
+                        }
+                        _ => {} // ignore other keys when selector is open
+                    }
+                    continue; // skip normal key handling
+                }
+
                 match (key.code, key.modifiers) {
                     // ── Interrupt: Escape or Ctrl+C ─────────────────
                     (KeyCode::Esc, _) => {
