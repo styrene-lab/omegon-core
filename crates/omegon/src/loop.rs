@@ -106,6 +106,39 @@ pub async fn run(
             conversation.push_user(format!("[System: {warning}]"));
         }
 
+        // ─── Compaction check ────────────────────────────────────────
+        // If context is getting large, try LLM-driven compaction.
+        // The context_window default is 200k tokens (Anthropic models).
+        // Trigger at 75% utilization.
+        let context_window = 200_000;
+        if conversation.needs_compaction(context_window, 0.75) {
+            if let Some((payload, evict_count)) = conversation.build_compaction_payload() {
+                tracing::info!(
+                    estimated_tokens = conversation.estimate_tokens(),
+                    evict_count,
+                    "Context utilization high — requesting LLM compaction"
+                );
+                // Use the bridge to summarize the evictable messages
+                match compact_via_llm(bridge, &payload, &stream_options).await {
+                    Ok(summary) => {
+                        conversation.apply_compaction(summary);
+                    }
+                    Err(e) => {
+                        tracing::warn!("LLM compaction failed: {e} — continuing with decay only");
+                    }
+                }
+            }
+        }
+
+        // ─── Inject IntentDocument if meaningful ─────────────────────
+        if conversation.intent.stats.tool_calls > 0
+            || conversation.intent.current_task.is_some()
+            || conversation.intent.stats.compactions > 0
+        {
+            let intent_block = conversation.render_intent_for_injection();
+            context.inject_intent(intent_block);
+        }
+
         // ─── Build LLM-facing context ───────────────────────────────
         let system_prompt =
             context.build_system_prompt(conversation.last_user_prompt(), conversation);
@@ -196,6 +229,44 @@ pub async fn run(
 
     let _ = events.send(AgentEvent::AgentEnd);
     Ok(())
+}
+
+/// Request an LLM-driven compaction summary for old conversation messages.
+async fn compact_via_llm(
+    bridge: &dyn LlmBridge,
+    payload: &str,
+    options: &StreamOptions,
+) -> anyhow::Result<String> {
+    let system = "You are a conversation summarizer. Produce a concise summary \
+                  preserving: what was done, what failed, constraints discovered, \
+                  and current approach. Output only the summary, no preamble.";
+
+    let messages = vec![crate::bridge::LlmMessage::User {
+        content: payload.to_string(),
+    }];
+
+    let mut rx = bridge
+        .stream(system, &messages, &[], options)
+        .await?;
+
+    let mut summary = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            LlmEvent::TextDelta { delta } => summary.push_str(&delta),
+            LlmEvent::Done { .. } => break,
+            LlmEvent::Error { message } => {
+                return Err(anyhow::anyhow!("Compaction LLM error: {message}"));
+            }
+            _ => {}
+        }
+    }
+
+    if summary.is_empty() {
+        return Err(anyhow::anyhow!("Compaction produced empty summary"));
+    }
+
+    tracing::info!(summary_len = summary.len(), "Compaction summary received");
+    Ok(summary)
 }
 
 /// Stream an LLM response with retry on transient errors.

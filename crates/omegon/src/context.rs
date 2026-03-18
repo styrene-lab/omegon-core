@@ -164,6 +164,25 @@ impl ContextManager {
         });
     }
 
+    /// Inject the IntentDocument as a high-priority context block.
+    /// Called externally when intent has meaningful content.
+    pub fn inject_intent(&mut self, intent_block: String) {
+        // Remove previous intent injection
+        self.active_injections
+            .retain(|a| a.injection.source != "intent-document");
+        if !intent_block.is_empty() {
+            self.active_injections.push(ActiveInjection {
+                remaining_turns: 1, // Refreshed each turn
+                injection: ContextInjection {
+                    source: "intent-document".into(),
+                    content: intent_block,
+                    priority: 190, // High — after base, before other context
+                    ttl_turns: 1,
+                },
+            });
+        }
+    }
+
     fn assemble(&self) -> String {
         let mut prompt = self.base_prompt.clone();
 

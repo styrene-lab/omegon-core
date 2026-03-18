@@ -55,6 +55,26 @@ pub enum LlmMessage {
     },
 }
 
+impl LlmMessage {
+    /// Estimate character count for token budget calculations.
+    pub fn char_count(&self) -> usize {
+        match self {
+            LlmMessage::User { content } => content.len(),
+            LlmMessage::Assistant { text, thinking, tool_calls, .. } => {
+                let text_len: usize = text.iter().map(|t| t.len()).sum();
+                let think_len: usize = thinking.iter().map(|t| t.len()).sum();
+                let tc_len: usize = tool_calls.iter().map(|tc| {
+                    tc.name.len() + tc.arguments.to_string().len()
+                }).sum();
+                text_len + think_len + tc_len
+            }
+            LlmMessage::ToolResult { content, tool_name, .. } => {
+                content.len() + tool_name.len()
+            }
+        }
+    }
+}
+
 /// A tool call in the wire format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireToolCall {

@@ -126,6 +126,8 @@ struct SessionSnapshot {
     messages: Vec<LlmMessage>,
     intent: IntentDocument,
     decay_window: usize,
+    #[serde(default)]
+    compaction_summary: Option<String>,
 }
 
 /// The full conversation state.
@@ -138,6 +140,10 @@ pub struct ConversationState {
 
     /// Decay window: messages older than this many turns get decayed.
     decay_window: usize,
+
+    /// Compaction summary — if set, injected as the first message after compaction.
+    /// Replaces evicted messages so the LLM has continuity.
+    compaction_summary: Option<String>,
 }
 
 impl ConversationState {
@@ -146,7 +152,123 @@ impl ConversationState {
             canonical: Vec::new(),
             intent: IntentDocument::default(),
             decay_window: 10,
+            compaction_summary: None,
         }
+    }
+
+    /// Estimate token count of the LLM-facing view (chars / 4 heuristic).
+    /// Good enough for budget decisions — not a precise tokenizer.
+    pub fn estimate_tokens(&self) -> usize {
+        let view = self.build_llm_view();
+        let chars: usize = view.iter().map(|m| m.char_count()).sum();
+        chars / 4
+    }
+
+    /// Check if compaction is needed given a context budget.
+    /// Returns true if estimated tokens exceed the threshold fraction.
+    pub fn needs_compaction(&self, context_window: usize, threshold: f32) -> bool {
+        let tokens = self.estimate_tokens();
+        tokens as f32 > context_window as f32 * threshold
+    }
+
+    /// Build the text for an LLM compaction request — the messages that would
+    /// be evicted, formatted for summarization.
+    pub fn build_compaction_payload(&self) -> Option<(String, usize)> {
+        let current_turn = self.intent.stats.turns;
+        // Find messages older than the decay window — these are the ones
+        // that are already decayed and should be compacted into a summary.
+        let evictable: Vec<&AgentMessage> = self.canonical.iter()
+            .filter(|m| current_turn.saturating_sub(m.turn()) > self.decay_window as u32)
+            .collect();
+
+        if evictable.is_empty() {
+            return None;
+        }
+
+        let mut payload = String::new();
+        payload.push_str("Summarize this conversation excerpt. Preserve:\n");
+        payload.push_str("- What was accomplished (files changed, decisions made)\n");
+        payload.push_str("- What failed and why\n");
+        payload.push_str("- Current task and approach\n");
+        payload.push_str("- Key constraints discovered\n");
+        payload.push_str("Be concise but preserve actionable context.\n\n---\n\n");
+
+        for msg in &evictable {
+            match msg {
+                AgentMessage::User { text, turn } => {
+                    payload.push_str(&format!("[Turn {turn}] User: {text}\n\n"));
+                }
+                AgentMessage::Assistant(a, turn) => {
+                    let truncated = if a.text.len() > 200 {
+                        format!("{}...", &a.text[..200])
+                    } else {
+                        a.text.clone()
+                    };
+                    payload.push_str(&format!("[Turn {turn}] Assistant: {truncated}\n"));
+                    if !a.tool_calls.is_empty() {
+                        let tools: Vec<_> = a.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                        payload.push_str(&format!("  Tools called: {}\n", tools.join(", ")));
+                    }
+                    payload.push('\n');
+                }
+                AgentMessage::ToolResult(r, turn) => {
+                    let status = if r.is_error { "ERROR" } else { "ok" };
+                    payload.push_str(&format!("[Turn {turn}] Tool {}: {status}\n\n", r.tool_name));
+                }
+            }
+        }
+
+        Some((payload, evictable.len()))
+    }
+
+    /// Apply a compaction summary — evict old messages and replace with summary.
+    pub fn apply_compaction(&mut self, summary: String) {
+        let current_turn = self.intent.stats.turns;
+        // Remove all messages older than the decay window
+        self.canonical.retain(|m| {
+            current_turn.saturating_sub(m.turn()) <= self.decay_window as u32
+        });
+        self.compaction_summary = Some(summary);
+        self.intent.stats.compactions += 1;
+        tracing::info!(
+            compactions = self.intent.stats.compactions,
+            remaining_messages = self.canonical.len(),
+            "Compaction applied"
+        );
+    }
+
+    /// Render the IntentDocument as a context injection block.
+    pub fn render_intent_for_injection(&self) -> String {
+        let intent = &self.intent;
+        let mut lines = Vec::new();
+        lines.push("[Intent — session state]".to_string());
+
+        if let Some(task) = &intent.current_task {
+            lines.push(format!("Task: {task}"));
+        }
+        if let Some(approach) = &intent.approach {
+            lines.push(format!("Approach: {approach}"));
+        }
+        if !intent.files_modified.is_empty() {
+            let files: Vec<_> = intent.files_modified.iter()
+                .map(|p| p.display().to_string()).collect();
+            lines.push(format!("Files modified: {}", files.join(", ")));
+        }
+        if !intent.constraints_discovered.is_empty() {
+            lines.push(format!("Constraints: {}", intent.constraints_discovered.join("; ")));
+        }
+        if !intent.failed_approaches.is_empty() {
+            lines.push("Failed approaches:".to_string());
+            for fa in &intent.failed_approaches {
+                lines.push(format!("  - {}: {} (turn {})", fa.description, fa.reason, fa.turn));
+            }
+        }
+        lines.push(format!(
+            "Stats: {} turns, {} tool calls, {} compactions",
+            intent.stats.turns, intent.stats.tool_calls, intent.stats.compactions
+        ));
+
+        lines.join("\n")
     }
 
     pub fn push_user(&mut self, text: String) {
@@ -188,19 +310,31 @@ impl ConversationState {
 
     /// Build the LLM-facing view with context decay applied.
     /// Messages older than `decay_window` turns are decayed to skeletons.
+    /// If a compaction summary exists, it's injected as the first message.
     pub fn build_llm_view(&self) -> Vec<LlmMessage> {
         let current_turn = self.intent.stats.turns;
-        self.canonical
-            .iter()
-            .map(|msg| {
-                let turn_age = current_turn.saturating_sub(msg.turn());
-                if turn_age > self.decay_window as u32 {
-                    self.decay_message(msg)
-                } else {
-                    self.to_llm_message(msg)
-                }
-            })
-            .collect()
+        let mut messages: Vec<LlmMessage> = Vec::new();
+
+        // Inject compaction summary as first message if present
+        if let Some(summary) = &self.compaction_summary {
+            messages.push(LlmMessage::User {
+                content: format!(
+                    "[Previous conversation summary]\n{summary}\n\n{}\n[End summary — continue from here]",
+                    self.render_intent_for_injection()
+                ),
+            });
+        }
+
+        for msg in &self.canonical {
+            let turn_age = current_turn.saturating_sub(msg.turn());
+            if turn_age > self.decay_window as u32 {
+                messages.push(self.decay_message(msg));
+            } else {
+                messages.push(self.to_llm_message(msg));
+            }
+        }
+
+        messages
     }
 
     /// Apply ambient captures from omg: tags.
@@ -300,6 +434,7 @@ impl ConversationState {
             messages: view,
             intent: self.intent.clone(),
             decay_window: self.decay_window,
+            compaction_summary: self.compaction_summary.clone(),
         };
         let json = serde_json::to_string_pretty(&session)?;
         std::fs::write(path, json)?;
@@ -366,6 +501,7 @@ impl ConversationState {
             canonical,
             intent: snapshot.intent,
             decay_window: snapshot.decay_window,
+            compaction_summary: snapshot.compaction_summary,
         })
     }
 
@@ -568,6 +704,108 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn estimate_tokens_chars_div_4() {
+        let mut conv = ConversationState::new();
+        conv.push_user("hello world".into()); // 11 chars
+        let tokens = conv.estimate_tokens();
+        // "hello world" = 11 chars → 11/4 = 2 tokens (integer division)
+        assert!(tokens >= 2 && tokens <= 4, "got {tokens}");
+    }
+
+    #[test]
+    fn needs_compaction_threshold() {
+        let mut conv = ConversationState::new();
+        // Push a message under threshold: 400k chars → ~100k tokens, threshold at 150k
+        conv.push_user("x".repeat(400_000));
+        assert!(!conv.needs_compaction(200_000, 0.75), "100k tokens should be under 150k threshold");
+        // Push more to exceed: 800k chars → ~200k tokens, threshold at 150k
+        conv.push_user("y".repeat(400_000));
+        assert!(conv.needs_compaction(200_000, 0.75), "200k tokens should exceed 150k threshold");
+    }
+
+    #[test]
+    fn build_compaction_payload_only_evictable() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 2;
+
+        // Turn 0 messages (will be evictable at turn 5)
+        conv.push_user("old task".into());
+        conv.push_assistant(AssistantMessage {
+            text: "working on it".into(),
+            thinking: None,
+            tool_calls: vec![],
+            raw: Value::Null,
+        });
+
+        // Advance to turn 5 so turn-0 messages are outside decay window
+        conv.intent.stats.turns = 5;
+        conv.push_user("new task".into());
+
+        let (payload, count) = conv.build_compaction_payload().unwrap();
+        assert_eq!(count, 2, "Should evict 2 old messages");
+        assert!(payload.contains("old task"));
+        assert!(!payload.contains("new task"), "Recent messages should not be in payload");
+    }
+
+    #[test]
+    fn apply_compaction_evicts_and_sets_summary() {
+        let mut conv = ConversationState::new();
+        conv.decay_window = 2;
+
+        // Old messages
+        conv.push_user("old".into());
+        conv.push_assistant(AssistantMessage {
+            text: "old reply".into(),
+            thinking: None,
+            tool_calls: vec![],
+            raw: Value::Null,
+        });
+
+        // Advance and add recent
+        conv.intent.stats.turns = 5;
+        conv.push_user("recent".into());
+
+        conv.apply_compaction("Summary of old conversation.".into());
+
+        assert_eq!(conv.intent.stats.compactions, 1);
+        assert!(conv.compaction_summary.is_some());
+        // Old messages should be evicted
+        assert_eq!(conv.canonical.len(), 1, "Only the recent message should remain");
+
+        // The LLM view should have the summary + the recent message
+        let view = conv.build_llm_view();
+        assert_eq!(view.len(), 2); // summary pseudo-message + recent
+        if let LlmMessage::User { content } = &view[0] {
+            assert!(content.contains("Summary of old conversation"));
+            assert!(content.contains("[Intent"));
+        }
+    }
+
+    #[test]
+    fn render_intent_for_injection() {
+        let mut conv = ConversationState::new();
+        conv.intent.current_task = Some("Fix auth flow".into());
+        conv.intent.approach = Some("Token rotation".into());
+        conv.intent.files_modified.insert(PathBuf::from("src/auth.rs"));
+        conv.intent.constraints_discovered.push("30-minute TTL".into());
+        conv.intent.failed_approaches.push(FailedApproach {
+            description: "Direct replacement".into(),
+            reason: "Cache holds stale refs".into(),
+            turn: 5,
+        });
+        conv.intent.stats.turns = 10;
+        conv.intent.stats.tool_calls = 25;
+
+        let block = conv.render_intent_for_injection();
+        assert!(block.contains("Fix auth flow"));
+        assert!(block.contains("Token rotation"));
+        assert!(block.contains("src/auth.rs"));
+        assert!(block.contains("30-minute TTL"));
+        assert!(block.contains("Direct replacement"));
+        assert!(block.contains("Cache holds stale refs"));
     }
 
     #[test]
