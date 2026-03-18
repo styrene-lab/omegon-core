@@ -27,10 +27,10 @@ pub fn discover_guardrails(cwd: &Path) -> Vec<GuardrailCheck> {
 
     // 1. package.json scripts
     let pkg_path = cwd.join("package.json");
-    if pkg_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pkg_path) {
-            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object()) {
+    if pkg_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&pkg_path)
+            && let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object()) {
                     if let Some(tc) = scripts.get("typecheck").and_then(|v| v.as_str()) {
                         add(&mut checks, "typecheck", tc);
                     }
@@ -38,9 +38,6 @@ pub fn discover_guardrails(cwd: &Path) -> Vec<GuardrailCheck> {
                         add(&mut checks, "lint", lint);
                     }
                 }
-            }
-        }
-    }
 
     // 2. Auto-detection
     if !checks.iter().any(|c| c.name == "typecheck") && cwd.join("tsconfig.json").exists() {

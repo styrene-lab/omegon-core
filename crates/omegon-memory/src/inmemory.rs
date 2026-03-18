@@ -116,7 +116,7 @@ impl MemoryBackend for InMemoryBackend {
             .filter(|f| {
                 f.mind == mind
                     && f.status == status
-                    && filter.section.as_ref().map_or(true, |sec| &f.section == sec)
+                    && filter.section.as_ref().is_none_or(|sec| &f.section == sec)
             })
             .cloned()
             .collect())
@@ -142,7 +142,7 @@ impl MemoryBackend for InMemoryBackend {
         let mut count = 0;
         for id in ids {
             // Check if active first, then update
-            let is_active = s.facts.get(*id).map_or(false, |f| f.status == FactStatus::Active);
+            let is_active = s.facts.get(*id).is_some_and(|f| f.status == FactStatus::Active);
             if is_active {
                 s.version_clock += 1;
                 let vc = s.version_clock;
@@ -234,7 +234,7 @@ impl MemoryBackend for InMemoryBackend {
 
         // Find embeddings for this mind
         let mind_embeddings: Vec<&EmbeddingEntry> = s.embeddings.iter()
-            .filter(|e| s.facts.get(&e.fact_id).map_or(false, |f| f.mind == mind && f.status == FactStatus::Active))
+            .filter(|e| s.facts.get(&e.fact_id).is_some_and(|f| f.mind == mind && f.status == FactStatus::Active))
             .collect();
 
         if mind_embeddings.is_empty() {
@@ -290,7 +290,7 @@ impl MemoryBackend for InMemoryBackend {
     async fn embedding_metadata(&self, mind: &str) -> Result<Option<EmbeddingMetadata>> {
         let s = self.state.lock().unwrap();
         let entry = s.embeddings.iter().find(|e| {
-            s.facts.get(&e.fact_id).map_or(false, |f| f.mind == mind)
+            s.facts.get(&e.fact_id).is_some_and(|f| f.mind == mind)
         });
         Ok(entry.map(|e| EmbeddingMetadata {
             model_name: e.model_name.clone(),
@@ -392,7 +392,7 @@ impl MemoryBackend for InMemoryBackend {
         // Edges
         let mut edges: Vec<&Edge> = s.edges.iter()
             .filter(|e| {
-                s.facts.get(&e.source_id).map_or(false, |f| f.mind == mind)
+                s.facts.get(&e.source_id).is_some_and(|f| f.mind == mind)
             })
             .collect();
         edges.sort_by(|a, b| a.id.cmp(&b.id));
@@ -485,14 +485,14 @@ impl MemoryBackend for InMemoryBackend {
         let archived = mind_facts.iter().filter(|f| f.status == FactStatus::Archived).count();
         let superseded = mind_facts.iter().filter(|f| f.status == FactStatus::Superseded).count();
         let with_vectors = s.embeddings.iter()
-            .filter(|e| s.facts.get(&e.fact_id).map_or(false, |f| f.mind == mind))
+            .filter(|e| s.facts.get(&e.fact_id).is_some_and(|f| f.mind == mind))
             .count();
         let meta = s.embeddings.iter().find(|e| {
-            s.facts.get(&e.fact_id).map_or(false, |f| f.mind == mind)
+            s.facts.get(&e.fact_id).is_some_and(|f| f.mind == mind)
         });
         let episodes = s.episodes.iter().filter(|e| e.mind == mind).count();
         let edges = s.edges.iter().filter(|e| {
-            s.facts.get(&e.source_id).map_or(false, |f| f.mind == mind)
+            s.facts.get(&e.source_id).is_some_and(|f| f.mind == mind)
         }).count();
         let version_hwm = s.facts.values().filter(|f| f.mind == mind).map(|f| f.version).max().unwrap_or(0);
 

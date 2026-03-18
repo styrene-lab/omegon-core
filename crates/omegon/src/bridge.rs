@@ -209,11 +209,10 @@ impl SubprocessBridge {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if line.starts_with("llm-bridge: ready") {
-                    if let Some(tx) = ready_tx.take() {
+                if line.starts_with("llm-bridge: ready")
+                    && let Some(tx) = ready_tx.take() {
                         let _ = tx.send(());
                     }
-                }
                 tracing::debug!(target: "llm_bridge", "{}", line);
             }
         });

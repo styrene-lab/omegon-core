@@ -81,7 +81,7 @@ impl LocalInferenceProvider {
     }
 
     async fn ollama_status(&self) -> String {
-        match self.client.get(&base_url()).send().await {
+        match self.client.get(base_url()).send().await {
             Ok(resp) if resp.status().is_success() => {
                 match self.list_models().await {
                     Ok(models) => {

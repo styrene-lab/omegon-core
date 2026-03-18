@@ -72,8 +72,10 @@ pub enum AgentEvent {
 
 /// The lifecycle phase the agent loop is currently in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum LifecyclePhase {
     /// No structured lifecycle active. Simple tasks.
+    #[default]
     Idle,
     /// Exploring a design question — open questions, research, options.
     Exploring { node_id: Option<String> },
@@ -87,11 +89,6 @@ pub enum LifecyclePhase {
     Verifying { change_id: Option<String> },
 }
 
-impl Default for LifecyclePhase {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
 
 // ─── Context Injection ──────────────────────────────────────────────────────
 

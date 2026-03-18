@@ -84,17 +84,14 @@ pub struct Fact {
 /// Decay profile discriminant — persisted in DB.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DecayProfileName {
+    #[default]
     Standard,
     Global,
     RecentWork,
 }
 
-impl Default for DecayProfileName {
-    fn default() -> Self {
-        Self::Standard
-    }
-}
 
 /// A fact with search scoring attached.
 #[derive(Debug, Clone, Serialize, Deserialize)]

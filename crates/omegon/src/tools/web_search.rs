@@ -346,7 +346,7 @@ impl ToolProvider for WebSearchProvider {
                         .iter()
                         .find(|&&p| p == "tavily")
                         .or_else(|| available.iter().find(|&&p| p == "serper"))
-                        .unwrap_or(&&available[0])
+                        .unwrap_or(&available[0])
                         .to_string()
                 };
 

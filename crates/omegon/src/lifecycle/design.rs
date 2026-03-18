@@ -22,12 +22,11 @@ pub fn parse_frontmatter(content: &str) -> Option<HashMap<String, FrontmatterVal
 
     for line in yaml.lines() {
         // Array item: "  - something"
-        if let Some(item) = line.strip_prefix("  - ").or_else(|| line.strip_prefix("- ")) {
-            if current_key.is_some() {
+        if let Some(item) = line.strip_prefix("  - ").or_else(|| line.strip_prefix("- "))
+            && current_key.is_some() {
                 current_array.push(strip_quotes(item.trim()));
                 continue;
             }
-        }
 
         // Flush previous key
         if let Some(key) = current_key.take() {
@@ -154,11 +153,11 @@ pub fn parse_sections(body: &str) -> DocumentSections {
     let mut h2_blocks: Vec<(&str, String)> = Vec::new();
 
     for line in body.lines() {
-        if line.starts_with("## ") {
+        if let Some(heading) = line.strip_prefix("## ") {
             if !current_heading.is_empty() || !current_content.trim().is_empty() {
                 h2_blocks.push((current_heading, std::mem::take(&mut current_content)));
             }
-            current_heading = line[3..].trim();
+            current_heading = heading.trim();
             current_content = String::new();
         } else {
             current_content.push_str(line);
@@ -189,14 +188,14 @@ fn parse_research(content: &str) -> Vec<ResearchEntry> {
     let mut current_content = String::new();
 
     for line in content.lines() {
-        if line.starts_with("### ") {
+        if let Some(heading) = line.strip_prefix("### ") {
             if !current_heading.is_empty() {
                 entries.push(ResearchEntry {
                     heading: std::mem::take(&mut current_heading),
                     content: std::mem::take(&mut current_content).trim().to_string(),
                 });
             }
-            current_heading = line[4..].trim().to_string();
+            current_heading = heading.trim().to_string();
             current_content = String::new();
         } else {
             current_content.push_str(line);
@@ -221,7 +220,7 @@ fn parse_decisions(content: &str) -> Vec<DesignDecision> {
     let mut in_decision = false;
 
     for line in content.lines() {
-        if line.starts_with("### ") {
+        if let Some(heading) = line.strip_prefix("### ") {
             // Flush previous
             if in_decision && !current_title.is_empty() {
                 decisions.push(DesignDecision {
@@ -230,7 +229,7 @@ fn parse_decisions(content: &str) -> Vec<DesignDecision> {
                     rationale: std::mem::take(&mut current_rationale).trim().to_string(),
                 });
             }
-            current_title = line[4..].trim().to_string();
+            current_title = heading.trim().to_string();
             in_decision = true;
         } else if in_decision {
             if let Some(rest) = line.strip_prefix("**Status:**") {
@@ -285,8 +284,8 @@ fn parse_impl_notes(content: &str, sections: &mut DocumentSections) {
             in_constraints = false;
         } else if in_file_scope {
             // Format: - `path` — description (action)
-            if let Some(rest) = line.trim().strip_prefix("- ") {
-                if let Some((path_part, desc)) = rest.split_once(" — ").or_else(|| rest.split_once(" - ")) {
+            if let Some(rest) = line.trim().strip_prefix("- ")
+                && let Some((path_part, desc)) = rest.split_once(" — ").or_else(|| rest.split_once(" - ")) {
                     let path = path_part.trim().trim_matches('`').to_string();
                     let (description, action) = if desc.ends_with(')') {
                         if let Some(paren) = desc.rfind('(') {
@@ -299,12 +298,10 @@ fn parse_impl_notes(content: &str, sections: &mut DocumentSections) {
                     };
                     sections.impl_file_scope.push(FileScope { path, description, action });
                 }
-            }
-        } else if in_constraints {
-            if let Some(rest) = line.trim().strip_prefix("- ") {
+        } else if in_constraints
+            && let Some(rest) = line.trim().strip_prefix("- ") {
                 sections.impl_constraints.push(rest.to_string());
             }
-        }
     }
 }
 
@@ -328,17 +325,16 @@ pub fn scan_design_docs(docs_dir: &Path) -> HashMap<String, DesignNode> {
             Err(_) => continue,
         };
 
-        if let Some(fm) = parse_frontmatter(&content) {
-            if let Some(node) = node_from_frontmatter(&fm, path) {
+        if let Some(fm) = parse_frontmatter(&content)
+            && let Some(node) = node_from_frontmatter(&fm, path) {
                 nodes.insert(node.id.clone(), node);
             }
-        }
     }
 
     // Also scan docs/design/ subdirectory if it exists
     let design_dir = docs_dir.join("design");
-    if design_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&design_dir) {
+    if design_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&design_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -348,14 +344,12 @@ pub fn scan_design_docs(docs_dir: &Path) -> HashMap<String, DesignNode> {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                if let Some(fm) = parse_frontmatter(&content) {
-                    if let Some(node) = node_from_frontmatter(&fm, path) {
+                if let Some(fm) = parse_frontmatter(&content)
+                    && let Some(node) = node_from_frontmatter(&fm, path) {
                         nodes.insert(node.id.clone(), node);
                     }
-                }
             }
         }
-    }
 
     nodes
 }

@@ -101,13 +101,11 @@ impl ConversationView {
                 is_error: e,
                 ..
             } = msg
-            {
-                if tool_id == id && !*c {
+                && tool_id == id && !*c {
                     *c = true;
                     *e = is_error;
                     break;
                 }
-            }
         }
     }
 

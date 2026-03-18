@@ -51,7 +51,7 @@ fn generate_session_id() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let ts = chrono_lite_timestamp();
-    let rand_part: u32 = (now.subsec_nanos() ^ 0xDEAD_BEEF) & 0xFFFF_FFFF;
+    let rand_part: u32 = now.subsec_nanos() ^ 0xDEAD_BEEF;
     format!("{ts}_{rand_part:08x}")
 }
 

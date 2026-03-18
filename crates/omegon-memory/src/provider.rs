@@ -200,7 +200,7 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
                 let msg = match result.action {
                     StoreAction::Stored => format!("Stored in {}: {}", section_str, content),
                     StoreAction::Reinforced => format!("Reinforced existing fact: {}", content),
-                    StoreAction::Deduplicated => format!("Duplicate — fact already exists"),
+                    StoreAction::Deduplicated => "Duplicate — fact already exists".to_string(),
                 };
                 Ok(ToolResult {
                     content: vec![ContentBlock::Text { text: msg }],
@@ -228,7 +228,7 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
                         "{}. [{}] ({}, {:.0}% match) {}",
                         i + 1,
                         sf.fact.id,
-                        serde_json::to_string(&sf.fact.section).unwrap_or_default().trim_matches('"').to_string(),
+                        serde_json::to_string(&sf.fact.section).unwrap_or_default().trim_matches('"'),
                         sf.similarity * 100.0,
                         sf.fact.content,
                     ));
@@ -343,7 +343,9 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ContextProvider f
         let backend = &self.backend;
         let renderer = &self.renderer;
 
-        let result = std::thread::scope(|scope| {
+        
+
+        std::thread::scope(|scope| {
             scope.spawn(|| {
                 handle.block_on(async {
                     let facts = backend.list_facts(&mind, FactFilter::default()).await.ok()?;
@@ -370,9 +372,7 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ContextProvider f
                     })
                 })
             }).join().ok()?
-        });
-
-        result
+        })
     }
 }
 

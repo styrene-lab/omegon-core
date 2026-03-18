@@ -20,15 +20,12 @@ mod lifecycle;
 mod r#loop;
 mod prompt;
 mod session;
+mod setup;
 mod tools;
 mod tui;
 
 use bridge::SubprocessBridge;
-use context::ContextManager;
-use conversation::ConversationState;
 use omegon_traits::AgentEvent;
-use omegon_memory::MemoryBackend as _; // bring trait methods into scope
-use tools::CoreTools;
 
 #[derive(Parser)]
 #[command(name = "omegon-agent", about = "Omegon agent loop — headless coding agent")]
@@ -251,45 +248,13 @@ async fn run_cleave_command(
     Ok(())
 }
 
-/// Find the project root by walking up from cwd looking for .git (directory, not file).
-/// For cleave worktrees (.git is a file), follows the gitdir to the real repo.
-/// Falls back to cwd if no .git found.
-fn find_project_root(cwd: &std::path::Path) -> std::path::PathBuf {
-    let mut dir = cwd.to_path_buf();
-    loop {
-        let git_path = dir.join(".git");
-        if git_path.is_dir() {
-            return dir;
-        }
-        if git_path.is_file() {
-            // Worktree: .git file contains "gitdir: /main/repo/.git/worktrees/name"
-            if let Ok(content) = std::fs::read_to_string(&git_path) {
-                if let Some(gitdir) = content.strip_prefix("gitdir: ") {
-                    let gitdir = gitdir.trim();
-                    let gitdir_path = if std::path::Path::new(gitdir).is_absolute() {
-                        std::path::PathBuf::from(gitdir)
-                    } else {
-                        dir.join(gitdir)
-                    };
-                    // .git/worktrees/<name> → .git → repo root
-                    if let Some(repo) = gitdir_path.parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.parent())
-                    {
-                        return repo.to_path_buf();
-                    }
-                }
-            }
-            return dir; // fallback
-        }
-        if !dir.pop() { break; }
-    }
-    cwd.to_path_buf()
-}
 
 async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
-    let cwd = std::fs::canonicalize(&cli.cwd)?;
-    tracing::info!(cwd = %cwd.display(), model = %cli.model, "omegon interactive starting");
+    tracing::info!(model = %cli.model, "omegon interactive starting");
+
+    // ─── Shared setup ───────────────────────────────────────────────────
+    let resume = cli.resume.as_ref().map(|r| r.as_deref());
+    let mut agent = setup::AgentSetup::new(&cli.cwd, resume).await?;
 
     // ─── Spawn LLM bridge ───────────────────────────────────────────────
     let bridge_path = cli
@@ -297,61 +262,6 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(SubprocessBridge::default_bridge_path);
     let bridge = SubprocessBridge::spawn(&bridge_path, &cli.node).await?;
-
-    // ─── Set up tools ───────────────────────────────────────────────────
-    let core_tools = CoreTools::new(cwd.clone());
-    let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
-    tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
-    tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
-    tools.push(Box::new(tools::view::ViewProvider::new(cwd.clone())));
-    tools.push(Box::new(tools::render::RenderProvider::new()));
-
-    // Memory
-    let mind = "default".to_string();
-    let project_root = find_project_root(&cwd);
-    let memory_dir = project_root.join(".pi").join("memory");
-    let _ = std::fs::create_dir_all(&memory_dir);
-    let db_path = memory_dir.join("facts.db");
-    let jsonl_path = memory_dir.join("facts.jsonl");
-    if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
-        let stats = backend.stats(&mind).await.ok();
-        if stats.as_ref().map_or(true, |s| s.active_facts == 0) && jsonl_path.exists() {
-            if let Ok(jsonl) = std::fs::read_to_string(&jsonl_path) {
-                if let Err(e) = backend.import_jsonl(&jsonl).await {
-                    tracing::warn!("JSONL import failed: {e}");
-                }
-            }
-        }
-        let provider = omegon_memory::MemoryProvider::new(
-            backend,
-            omegon_memory::MarkdownRenderer,
-            mind.clone(),
-        );
-        tools.push(Box::new(provider));
-    }
-
-    // ─── System prompt + context ────────────────────────────────────────
-    let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
-    let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
-    let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
-    let context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> = vec![
-        Box::new(lifecycle_provider),
-    ];
-    let mut context_manager = ContextManager::new(base_prompt, context_providers);
-
-    // ─── Conversation (new or resumed) ──────────────────────────────────
-    let mut conversation = if let Some(ref resume_arg) = cli.resume {
-        let resume_id = resume_arg.as_deref();
-        match session::find_session(&cwd, resume_id) {
-            Some(path) => {
-                tracing::info!(path = %path.display(), "Resuming session");
-                ConversationState::load_session(&path)?
-            }
-            None => ConversationState::new(),
-        }
-    } else {
-        ConversationState::new()
-    };
 
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
@@ -385,7 +295,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 }
             }
             tui::TuiCommand::UserPrompt(text) => {
-                conversation.push_user(text);
+                agent.conversation.push_user(text);
 
                 let loop_config = r#loop::LoopConfig {
                     max_turns: cli.max_turns,
@@ -399,23 +309,23 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 active_cancel = Some(cancel.clone());
                 if let Err(e) = r#loop::run(
                     &bridge,
-                    &tools,
-                    &mut context_manager,
-                    &mut conversation,
+                    &agent.tools,
+                    &mut agent.context_manager,
+                    &mut agent.conversation,
                     &events_tx,
                     cancel,
                     &loop_config,
                 ).await {
                     tracing::error!("Agent loop error: {e}");
                 }
-                active_cancel = None;
+                active_cancel.take();
             }
         }
     }
 
     // Save session
     if !cli.no_session {
-        if let Err(e) = session::save_session(&conversation, &cwd) {
+        if let Err(e) = session::save_session(&agent.conversation, &agent.cwd) {
             tracing::debug!("Session save failed: {e}");
         }
     }
@@ -426,8 +336,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
 }
 
 async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
-    let cwd = std::fs::canonicalize(&cli.cwd)?;
-    tracing::info!(cwd = %cwd.display(), model = %cli.model, "omegon-agent starting");
+    tracing::info!(model = %cli.model, "omegon-agent starting");
 
     // Resolve prompt from --prompt or --prompt-file
     let prompt_text = match (&cli.prompt, &cli.prompt_file) {
@@ -445,6 +354,11 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+
+    // ─── Shared setup ───────────────────────────────────────────────────
+    let resume = cli.resume.as_ref().map(|r| r.as_deref());
+    let mut agent = setup::AgentSetup::new(&cli.cwd, resume).await?;
+    agent.conversation.push_user(prompt_text.clone());
 
     // ─── Build loop config ──────────────────────────────────────────────
     let loop_config = r#loop::LoopConfig {
@@ -468,100 +382,6 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
     tracing::info!(bridge = %bridge_path.display(), "spawning LLM bridge");
     let bridge = SubprocessBridge::spawn(&bridge_path, &cli.node).await?;
     tracing::info!("LLM bridge ready");
-
-    // ─── Set up tools ───────────────────────────────────────────────────
-    let core_tools = CoreTools::new(cwd.clone());
-    let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
-    tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
-    tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
-    tools.push(Box::new(tools::view::ViewProvider::new(cwd.clone())));
-    tools.push(Box::new(tools::render::RenderProvider::new()));
-
-    // ─── Set up memory ──────────────────────────────────────────────────
-    // Mind name — use "default" to match the TS factstore convention.
-    // The TS extension always uses "default" as the mind for project-local facts.
-    let mind = "default".to_string();
-
-    // DB path: <cwd>/.pi/memory/facts.db — matches TS factstore convention.
-    // For cleave children (cwd is a worktree), walk up to the git repo root
-    // to find the project's .pi/memory/ directory.
-    let project_root = find_project_root(&cwd);
-    let memory_dir = project_root.join(".pi").join("memory");
-    let _ = std::fs::create_dir_all(&memory_dir);
-    let db_path = memory_dir.join("facts.db");
-
-    let jsonl_path = memory_dir.join("facts.jsonl");
-    match omegon_memory::SqliteBackend::open(&db_path) {
-        Ok(backend) => {
-            tracing::info!(mind = %mind, db = %db_path.display(), "memory backend loaded");
-
-            // Import JSONL on startup if DB is empty and facts.jsonl exists
-            // (bootstraps the Rust DB from the TS-managed JSONL git-sync file)
-            let stats = backend.stats(&mind).await.ok();
-            if stats.as_ref().map_or(true, |s| s.active_facts == 0) && jsonl_path.exists() {
-                if let Ok(jsonl) = std::fs::read_to_string(&jsonl_path) {
-                    match backend.import_jsonl(&jsonl).await {
-                        Ok(import) => tracing::info!(
-                            imported = import.imported,
-                            reinforced = import.reinforced,
-                            skipped = import.skipped,
-                            "imported facts.jsonl into empty DB"
-                        ),
-                        Err(e) => tracing::warn!("JSONL import failed (non-fatal): {e}"),
-                    }
-                }
-            }
-
-            let provider = omegon_memory::MemoryProvider::new(
-                backend,
-                omegon_memory::MarkdownRenderer,
-                mind.clone(),
-            );
-            tools.push(Box::new(provider));
-        }
-        Err(e) => {
-            tracing::warn!("memory backend failed to open (non-fatal): {e}");
-        }
-    }
-
-    // ─── Build system prompt ────────────────────────────────────────────
-    let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
-    let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
-
-    // ─── Set up lifecycle context ─────────────────────────────────────────
-    let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
-    let context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> = vec![
-        Box::new(lifecycle_provider),
-    ];
-
-    // ─── Set up context manager ─────────────────────────────────────────
-    let mut context_manager = ContextManager::new(base_prompt, context_providers);
-
-    // ─── Set up conversation (new or resumed) ────────────────────────────
-    let mut conversation = if let Some(ref resume_arg) = cli.resume {
-        // --resume was passed (with or without a value)
-        let resume_id = resume_arg.as_deref();
-        match session::find_session(&cwd, resume_id) {
-            Some(session_path) => {
-                tracing::info!(path = %session_path.display(), "Resuming session");
-                let mut conv = ConversationState::load_session(&session_path)?;
-                conv.push_user(prompt_text.clone());
-                conv
-            }
-            None => {
-                let msg = if let Some(id) = resume_id {
-                    format!("No session matching '{id}' found for {}", cwd.display())
-                } else {
-                    format!("No previous sessions found for {}", cwd.display())
-                };
-                anyhow::bail!(msg);
-            }
-        }
-    } else {
-        let mut conv = ConversationState::new();
-        conv.push_user(prompt_text.clone());
-        conv
-    };
 
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(256);
@@ -627,9 +447,9 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     let result = r#loop::run(
         &bridge,
-        &tools,
-        &mut context_manager,
-        &mut conversation,
+        &agent.tools,
+        &mut agent.context_manager,
+        &mut agent.conversation,
         &events_tx,
         cancel,
         &loop_config,
@@ -638,32 +458,27 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     // ─── Save session ────────────────────────────────────────────────────
     if !cli.no_session {
-        if cwd.join(".cleave-prompt.md").exists() {
+        if agent.cwd.join(".cleave-prompt.md").exists() {
             // Cleave child: save to worktree-local file
-            let session_path = cwd.join(".cleave-session.json");
-            if let Err(e) = conversation.save_session(&session_path) {
+            let session_path = agent.cwd.join(".cleave-session.json");
+            if let Err(e) = agent.conversation.save_session(&session_path) {
                 tracing::debug!("Cleave session save failed (non-fatal): {e}");
             }
         } else {
             // Standalone agent: save to ~/.pi/agent/sessions/
-            match session::save_session(&conversation, &cwd) {
+            match session::save_session(&agent.conversation, &agent.cwd) {
                 Ok(path) => tracing::info!(path = %path.display(), "Session saved"),
                 Err(e) => tracing::debug!("Session save failed (non-fatal): {e}"),
             }
         }
     }
 
-    // JSONL export is intentional, not automatic.
-    // The DB is the live mutable store; facts.jsonl is the tracked transport snapshot.
-    // Export only happens via explicit memory_export or lifecycle reconciliation.
-    // See design: memory-branch-aware-facts-transport
-
-    // Graceful bridge shutdown — send "shutdown" before kill_on_drop fires
+    // Graceful bridge shutdown
     bridge.shutdown().await;
 
     match &result {
         Ok(()) => {
-            if let Some(last_text) = conversation.last_assistant_text() {
+            if let Some(last_text) = agent.conversation.last_assistant_text() {
                 println!("{last_text}");
             }
         }

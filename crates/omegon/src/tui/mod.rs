@@ -158,7 +158,7 @@ impl App {
 
         // Footer
         let status_str = if self.agent_active { "working" } else { "idle" };
-        let model_short = self.model.split(':').last().unwrap_or(&self.model);
+        let model_short = self.model.split(':').next_back().unwrap_or(&self.model);
         let footer_text = format!(
             " Ω {model_short} │ turn {} │ {} tools │ {status_str}",
             self.turn, self.tool_calls,
@@ -316,8 +316,8 @@ pub async fn run_tui(
         // Poll for events with timeout (16ms ≈ 60fps)
         let has_terminal_event = event::poll(Duration::from_millis(16))?;
 
-        if has_terminal_event {
-            if let Event::Key(key) = event::read()? {
+        if has_terminal_event
+            && let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         if app.agent_active {
@@ -383,7 +383,6 @@ pub async fn run_tui(
                     _ => {}
                 }
             }
-        }
 
         // Drain agent events
         while let Ok(agent_event) = events_rx.try_recv() {

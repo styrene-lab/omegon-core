@@ -9,11 +9,10 @@ const WRITE_TIMEOUT_SECS: u64 = 30;
 
 pub async fn execute(path: &Path, content: &str, cwd: &Path) -> Result<ToolResult> {
     // Create parent directories if needed
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             tokio::fs::create_dir_all(parent).await?;
         }
-    }
 
     let timeout = std::time::Duration::from_secs(WRITE_TIMEOUT_SECS);
     let created = !path.exists();

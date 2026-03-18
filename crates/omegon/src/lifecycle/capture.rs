@@ -44,7 +44,7 @@ pub fn parse_ambient_blocks(text: &str) -> Vec<AmbientCapture> {
 
         // Find tag name (up to space or >)
         let tag_end = after_tag_start
-            .find(|c: char| c == ' ' || c == '>')
+            .find([' ', '>'])
             .unwrap_or(after_tag_start.len());
         let tag_name = &after_tag_start[..tag_end];
 

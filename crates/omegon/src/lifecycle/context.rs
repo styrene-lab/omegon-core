@@ -70,13 +70,11 @@ impl LifecycleContextProvider {
     }
 
     fn get_sections(&mut self, node_id: &str) -> Option<&DocumentSections> {
-        if !self.sections_cache.contains_key(node_id) {
-            if let Some(node) = self.nodes.get(node_id) {
-                if let Some(sections) = design::read_node_sections(node) {
+        if !self.sections_cache.contains_key(node_id)
+            && let Some(node) = self.nodes.get(node_id)
+                && let Some(sections) = design::read_node_sections(node) {
                     self.sections_cache.insert(node_id.to_string(), sections);
                 }
-            }
-        }
         self.sections_cache.get(node_id)
     }
 }
@@ -86,8 +84,8 @@ impl ContextProvider for LifecycleContextProvider {
         let mut parts = Vec::new();
 
         // 1. Focused design node context
-        if let Some(ref node_id) = self.focused_node {
-            if let Some(node) = self.nodes.get(node_id) {
+        if let Some(ref node_id) = self.focused_node
+            && let Some(node) = self.nodes.get(node_id) {
                 // Read sections (can't use get_sections due to &self)
                 if let Some(sections) = design::read_node_sections(node) {
                     let injection = design::build_context_injection(node, &sections);
@@ -96,7 +94,6 @@ impl ContextProvider for LifecycleContextProvider {
                     }
                 }
             }
-        }
 
         // 2. Active openspec changes (if any are implementing/verifying)
         let active: Vec<_> = self.changes.iter()

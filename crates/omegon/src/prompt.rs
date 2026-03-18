@@ -65,8 +65,8 @@ fn load_project_directives(cwd: &Path) -> String {
 
     for dir in search_dirs {
         let agents_file = dir.join("AGENTS.md");
-        if agents_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&agents_file) {
+        if agents_file.exists()
+            && let Ok(content) = std::fs::read_to_string(&agents_file) {
                 let trimmed = if content.len() > 4000 {
                     let mut end = 4000;
                     while end > 0 && !content.is_char_boundary(end) {
@@ -81,7 +81,6 @@ fn load_project_directives(cwd: &Path) -> String {
                     agents_file.display()
                 );
             }
-        }
     }
     String::new()
 }
@@ -96,8 +95,8 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
         if git_path.exists() {
             if git_path.is_file() {
                 // Worktree: .git is a file like "gitdir: /main/repo/.git/worktrees/name"
-                if let Ok(content) = std::fs::read_to_string(&git_path) {
-                    if let Some(gitdir) = content.strip_prefix("gitdir: ") {
+                if let Ok(content) = std::fs::read_to_string(&git_path)
+                    && let Some(gitdir) = content.strip_prefix("gitdir: ") {
                         let gitdir = gitdir.trim();
                         // gitdir points to .git/worktrees/<name>, go up to .git, then up to repo root
                         let gitdir_path = if Path::new(gitdir).is_absolute() {
@@ -107,13 +106,11 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
                         };
                         // .git/worktrees/<name> → .git → repo root
                         // .git/worktrees/<name> → .git → repo root
-                        if let Some(dot_git) = gitdir_path.parent().and_then(|p| p.parent()) {
-                            if let Some(repo) = dot_git.parent() {
+                        if let Some(dot_git) = gitdir_path.parent().and_then(|p| p.parent())
+                            && let Some(repo) = dot_git.parent() {
                                 return Some(repo.to_path_buf());
                             }
-                        }
                     }
-                }
                 // Fallback: treat as repo root
                 return Some(dir);
             } else {

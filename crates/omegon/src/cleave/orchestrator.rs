@@ -433,14 +433,13 @@ async fn dispatch_child(
                         line_count += 1;
 
                         // Emit activity events (throttled to 1/sec)
-                        if last_activity.duration_since(last_activity_event).as_secs() >= 1 {
-                            if let Some(activity) = progress::parse_child_activity(label, &line) {
+                        if last_activity.duration_since(last_activity_event).as_secs() >= 1
+                            && let Some(activity) = progress::parse_child_activity(label, &line) {
                                 progress::emit_progress(&activity);
                                 last_activity_event = Instant::now();
                             }
-                        }
 
-                        if line_count <= 5 || line_count % 50 == 0 {
+                        if line_count <= 5 || line_count.is_multiple_of(50) {
                             tracing::info!(child = %label, line_count, "stderr: {line}");
                         } else {
                             tracing::debug!(child = %label, "{line}");

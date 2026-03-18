@@ -111,8 +111,8 @@ pub async fn run(
         // The context_window default is 200k tokens (Anthropic models).
         // Trigger at 75% utilization.
         let context_window = 200_000;
-        if conversation.needs_compaction(context_window, 0.75) {
-            if let Some((payload, evict_count)) = conversation.build_compaction_payload() {
+        if conversation.needs_compaction(context_window, 0.75)
+            && let Some((payload, evict_count)) = conversation.build_compaction_payload() {
                 tracing::info!(
                     estimated_tokens = conversation.estimate_tokens(),
                     evict_count,
@@ -128,7 +128,6 @@ pub async fn run(
                     }
                 }
             }
-        }
 
         // ─── Inject IntentDocument if meaningful ─────────────────────
         if conversation.intent.stats.tool_calls > 0
@@ -547,7 +546,7 @@ fn is_readonly_tool(name: &str) -> bool {
 
 /// Check if the conversation contains any file mutations (edit or write calls).
 fn has_mutations(conversation: &ConversationState) -> bool {
-    conversation.intent.files_modified.len() > 0
+    !conversation.intent.files_modified.is_empty()
 }
 
 

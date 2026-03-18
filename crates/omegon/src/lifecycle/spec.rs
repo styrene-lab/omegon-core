@@ -247,9 +247,8 @@ pub fn parse_spec_content(content: &str) -> Vec<Requirement> {
         }
 
         // New scenario: "#### Scenario: <title>" or bare "#### <title>"
-        if trimmed.starts_with("#### ") {
-            let rest = trimmed[5..].trim();
-            let rest = rest.strip_prefix("Scenario:").unwrap_or(rest).trim();
+        if let Some(after) = trimmed.strip_prefix("#### ") {
+            let rest = after.strip_prefix("Scenario:").unwrap_or(after).trim();
             flush_scenario(&mut current_scenario, current_req.as_mut().map(|r| &mut r.2));
             current_scenario = Some(ScenarioBuilder {
                 title: rest.trim().to_string(),
@@ -301,18 +300,17 @@ fn flush_scenario(
     builder: &mut Option<ScenarioBuilder>,
     target: Option<&mut Vec<Scenario>>,
 ) {
-    if let Some(b) = builder.take() {
-        if !b.given.is_empty() || !b.when.is_empty() || !b.then.is_empty() {
-            if let Some(scenarios) = target {
-                scenarios.push(Scenario {
-                    title: b.title,
-                    given: b.given,
-                    when: b.when,
-                    then: b.then,
-                    and_clauses: b.and_clauses,
-                });
-            }
-        }
+    if let Some(b) = builder.take()
+        && (!b.given.is_empty() || !b.when.is_empty() || !b.then.is_empty())
+        && let Some(scenarios) = target
+    {
+        scenarios.push(Scenario {
+            title: b.title,
+            given: b.given,
+            when: b.when,
+            then: b.then,
+            and_clauses: b.and_clauses,
+        });
     }
 }
 

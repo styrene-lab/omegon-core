@@ -83,7 +83,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         match component {
             std::path::Component::ParentDir => {
                 // Only pop if there's a normal component to pop
-                if components.last().map_or(false, |c| {
+                if components.last().is_some_and(|c| {
                     matches!(c, std::path::Component::Normal(_))
                 }) {
                     components.pop();

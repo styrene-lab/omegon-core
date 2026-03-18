@@ -705,7 +705,7 @@ impl MemoryBackend for SqliteBackend {
             if trimmed.is_empty() { continue; }
             match serde_json::from_str::<JsonlRecord>(trimmed) {
                 Ok(JsonlRecord::Fact(jf)) => {
-                    self.ensure_mind(&*tx, &jf.mind);
+                    self.ensure_mind(&tx, &jf.mind);
                     let existing_version: Option<i64> = tx.query_row(
                         "SELECT version FROM facts WHERE id = ?1", params![jf.id], |r| r.get(0),
                     ).optional().map_err(|e| MemoryError::Storage(e.into()))?.flatten();
@@ -741,7 +741,7 @@ impl MemoryBackend for SqliteBackend {
                     }
                 }
                 Ok(JsonlRecord::Episode(ep)) => {
-                    self.ensure_mind(&*tx, &ep.mind);
+                    self.ensure_mind(&tx, &ep.mind);
                     tx.execute(
                         "INSERT OR IGNORE INTO episodes (id, mind, title, narrative, date, created_at) \
                          VALUES (?1,?2,?3,?4,?5,?6)",

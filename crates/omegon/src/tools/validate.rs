@@ -105,11 +105,10 @@ fn discover_validators(cwd: &Path) -> HashMap<ValidatorKind, ValidatorConfig> {
     let mut guard = VALIDATORS.lock().unwrap_or_else(|e| e.into_inner());
 
     // Return cached if cwd matches
-    if let Some((ref cached_cwd, ref validators)) = *guard {
-        if cached_cwd == cwd {
+    if let Some((ref cached_cwd, ref validators)) = *guard
+        && cached_cwd == cwd {
             return validators.clone();
         }
-    }
 
     // Discover fresh
     let mut validators = HashMap::new();
