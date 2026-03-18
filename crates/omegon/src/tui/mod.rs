@@ -92,6 +92,18 @@ enum SelectorKind {
     ThinkingLevel,
 }
 
+/// Result of handling a slash command.
+enum SlashResult {
+    /// Display this text as a system message.
+    Display(String),
+    /// Command was handled silently (e.g. opened a popup).
+    Handled,
+    /// Not a recognized command — pass through as user prompt.
+    NotACommand,
+    /// Quit requested.
+    Quit,
+}
+
 impl App {
     pub fn new(settings: crate::settings::SharedSettings) -> Self {
         let (model_id, model_provider) = {
@@ -134,15 +146,15 @@ impl App {
 
         if let Some((_, is_oauth)) = anthropic_auth {
             let auth = if is_oauth { "subscription" } else { "api-key" };
-            options.push(sel_opt("anthropic:claude-sonnet-4-20250514", "Claude Sonnet 4", &format!("fast · 200k · {auth}"), &current));
+            options.push(sel_opt("anthropic:claude-sonnet-4-20250514", "Claude Sonnet 4", &format!("balanced · 200k · {auth}"), &current));
             options.push(sel_opt("anthropic:claude-opus-4-20250514", "Claude Opus 4", &format!("strongest · 200k · {auth}"), &current));
-            options.push(sel_opt("anthropic:claude-haiku-3-20250307", "Claude Haiku 3", &format!("cheapest · 200k · {auth}"), &current));
         }
 
         if let Some((_, is_oauth)) = openai_auth {
             let auth = if is_oauth { "subscription" } else { "api-key" };
-            options.push(sel_opt("openai:gpt-4.1", "GPT-4.1", &format!("OpenAI · 128k · {auth}"), &current));
-            options.push(sel_opt("openai:o3", "o3", &format!("OpenAI reasoning · 200k · {auth}"), &current));
+            options.push(sel_opt("openai:o3", "o3", &format!("reasoning · 200k · {auth}"), &current));
+            options.push(sel_opt("openai:gpt-4.1", "GPT-4.1", &format!("coding · 1M · {auth}"), &current));
+            options.push(sel_opt("openai:o4-mini", "o4-mini", &format!("fast reasoning · 200k · {auth}"), &current));
         }
 
         if options.is_empty() {
@@ -391,10 +403,10 @@ impl App {
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
 
-    /// Handle a slash command. Returns Some(text) for display, None for /exit.
-    fn handle_slash_command(&mut self, text: &str, tx: &mpsc::Sender<TuiCommand>) -> Option<String> {
+    /// Handle a slash command.
+    fn handle_slash_command(&mut self, text: &str, tx: &mpsc::Sender<TuiCommand>) -> SlashResult {
         let trimmed = text.trim();
-        if !trimmed.starts_with('/') { return None; }
+        if !trimmed.starts_with('/') { return SlashResult::NotACommand; }
         let rest = &trimmed[1..];
         let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
         let args = args.trim();
@@ -409,14 +421,14 @@ impl App {
                             format!("  /{n:<12} {d}  [{}]", subs.join("|"))
                         }
                     }).collect();
-                Some(format!("Commands:\n{}\n\nType / to browse. Tab completes.", lines.join("\n")))
+                SlashResult::Display(format!("Commands:\n{}\n\nType / to browse. Tab completes.", lines.join("\n")))
             }
 
             "model" => {
                 if args.is_empty() {
                     // No args → open interactive selector
                     self.open_model_selector();
-                    None // selector handles the rest
+                    SlashResult::Handled
                 } else {
                     // Direct switch: /model anthropic:claude-opus-4-20250514
                     self.update_settings(|s| {
@@ -424,7 +436,7 @@ impl App {
                         s.context_window = crate::settings::Settings::new(args).context_window;
                     });
                     let _ = tx.try_send(TuiCommand::SetModel(args.to_string()));
-                    Some(format!("Model → {args}"))
+                    SlashResult::Display(format!("Model → {args}"))
                 }
             }
 
@@ -432,12 +444,12 @@ impl App {
                 if args.is_empty() {
                     // No args → open interactive selector
                     self.open_thinking_selector();
-                    None
+                    SlashResult::Handled
                 } else if let Some(level) = crate::settings::ThinkingLevel::parse(args) {
                     self.update_settings(|s| s.thinking = level);
-                    Some(format!("Thinking → {} {}", level.icon(), level.as_str()))
+                    SlashResult::Display(format!("Thinking → {} {}", level.icon(), level.as_str()))
                 } else {
-                    Some(format!("Unknown level: {args}. Options: off, low, medium, high"))
+                    SlashResult::Display(format!("Unknown level: {args}. Options: off, low, medium, high"))
                 }
             }
 
@@ -451,7 +463,7 @@ impl App {
                 } else {
                     format!("{}s", elapsed.as_secs())
                 };
-                Some(format!(
+                SlashResult::Display(format!(
                     "Session:\n  Duration:    {time}\n  Turns:       {}\n  Tool calls:  {}\n  Compactions: {}\n\n\
                      Context:\n  Usage:       {:.0}%\n  Window:      {} tokens\n  Model:       {}\n  Thinking:    {} {}",
                     self.turn, self.tool_calls, self.dashboard.compactions,
@@ -462,21 +474,21 @@ impl App {
 
             "compact" => {
                 let _ = tx.try_send(TuiCommand::Compact);
-                Some("Compaction queued — runs before next turn.".into())
+                SlashResult::Display("Compaction queued — runs before next turn.".into())
             }
 
             "clear" => {
                 self.conversation = ConversationView::new();
-                Some("Display cleared.".into())
+                SlashResult::Display("Display cleared.".into())
             }
 
             "sessions" => {
                 let _ = tx.try_send(TuiCommand::ListSessions);
-                None // coordinator handles this
+                SlashResult::Handled
             }
 
             "memory" => {
-                Some(format!(
+                SlashResult::Display(format!(
                     "Memory:\n  Facts:          {}\n  Injected:       {}\n  Working memory: {}\n  ~{} tokens",
                     self.footer_data.total_facts, self.footer_data.injected_facts,
                     self.footer_data.working_memory, self.footer_data.memory_tokens_est,
@@ -487,11 +499,11 @@ impl App {
                 let source = if args.is_empty() { "auto" } else { args };
                 let cwd = std::path::Path::new(&self.footer_data.cwd);
                 let report = crate::migrate::run(source, cwd);
-                Some(report.summary())
+                SlashResult::Display(report.summary())
             }
 
-            "exit" | "quit" => None,
-            _ => None,
+            "exit" | "quit" => SlashResult::Quit,
+            _ => SlashResult::NotACommand,
         }
     }
 
@@ -827,17 +839,25 @@ pub async fn run_tui(
                     (KeyCode::Enter, _) if !app.agent_active => {
                         let text = app.editor.take_text();
                         if !text.is_empty() {
-                            if let Some(response) = app.handle_slash_command(&text, &command_tx) {
-                                app.conversation.push_system(&response);
-                            } else if text == "/exit" || text == "/quit" {
-                                app.should_quit = true;
-                                let _ = command_tx.send(TuiCommand::Quit).await;
-                            } else {
-                                app.conversation.push_user(&text);
-                                app.history.push(text.clone());
-                                app.history_idx = None;
-                                app.agent_active = true;
-                                let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
+                            match app.handle_slash_command(&text, &command_tx) {
+                                SlashResult::Display(response) => {
+                                    app.conversation.push_system(&response);
+                                }
+                                SlashResult::Handled => {
+                                    // Command handled silently (popup opened, etc.)
+                                }
+                                SlashResult::Quit => {
+                                    app.should_quit = true;
+                                    let _ = command_tx.send(TuiCommand::Quit).await;
+                                }
+                                SlashResult::NotACommand => {
+                                    // Not a slash command — send as user prompt
+                                    app.conversation.push_user(&text);
+                                    app.history.push(text.clone());
+                                    app.history_idx = None;
+                                    app.agent_active = true;
+                                    let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
+                                }
                             }
                         }
                     }
