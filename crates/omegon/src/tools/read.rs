@@ -116,6 +116,110 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Simple base64 encoder (avoids adding a dependency for this one use).
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_detection() {
+        assert!(is_image(Path::new("photo.jpg")));
+        assert!(is_image(Path::new("icon.png")));
+        assert!(is_image(Path::new("logo.svg")));
+        assert!(is_image(Path::new("anim.gif")));
+        assert!(is_image(Path::new("hero.webp")));
+        assert!(!is_image(Path::new("code.rs")));
+        assert!(!is_image(Path::new("readme.md")));
+        assert!(!is_image(Path::new("data.json")));
+    }
+
+    #[test]
+    fn mime_types() {
+        assert_eq!(mime_from_ext(Path::new("a.jpg")), "image/jpeg");
+        assert_eq!(mime_from_ext(Path::new("a.jpeg")), "image/jpeg");
+        assert_eq!(mime_from_ext(Path::new("a.png")), "image/png");
+        assert_eq!(mime_from_ext(Path::new("a.gif")), "image/gif");
+        assert_eq!(mime_from_ext(Path::new("a.webp")), "image/webp");
+        assert_eq!(mime_from_ext(Path::new("a.svg")), "image/svg+xml");
+        assert_eq!(mime_from_ext(Path::new("a.txt")), "application/octet-stream");
+    }
+
+    #[test]
+    fn base64_encode_basic() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
+    }
+
+    #[tokio::test]
+    async fn read_with_offset_and_limit() {
+        let dir = std::env::temp_dir().join("omegon-test-read");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        // Read all
+        let result = execute(&file, None, None).await.unwrap();
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("line1"));
+        assert!(text.contains("line5"));
+
+        // Offset 3 (1-indexed) = start from line3
+        let result = execute(&file, Some(3), None).await.unwrap();
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(!text.contains("line1"));
+        assert!(!text.contains("line2"));
+        assert!(text.contains("line3"));
+
+        // Limit 2
+        let result = execute(&file, Some(1), Some(2)).await.unwrap();
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(!text.contains("line3"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_nonexistent_file() {
+        let result = execute(Path::new("/tmp/omegon-nonexistent-file.xyz"), None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_shows_remaining_count() {
+        let dir = std::env::temp_dir().join("omegon-test-read-remaining");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("big.txt");
+        let content: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute(&file, Some(1), Some(5)).await.unwrap();
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("more lines in file"), "should show remaining: {text}");
+        assert!(text.contains("offset=6"), "should suggest next offset");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 struct Base64Encoder<W: std::io::Write> {
     writer: W,
     buf: [u8; 3],

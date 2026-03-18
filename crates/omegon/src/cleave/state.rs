@@ -104,3 +104,72 @@ impl CleaveState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_plan() -> super::super::plan::CleavePlan {
+        serde_json::from_str(r#"{
+            "children": [
+                {"label": "alpha", "description": "do alpha", "scope": ["src/"], "depends_on": []},
+                {"label": "beta", "description": "do beta", "scope": ["tests/"], "depends_on": ["alpha"]}
+            ],
+            "rationale": "test plan"
+        }"#).unwrap()
+    }
+
+    #[test]
+    fn from_plan_creates_correct_children() {
+        let plan = sample_plan();
+        let state = CleaveState::from_plan("run-1", "fix bugs", Path::new("/repo"), Path::new("/ws"), &plan, "anthropic:sonnet");
+        assert_eq!(state.children.len(), 2);
+        assert_eq!(state.children[0].label, "alpha");
+        assert_eq!(state.children[0].branch.as_deref(), Some("cleave/0-alpha"));
+        assert_eq!(state.children[0].status, ChildStatus::Pending);
+        assert_eq!(state.children[1].depends_on, vec!["alpha"]);
+        assert_eq!(state.children[1].execute_model.as_deref(), Some("anthropic:sonnet"));
+    }
+
+    #[test]
+    fn state_save_load_round_trip() {
+        let plan = sample_plan();
+        let mut state = CleaveState::from_plan("run-1", "fix bugs", Path::new("/repo"), Path::new("/ws"), &plan, "model");
+        state.children[0].status = ChildStatus::Completed;
+        state.children[0].duration_secs = Some(42.5);
+
+        let tmp = std::env::temp_dir().join("omegon-test-state.json");
+        state.save(&tmp).unwrap();
+
+        let loaded = CleaveState::load(&tmp).unwrap();
+        assert_eq!(loaded.run_id, "run-1");
+        assert_eq!(loaded.children[0].status, ChildStatus::Completed);
+        assert_eq!(loaded.children[0].duration_secs, Some(42.5));
+        assert_eq!(loaded.children[1].status, ChildStatus::Pending);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn state_serializes_camel_case() {
+        let plan = sample_plan();
+        let state = CleaveState::from_plan("run-1", "test", Path::new("/r"), Path::new("/w"), &plan, "m");
+        let json = serde_json::to_string(&state).unwrap();
+        // camelCase field names
+        assert!(json.contains("runId"), "should use camelCase: {json}");
+        assert!(json.contains("childId"));
+        assert!(json.contains("dependsOn"));
+        assert!(json.contains("repoPath"));
+        // snake_case status values
+        assert!(json.contains("\"pending\""));
+    }
+
+    #[test]
+    fn child_status_deserializes_from_snake_case() {
+        let json = r#"{"child_id":0,"label":"a","description":"d","scope":[],"depends_on":[],"status":"completed","backend":"native"}"#;
+        // camelCase version
+        let json_camel = r#"{"childId":0,"label":"a","description":"d","scope":[],"dependsOn":[],"status":"completed","backend":"native"}"#;
+        let child: ChildState = serde_json::from_str(json_camel).unwrap();
+        assert_eq!(child.status, ChildStatus::Completed);
+    }
+}

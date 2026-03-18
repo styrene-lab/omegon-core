@@ -569,4 +569,52 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&tmp);
     }
+
+    #[test]
+    fn intent_tracks_files_from_tool_calls() {
+        let mut intent = IntentDocument::default();
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "read".into(), arguments: serde_json::json!({"path": "src/foo.rs"}) },
+            ToolCall { id: "2".into(), name: "edit".into(), arguments: serde_json::json!({"path": "src/bar.rs"}) },
+            ToolCall { id: "3".into(), name: "write".into(), arguments: serde_json::json!({"path": "src/new.rs"}) },
+            ToolCall { id: "4".into(), name: "bash".into(), arguments: serde_json::json!({"command": "ls"}) },
+        ];
+        intent.update_from_tools(&calls, &[]);
+        assert!(intent.files_read.contains(&PathBuf::from("src/foo.rs")));
+        assert!(intent.files_modified.contains(&PathBuf::from("src/bar.rs")));
+        assert!(intent.files_modified.contains(&PathBuf::from("src/new.rs")));
+        assert_eq!(intent.files_read.len(), 1);
+        assert_eq!(intent.files_modified.len(), 2);
+        assert_eq!(intent.stats.tool_calls, 4);
+    }
+
+    #[test]
+    fn loaded_session_messages_stay_within_decay_window() {
+        let mut conv = ConversationState::new();
+        conv.intent.stats.turns = 10;
+        conv.push_user("old task".into());
+        conv.push_assistant(AssistantMessage {
+            text: "long response with thinking".into(),
+            thinking: Some("deep reasoning here".into()),
+            tool_calls: vec![],
+            raw: serde_json::Value::Null,
+        });
+
+        let tmp = std::env::temp_dir().join("omegon-test-decay-session.json");
+        conv.save_session(&tmp).unwrap();
+
+        let loaded = ConversationState::load_session(&tmp).unwrap();
+        // After load, all messages are at last_turn=10.
+        // With decay_window=10, messages at turn 10 with current_turn=10 → age 0 → NOT decayed.
+        let view = loaded.build_llm_view();
+        if let LlmMessage::Assistant { thinking, .. } = &view[1] {
+            // Thinking should be PRESERVED (not decayed) because the message
+            // is within the decay window after load
+            assert!(!thinking.is_empty(), "thinking should be preserved after load, got empty");
+        } else {
+            panic!("expected assistant message at index 1");
+        }
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

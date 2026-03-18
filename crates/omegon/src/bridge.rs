@@ -370,3 +370,123 @@ impl LlmBridge for MockBridge {
         Ok(rx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_message_user_round_trip() {
+        let msg = LlmMessage::User { content: "hello".into() };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""role":"user"#));
+        let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            LlmMessage::User { content } => assert_eq!(content, "hello"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn llm_message_assistant_with_tool_calls() {
+        let msg = LlmMessage::Assistant {
+            text: vec!["I'll help".into()],
+            thinking: vec![],
+            tool_calls: vec![WireToolCall {
+                id: "tc1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "ls"}),
+            }],
+            raw: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""role":"assistant"#));
+        assert!(json.contains(r#""name":"bash"#));
+        // Thinking should be omitted (skip_serializing_if)
+        assert!(!json.contains("thinking"));
+
+        let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            LlmMessage::Assistant { tool_calls, .. } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "bash");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn llm_message_tool_result_round_trip() {
+        let msg = LlmMessage::ToolResult {
+            call_id: "tc1".into(),
+            tool_name: "read".into(),
+            content: "file contents here".into(),
+            is_error: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""role":"tool_result"#));
+        let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            LlmMessage::ToolResult { call_id, is_error, .. } => {
+                assert_eq!(call_id, "tc1");
+                assert!(!is_error);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn llm_event_deserialization() {
+        let text_delta = r#"{"type":"text_delta","delta":"hello "}"#;
+        let event: LlmEvent = serde_json::from_str(text_delta).unwrap();
+        match event {
+            LlmEvent::TextDelta { delta } => assert_eq!(delta, "hello "),
+            _ => panic!("expected TextDelta"),
+        }
+
+        let done = r#"{"type":"done","message":{"text":"done"}}"#;
+        let event: LlmEvent = serde_json::from_str(done).unwrap();
+        match event {
+            LlmEvent::Done { message } => assert!(message.is_object()),
+            _ => panic!("expected Done"),
+        }
+
+        let error = r#"{"type":"error","message":"rate limited"}"#;
+        let event: LlmEvent = serde_json::from_str(error).unwrap();
+        match event {
+            LlmEvent::Error { message } => assert!(message.contains("rate")),
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn llm_event_toolcall_end() {
+        let json = r#"{"type":"toolcall_end","tool_call":{"id":"tc1","name":"edit","arguments":{"path":"foo.rs"}}}"#;
+        let event: LlmEvent = serde_json::from_str(json).unwrap();
+        match event {
+            LlmEvent::ToolCallEnd { tool_call } => {
+                assert_eq!(tool_call.name, "edit");
+                assert_eq!(tool_call.id, "tc1");
+            }
+            _ => panic!("expected ToolCallEnd"),
+        }
+    }
+
+    #[test]
+    fn bridge_response_with_event() {
+        let json = r#"{"id":1,"event":{"type":"text_delta","delta":"hi"}}"#;
+        let resp: BridgeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, 1);
+        assert!(resp.event.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn bridge_response_with_error() {
+        let json = r#"{"id":2,"error":"connection refused"}"#;
+        let resp: BridgeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, 2);
+        assert!(resp.event.is_none());
+        assert_eq!(resp.error.unwrap(), "connection refused");
+    }
+}
