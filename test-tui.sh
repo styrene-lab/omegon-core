@@ -149,23 +149,24 @@ else
 fi
 
 echo ""
-echo "=== Test 8: /exit command exits ==="
-send "/exit"
-send Enter
+echo "=== Test 8: Double Ctrl+C exits ==="
+send C-c
+sleep 0.5
+send C-c
 sleep 2
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "  ✗ Session still alive after /exit"
-  # Try harder
-  send C-c
+  # Fallback: /exit
+  send "/exit"
+  send Enter
   sleep 1
   if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "  ✗ Session still alive after Ctrl+C fallback"
+    echo "  ✗ Session still alive after double Ctrl+C and /exit"
     FAILURES=$((FAILURES + 1))
   else
-    echo "  ✓ TUI exited on Ctrl+C fallback"
+    echo "  ✓ TUI exited on /exit fallback"
   fi
 else
-  echo "  ✓ TUI exited cleanly on /exit"
+  echo "  ✓ TUI exited cleanly on double Ctrl+C"
 fi
 
 echo ""

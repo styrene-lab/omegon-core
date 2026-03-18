@@ -364,6 +364,9 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<tui::TuiCommand>(16);
 
+    // Shared cancel token: TUI writes (on Escape/Ctrl+C), agent loop reads
+    let shared_cancel: tui::SharedCancel = std::sync::Arc::new(std::sync::Mutex::new(None));
+
     // ─── Launch TUI ─────────────────────────────────────────────────────
     let is_oauth = providers::resolve_api_key_sync(
         cli.model.split(':').next().unwrap_or("anthropic")
@@ -373,17 +376,14 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         cwd: agent.cwd.to_string_lossy().to_string(),
         is_oauth,
     };
+    let tui_cancel = shared_cancel.clone();
     let tui_handle = tokio::spawn(async move {
-        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_config).await {
+        if let Err(e) = tui::run_tui(events_rx, command_tx, tui_config, tui_cancel).await {
             tracing::error!("TUI error: {e}");
         }
     });
 
     // ─── Interactive agent loop ─────────────────────────────────────────
-    // Each prompt gets its own cancellation token so Ctrl+C only cancels
-    // the current turn, not future turns.
-    let mut active_cancel: Option<CancellationToken> = None;
-
     loop {
         // Wait for user input from TUI
         let cmd = match command_rx.recv().await {
@@ -393,11 +393,6 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
 
         match cmd {
             tui::TuiCommand::Quit => break,
-            tui::TuiCommand::Cancel => {
-                if let Some(ref cancel) = active_cancel {
-                    cancel.cancel();
-                }
-            }
             tui::TuiCommand::UserPrompt(text) => {
                 agent.conversation.push_user(text);
 
@@ -409,8 +404,12 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     model: cli.model.clone(),
                 };
 
+                // Install a fresh cancel token for this turn
                 let cancel = CancellationToken::new();
-                active_cancel = Some(cancel.clone());
+                if let Ok(mut guard) = shared_cancel.lock() {
+                    *guard = Some(cancel.clone());
+                }
+
                 if let Err(e) = r#loop::run(
                     bridge.as_ref(),
                     &agent.tools,
@@ -422,7 +421,11 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 ).await {
                     tracing::error!("Agent loop error: {e}");
                 }
-                active_cancel.take();
+
+                // Clear the cancel token
+                if let Ok(mut guard) = shared_cancel.lock() {
+                    guard.take();
+                }
             }
         }
     }

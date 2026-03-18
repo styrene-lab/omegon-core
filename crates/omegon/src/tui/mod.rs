@@ -26,7 +26,9 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use tokio::sync::{broadcast, mpsc};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use omegon_traits::AgentEvent;
 
@@ -40,11 +42,13 @@ use self::editor::Editor;
 pub enum TuiCommand {
     /// User submitted a prompt.
     UserPrompt(String),
-    /// User pressed Ctrl+C during execution (cancel current turn).
-    Cancel,
-    /// User wants to quit (Ctrl+C at idle editor, or /exit).
+    /// User wants to quit (double Ctrl+C, or /exit).
     Quit,
 }
+
+/// Shared cancel token — the TUI writes it on Escape/Ctrl+C,
+/// the agent loop checks it. Arc so both tasks can access it.
+pub type SharedCancel = std::sync::Arc<std::sync::Mutex<Option<CancellationToken>>>;
 
 /// Application state for the TUI.
 pub struct App {
@@ -70,6 +74,10 @@ pub struct App {
     footer_data: FooterData,
     /// Theme for all rendering.
     theme: Box<dyn theme::Theme>,
+    /// Shared cancel token — Escape/Ctrl+C cancels the active agent turn.
+    cancel: SharedCancel,
+    /// Timestamp of last Ctrl+C (for double-tap quit detection).
+    last_ctrl_c: Option<std::time::Instant>,
 }
 
 impl App {
@@ -93,7 +101,20 @@ impl App {
                 ..Default::default()
             },
             theme: theme::default_theme(),
+            cancel: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_ctrl_c: None,
         }
+    }
+
+    /// Try to cancel the active agent turn. Returns true if cancelled.
+    fn interrupt(&self) -> bool {
+        if let Ok(guard) = self.cancel.lock() {
+            if let Some(ref token) = *guard {
+                token.cancel();
+                return true;
+            }
+        }
+        false
     }
 
     /// Update the dashboard with lifecycle context.
@@ -192,8 +213,38 @@ impl App {
             .block(editor_block);
         frame.render_widget(editor_widget, chunks[2]);
 
-        // Position cursor in editor (only when not agent_active)
+        // Command palette popup (above editor when typing /)
         if !self.agent_active {
+            let matches = self.matching_commands();
+            if !matches.is_empty() {
+                let palette_height = matches.len().min(8) as u16 + 2; // +2 for borders
+                let editor_area = chunks[2];
+                let palette_area = Rect {
+                    x: editor_area.x,
+                    y: editor_area.y.saturating_sub(palette_height),
+                    width: editor_area.width.min(50),
+                    height: palette_height,
+                };
+
+                let items: Vec<Line<'static>> = matches.iter().map(|(name, desc)| {
+                    Line::from(vec![
+                        Span::styled(format!(" /{name}"), t.style_accent()),
+                        Span::styled(format!("  {desc}"), t.style_muted()),
+                    ])
+                }).collect();
+
+                let palette = Paragraph::new(items)
+                    .block(Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(t.style_border())
+                        .title(Span::styled(" commands ", t.style_dim())));
+
+                // Clear the area first (prevents bleed-through)
+                frame.render_widget(ratatui::widgets::Clear, palette_area);
+                frame.render_widget(palette, palette_area);
+            }
+
+            // Position cursor in editor
             let editor_area = chunks[2];
             let cursor_x = editor_area.x + 1 + self.editor.cursor_position() as u16;
             let cursor_y = editor_area.y + 1; // +1 for border
@@ -204,33 +255,60 @@ impl App {
         }
     }
 
+    /// All available slash commands with descriptions.
+    const COMMANDS: &'static [(&'static str, &'static str)] = &[
+        ("help", "show available commands"),
+        ("model", "show current model"),
+        ("stats", "show session statistics"),
+        ("compact", "trigger context compaction"),
+        ("clear", "clear conversation display"),
+        ("exit", "quit the session"),
+    ];
+
     /// Handle slash commands that are processed locally (not sent to the agent).
     /// Returns Some(response) if handled, None if not a recognized local command.
-    fn handle_slash_command(&self, text: &str) -> Option<String> {
+    fn handle_slash_command(&mut self, text: &str) -> Option<String> {
         let trimmed = text.trim();
         if !trimmed.starts_with('/') {
             return None;
         }
         let (cmd, _args) = trimmed[1..].split_once(' ').unwrap_or((&trimmed[1..], ""));
         match cmd {
-            "help" => Some(
-                "Available commands:\n\
-                 /help    — show this help\n\
-                 /model   — show current model\n\
-                 /stats   — show session statistics\n\
-                 /exit    — quit the session\n\
-                 \n\
-                 All other input is sent as a prompt to the agent."
-                    .into(),
-            ),
+            "help" => {
+                let lines: Vec<String> = Self::COMMANDS.iter()
+                    .map(|(name, desc)| format!("  /{name:<10} {desc}"))
+                    .collect();
+                Some(format!("Available commands:\n{}\n\nAll other input is sent as a prompt.", lines.join("\n")))
+            }
             "model" => Some(format!("Current model: {}", self.model)),
             "stats" => Some(format!(
                 "Session: {} turns, {} tool calls, {} compactions",
                 self.turn, self.tool_calls, self.dashboard.compactions,
             )),
+            "compact" => Some("Compaction will run automatically when context is full.".into()),
+            "clear" => {
+                self.conversation = ConversationView::new();
+                Some("Conversation cleared.".into())
+            }
             "exit" | "quit" => None, // handled by caller
             _ => None,               // unknown slash command — send to agent
         }
+    }
+
+    /// Get matching commands for the current editor text (for palette display).
+    fn matching_commands(&self) -> Vec<(&'static str, &'static str)> {
+        let text = self.editor.render_text();
+        if !text.starts_with('/') || text.len() < 1 {
+            return vec![];
+        }
+        let prefix = &text[1..]; // strip the /
+        if prefix.is_empty() {
+            return Self::COMMANDS.to_vec();
+        }
+        Self::COMMANDS.iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .copied()
+            .collect()
     }
 
     fn history_up(&mut self) {
@@ -307,6 +385,7 @@ pub async fn run_tui(
     mut events_rx: broadcast::Receiver<AgentEvent>,
     command_tx: mpsc::Sender<TuiCommand>,
     config: TuiConfig,
+    cancel: SharedCancel,
 ) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
@@ -325,6 +404,7 @@ pub async fn run_tui(
     let mut app = App::new(config.model.clone());
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
+    app.cancel = cancel;
     app.conversation.push_system(
         "Ω Omegon interactive session\n\
          Type a message and press Enter. /help for commands. Ctrl+C to cancel/quit."
@@ -340,12 +420,41 @@ pub async fn run_tui(
         if has_terminal_event
             && let Event::Key(key) = event::read()? {
                 match (key.code, key.modifiers) {
+                    // ── Interrupt: Escape or Ctrl+C ─────────────────
+                    (KeyCode::Esc, _) => {
+                        if app.agent_active {
+                            app.interrupt();
+                            app.conversation.push_system("⎋ Interrupted");
+                        }
+                    }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         if app.agent_active {
-                            let _ = command_tx.send(TuiCommand::Cancel).await;
+                            // Single Ctrl+C: interrupt
+                            app.interrupt();
+                            app.conversation.push_system("⎋ Interrupted (Ctrl+C)");
                         } else {
-                            app.should_quit = true;
-                            let _ = command_tx.send(TuiCommand::Quit).await;
+                            // Double Ctrl+C within 1s: quit
+                            let now = std::time::Instant::now();
+                            if let Some(last) = app.last_ctrl_c {
+                                if now.duration_since(last).as_millis() < 1000 {
+                                    app.should_quit = true;
+                                    let _ = command_tx.send(TuiCommand::Quit).await;
+                                } else {
+                                    app.last_ctrl_c = Some(now);
+                                    app.conversation.push_system("Press Ctrl+C again to quit");
+                                }
+                            } else {
+                                app.last_ctrl_c = Some(now);
+                                app.conversation.push_system("Press Ctrl+C again to quit");
+                            }
+                        }
+                    }
+                    (KeyCode::Tab, _) if !app.agent_active => {
+                        // Tab completion for slash commands
+                        let matches = app.matching_commands();
+                        if matches.len() == 1 {
+                            let cmd = format!("/{}", matches[0].0);
+                            app.editor.set_text(&cmd);
                         }
                     }
                     (KeyCode::Enter, _) if !app.agent_active => {
