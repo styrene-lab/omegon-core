@@ -1,7 +1,9 @@
 //! Conversation view — scrollable message display with streaming support.
 
 use ratatui::text::{Line, Span};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
+
+use super::theme::Theme;
 
 /// A message in the conversation view.
 #[derive(Debug, Clone)]
@@ -128,19 +130,22 @@ impl ConversationView {
         self.scroll
     }
 
-    /// Render conversation to ratatui Lines.
+    /// Render conversation to ratatui Lines (legacy — uses hardcoded colors).
     pub fn render_text(&self) -> Vec<Line<'static>> {
+        // Fallback for tests — use a default theme
+        self.render_themed(&super::theme::Alpharius)
+    }
+
+    /// Render conversation to ratatui Lines with theme colors.
+    pub fn render_themed(&self, t: &dyn Theme) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for msg in &self.messages {
             match msg {
                 Message::User(text) => {
                     lines.push(Line::from(vec![
-                        Span::styled("▸ ", Style::default().fg(Color::Cyan)),
-                        Span::styled(
-                            text.clone(),
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled("▸ ", t.style_accent()),
+                        Span::styled(text.clone(), t.style_user_input()),
                     ]));
                     lines.push(Line::from(""));
                 }
@@ -148,7 +153,7 @@ impl ConversationView {
                     for line in text.lines() {
                         lines.push(Line::from(Span::styled(
                             line.to_string(),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                            Style::default().fg(t.accent_muted()),
                         )));
                     }
                     lines.push(Line::from(""));
@@ -159,22 +164,21 @@ impl ConversationView {
                     complete,
                 } => {
                     if !thinking.is_empty() {
-                        // Show thinking in dim
                         for line in thinking.lines() {
                             lines.push(Line::from(Span::styled(
                                 line.to_string(),
-                                Style::default().fg(Color::DarkGray),
+                                t.style_dim(),
                             )));
                         }
                     }
                     for line in text.lines() {
-                        lines.push(Line::from(Span::raw(line.to_string())));
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            t.style_fg(),
+                        )));
                     }
                     if !*complete && text.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "...",
-                            Style::default().fg(Color::DarkGray),
-                        )));
+                        lines.push(Line::from(Span::styled("...", t.style_dim())));
                     }
                     lines.push(Line::from(""));
                 }
@@ -186,12 +190,12 @@ impl ConversationView {
                 } => {
                     let (icon, color) = if *complete {
                         if *is_error {
-                            ("✗", Color::Red)
+                            ("✗", t.error())
                         } else {
-                            ("✓", Color::Green)
+                            ("✓", t.success())
                         }
                     } else {
-                        ("→", Color::Yellow)
+                        ("→", t.warning())
                     };
                     lines.push(Line::from(vec![
                         Span::styled(format!("{icon} "), Style::default().fg(color)),

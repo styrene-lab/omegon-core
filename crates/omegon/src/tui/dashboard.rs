@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::lifecycle::types::*;
+use super::theme::Theme;
 
 /// Dashboard state — updated from lifecycle scanning.
 #[derive(Default)]
@@ -39,10 +40,14 @@ pub struct ChangeSummary {
 
 impl DashboardState {
     pub fn render(&self, area: Rect, frame: &mut Frame) {
+        self.render_themed(area, frame, &super::theme::Alpharius);
+    }
+
+    pub fn render_themed(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
         let block = Block::default()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(" Ω Dashboard ", Style::default().fg(Color::Cyan)));
+            .border_style(t.style_border())
+            .title(Span::styled(" Ω Dashboard ", t.style_accent_bold()));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -51,27 +56,20 @@ impl DashboardState {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} ", node.status.icon()),
-                    Style::default().fg(status_color(node.status)),
+                    Style::default().fg(status_color_themed(node.status, t)),
                 ),
-                Span::styled(
-                    node.id.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(node.id.clone(), t.style_heading()),
             ]));
-            // Title (truncated)
             let title = if node.title.len() > 35 {
                 format!("{}…", &node.title[..34])
             } else {
                 node.title.clone()
             };
-            lines.push(Line::from(Span::styled(
-                format!("  {title}"),
-                Style::default().fg(Color::Gray),
-            )));
+            lines.push(Line::from(Span::styled(format!("  {title}"), t.style_muted())));
             if node.decisions > 0 || node.open_questions > 0 {
                 lines.push(Line::from(Span::styled(
                     format!("  {}● {}? ", node.decisions, node.open_questions),
-                    Style::default().fg(Color::DarkGray),
+                    t.style_dim(),
                 )));
             }
             lines.push(Line::from(""));
@@ -79,10 +77,7 @@ impl DashboardState {
 
         // ─── Active Changes ─────────────────────────────────────────
         if !self.active_changes.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "OpenSpec",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
+            lines.push(Line::from(Span::styled("OpenSpec", t.style_heading())));
             for change in &self.active_changes {
                 let icon = match change.stage {
                     ChangeStage::Proposed => "◌",
@@ -98,32 +93,29 @@ impl DashboardState {
                     String::new()
                 };
                 let color = match change.stage {
-                    ChangeStage::Implementing => Color::Yellow,
-                    ChangeStage::Verifying => Color::Green,
-                    _ => Color::DarkGray,
+                    ChangeStage::Implementing => t.warning(),
+                    ChangeStage::Verifying => t.success(),
+                    _ => t.dim(),
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {icon} "), Style::default().fg(color)),
                     Span::styled(change.name.clone(), Style::default().fg(color)),
-                    Span::styled(progress, Style::default().fg(Color::DarkGray)),
+                    Span::styled(progress, t.style_dim()),
                 ]));
             }
             lines.push(Line::from(""));
         }
 
         // ─── Session Stats ──────────────────────────────────────────
+        lines.push(Line::from(Span::styled("Session", t.style_heading())));
         lines.push(Line::from(Span::styled(
-            "Session",
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  {} turns, {} tools", self.turns, self.tool_calls),
-            Style::default().fg(Color::DarkGray),
+            format!("  {} turns, {} tool calls", self.turns, self.tool_calls),
+            t.style_muted(),
         )));
         if self.compactions > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  {} compactions", self.compactions),
-                Style::default().fg(Color::DarkGray),
+                t.style_muted(),
             )));
         }
 
@@ -134,13 +126,13 @@ impl DashboardState {
     }
 }
 
-fn status_color(status: NodeStatus) -> Color {
+fn status_color_themed(status: NodeStatus, t: &dyn Theme) -> Color {
     match status {
-        NodeStatus::Seed => Color::DarkGray,
-        NodeStatus::Exploring => Color::Cyan,
-        NodeStatus::Resolved | NodeStatus::Decided | NodeStatus::Implemented => Color::Green,
-        NodeStatus::Implementing => Color::Yellow,
-        NodeStatus::Blocked => Color::Red,
-        NodeStatus::Deferred => Color::Yellow,
+        NodeStatus::Seed => t.dim(),
+        NodeStatus::Exploring => t.accent(),
+        NodeStatus::Resolved | NodeStatus::Decided | NodeStatus::Implemented => t.success(),
+        NodeStatus::Implementing => t.warning(),
+        NodeStatus::Blocked => t.error(),
+        NodeStatus::Deferred => t.caution(),
     }
 }

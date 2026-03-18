@@ -13,6 +13,7 @@
 pub mod conversation;
 pub mod dashboard;
 pub mod editor;
+pub mod theme;
 
 use std::io;
 use std::time::Duration;
@@ -63,6 +64,8 @@ pub struct App {
     history_idx: Option<usize>,
     /// Dashboard state.
     dashboard: DashboardState,
+    /// Theme for all rendering.
+    theme: Box<dyn theme::Theme>,
 }
 
 impl App {
@@ -78,6 +81,7 @@ impl App {
             history: Vec::new(),
             history_idx: None,
             dashboard: DashboardState::default(),
+            theme: theme::default_theme(),
         }
     }
 
@@ -142,9 +146,9 @@ impl App {
             .split(main_area);
 
         // Conversation view
-        let conv_block = Block::default()
-            .borders(Borders::NONE);
-        let conv_text = self.conversation.render_text();
+        let t = &self.theme;
+        let conv_block = Block::default().borders(Borders::NONE);
+        let conv_text = self.conversation.render_themed(t.as_ref());
         let conv_widget = Paragraph::new(conv_text)
             .block(conv_block)
             .wrap(Wrap { trim: false })
@@ -153,31 +157,46 @@ impl App {
 
         // Dashboard (right panel)
         if let Some(dash) = dash_area {
-            self.dashboard.render(dash, frame);
+            self.dashboard.render_themed(dash, frame, t.as_ref());
         }
 
-        // Footer
-        let status_str = if self.agent_active { "working" } else { "idle" };
+        // Footer — styled HUD line
+        let status_icon = if self.agent_active { "⟳" } else { "●" };
+        let status_color = if self.agent_active { t.warning() } else { t.success() };
         let model_short = self.model.split(':').next_back().unwrap_or(&self.model);
-        let footer_text = format!(
-            " Ω {model_short} │ turn {} │ {} tools │ {status_str}",
-            self.turn, self.tool_calls,
-        );
-        let footer = Paragraph::new(footer_text)
-            .style(Style::default().fg(Color::DarkGray).bg(Color::Black));
+        let tc = self.tool_calls;
+        let sep = Span::styled("│ ", Style::default().fg(t.dim()));
+        let footer_spans = vec![
+            Span::styled(" Ω ", t.style_accent_bold()),
+            Span::styled(format!("{model_short} "), Style::default().fg(t.muted())),
+            sep.clone(),
+            Span::styled(format!("turn {} ", self.turn), Style::default().fg(t.muted())),
+            sep.clone(),
+            Span::styled(format!("{tc} tool{} ", if tc == 1 { "" } else { "s" }), Style::default().fg(t.muted())),
+            sep,
+            Span::styled(format!("{status_icon} "), Style::default().fg(status_color)),
+            Span::styled(
+                if self.agent_active { "working" } else { "idle" },
+                Style::default().fg(status_color),
+            ),
+        ];
+        let footer = Paragraph::new(Line::from(footer_spans))
+            .style(Style::default().bg(t.card_bg()));
         frame.render_widget(footer, chunks[1]);
 
         // Editor
         let editor_block = Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(t.style_border_dim())
             .title(if self.agent_active {
-                Span::styled(" ⟳ ", Style::default().fg(Color::Yellow))
+                Span::styled(" ⟳ ", t.style_warning())
             } else {
-                Span::styled(" ▸ ", Style::default().fg(Color::Cyan))
+                Span::styled(" ▸ ", t.style_accent())
             });
         let editor_text = self.editor.render_text();
-        let editor_widget = Paragraph::new(editor_text).block(editor_block);
+        let editor_widget = Paragraph::new(editor_text)
+            .style(t.style_fg())
+            .block(editor_block);
         frame.render_widget(editor_widget, chunks[2]);
 
         // Position cursor in editor (only when not agent_active)

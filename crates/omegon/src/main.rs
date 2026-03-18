@@ -137,24 +137,49 @@ async fn main() -> anyhow::Result<()> {
 
     // ─── Logging setup ──────────────────────────────────────────────────
     // Priority: RUST_LOG env > --log-level flag > "info" default
+    let is_interactive = matches!(cli.command, Some(Commands::Interactive));
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
-    // Stderr layer — always present, respects filter
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_writer(std::io::stderr);
-
-    // Optional file layer — uses the same filter as stderr.
-    // For full diagnostics use --log-level debug or RUST_LOG=debug.
+    // Interactive mode: tracing MUST NOT go to stderr (ratatui owns it).
+    // Logs go to --log-file or ~/.pi/agent/omegon.log as default.
+    // Headless mode: stderr is fine.
     let _guard: Option<tracing_appender::non_blocking::WorkerGuard>;
-    if let Some(ref log_path) = cli.log_file {
+
+    if is_interactive {
+        let log_path = cli.log_file.clone().unwrap_or_else(|| {
+            let dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".pi/agent");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("omegon.log")
+        });
         let dir = log_path.parent().unwrap_or(Path::new("."));
         let name = log_path.file_name().unwrap_or_default().to_str().unwrap_or("omegon.log");
         let file_appender = tracing_appender::rolling::never(dir, name);
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         _guard = Some(guard);
 
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(non_blocking);
+
+        // No stderr layer in interactive mode
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
+            .init();
+    } else if let Some(ref log_path) = cli.log_file {
+        let dir = log_path.parent().unwrap_or(Path::new("."));
+        let name = log_path.file_name().unwrap_or_default().to_str().unwrap_or("omegon.log");
+        let file_appender = tracing_appender::rolling::never(dir, name);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        _guard = Some(guard);
+
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_writer(std::io::stderr);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_target(true)
             .with_ansi(false)
@@ -167,6 +192,10 @@ async fn main() -> anyhow::Result<()> {
             .init();
     } else {
         _guard = None;
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_writer(std::io::stderr);
+
         tracing_subscriber::registry()
             .with(filter)
             .with(stderr_layer)
