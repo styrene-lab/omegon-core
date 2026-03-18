@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleavePlan {
     pub children: Vec<ChildPlan>,
+    #[serde(default)]
     pub rationale: String,
 }
 
@@ -23,8 +24,8 @@ impl CleavePlan {
     /// Parse a plan from JSON.
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
         let plan: CleavePlan = serde_json::from_str(json)?;
-        if plan.children.len() < 2 {
-            anyhow::bail!("Cleave plan must have at least 2 children, got {}", plan.children.len());
+        if plan.children.is_empty() {
+            anyhow::bail!("Cleave plan must have at least 1 child");
         }
         // Validate dependency references
         let labels: Vec<&str> = plan.children.iter().map(|c| c.label.as_str()).collect();
@@ -61,12 +62,26 @@ mod tests {
     }
 
     #[test]
-    fn reject_single_child() {
+    fn parse_plan_without_rationale() {
+        let json = r#"{
+            "children": [
+                {"label": "a", "description": "do A", "scope": ["a.rs"]},
+                {"label": "b", "description": "do B", "scope": ["b.rs"]}
+            ]
+        }"#;
+        let plan = CleavePlan::from_json(json).unwrap();
+        assert_eq!(plan.children.len(), 2);
+        assert_eq!(plan.rationale, "");
+    }
+
+    #[test]
+    fn accept_single_child() {
         let json = r#"{
             "children": [{"label": "a", "description": "do A", "scope": ["a.rs"]}],
             "rationale": "test"
         }"#;
-        assert!(CleavePlan::from_json(json).is_err());
+        let plan = CleavePlan::from_json(json).unwrap();
+        assert_eq!(plan.children.len(), 1);
     }
 
     #[test]
