@@ -418,6 +418,7 @@ impl App {
         ("stats",    "session telemetry",                    &[]),
         ("compact",  "trigger context compaction",           &[]),
         ("clear",    "clear conversation display",           &[]),
+        ("detail",   "toggle tool display (compact/detailed)", &["compact", "detailed"]),
         ("context",  "toggle context window (200k/1M)",       &["200k", "1m"]),
         ("sessions", "list saved sessions",                  &[]),
         ("memory",   "memory stats",                        &[]),
@@ -492,6 +493,26 @@ impl App {
                     self.footer_data.context_percent, s.context_window,
                     s.model_short(), s.thinking.icon(), s.thinking.as_str(),
                 ))
+            }
+
+            "detail" => {
+                if args.is_empty() {
+                    // Toggle
+                    let current = self.settings().tool_detail;
+                    let next = match current {
+                        crate::settings::ToolDetail::Compact => crate::settings::ToolDetail::Detailed,
+                        crate::settings::ToolDetail::Detailed => crate::settings::ToolDetail::Compact,
+                    };
+                    self.update_settings(|s| s.tool_detail = next);
+                    self.conversation.tool_detail = next;
+                    SlashResult::Display(format!("Tool display → {}", next.as_str()))
+                } else if let Some(mode) = crate::settings::ToolDetail::parse(args) {
+                    self.update_settings(|s| s.tool_detail = mode);
+                    self.conversation.tool_detail = mode;
+                    SlashResult::Display(format!("Tool display → {}", mode.as_str()))
+                } else {
+                    SlashResult::Display(format!("Unknown mode: {args}. Options: compact, detailed"))
+                }
             }
 
             "context" => {
@@ -644,7 +665,13 @@ impl App {
             }
             AgentEvent::ToolStart { id, name, args } => {
                 let args_summary = crate::r#loop::summarize_tool_args(&name, &args);
-                self.conversation.push_tool_start(&id, &name, args_summary.as_deref());
+                // Full args for detailed view
+                let detail_args = match name.as_str() {
+                    "bash" => args.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    "read" | "edit" | "write" | "view" => args.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    _ => Some(serde_json::to_string_pretty(&args).unwrap_or_default()),
+                };
+                self.conversation.push_tool_start(&id, &name, args_summary.as_deref(), detail_args.as_deref());
                 self.tool_calls += 1;
                 self.last_tool_name = Some(name);
             }

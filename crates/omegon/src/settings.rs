@@ -29,6 +29,36 @@ pub struct Settings {
 
     /// Extended context mode — controls 200k vs 1M for Anthropic models.
     pub context_mode: ContextMode,
+
+    /// Tool display detail level.
+    pub tool_detail: ToolDetail,
+}
+
+/// Tool card display mode in the conversation view.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolDetail {
+    /// Single-line cards with truncated args + result preview.
+    #[default]
+    Compact,
+    /// Bordered cards showing full command + output (first 8 lines).
+    Detailed,
+}
+
+impl ToolDetail {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "compact" | "c" => Some(Self::Compact),
+            "detailed" | "detail" | "d" | "verbose" | "v" => Some(Self::Detailed),
+            _ => None,
+        }
+    }
 }
 
 /// Context window mode for providers that support multiple sizes.
@@ -83,6 +113,7 @@ impl Default for Settings {
             compaction_threshold: 0.75,
             context_window: 200_000,
             context_mode: ContextMode::Standard,
+            tool_detail: ToolDetail::Compact,
         }
     }
 }

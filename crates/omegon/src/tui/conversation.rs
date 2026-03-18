@@ -37,6 +37,10 @@ pub(crate) enum Message {
         is_error: bool,
         complete: bool,
         result_summary: Option<String>,
+        /// Full args for detailed view (e.g. complete bash command).
+        detail_args: Option<String>,
+        /// First lines of result for detailed view.
+        detail_result: Option<String>,
     },
     /// Lifecycle event (phase change, decomposition, etc.)
     Lifecycle {
@@ -53,6 +57,8 @@ pub struct ConversationView {
     scroll: u16,
     /// Whether we're currently receiving streaming text.
     streaming: bool,
+    /// Tool display mode — compact (single line) or detailed (bordered cards).
+    pub tool_detail: crate::settings::ToolDetail,
 }
 
 impl ConversationView {
@@ -61,6 +67,7 @@ impl ConversationView {
             messages: Vec::new(),
             scroll: 0,
             streaming: false,
+            tool_detail: crate::settings::ToolDetail::Compact,
         }
     }
 
@@ -115,7 +122,7 @@ impl ConversationView {
         }
     }
 
-    pub fn push_tool_start(&mut self, id: &str, name: &str, args_summary: Option<&str>) {
+    pub fn push_tool_start(&mut self, id: &str, name: &str, args_summary: Option<&str>, detail_args: Option<&str>) {
         self.messages.push(Message::Tool {
             id: id.to_string(),
             name: name.to_string(),
@@ -123,6 +130,8 @@ impl ConversationView {
             is_error: false,
             complete: false,
             result_summary: None,
+            detail_args: detail_args.map(|s| s.to_string()),
+            detail_result: None,
         });
         self.scroll = 0;
     }
@@ -134,14 +143,15 @@ impl ConversationView {
                 complete: c,
                 is_error: e,
                 result_summary: r,
+                detail_result: dr,
                 ..
             } = msg
                 && tool_id == id && !*c
             {
                 *c = true;
                 *e = is_error;
+                // Compact summary: first meaningful line
                 *r = result_text.and_then(|text| {
-                    // Extract a meaningful first non-empty line as preview
                     let line = text.lines()
                         .find(|l| {
                             let t = l.trim();
@@ -151,14 +161,20 @@ impl ConversationView {
                         })
                         .unwrap_or("").trim();
                     if line.is_empty() { None }
-                    else {
-                        let display = if line.len() > 100 {
-                            format!("{}…", &line[..99])
-                        } else {
-                            line.to_string()
-                        };
-                        Some(display)
+                    else if line.len() > 100 {
+                        Some(format!("{}…", &line[..99]))
+                    } else {
+                        Some(line.to_string())
                     }
+                });
+                // Detailed result: first 8 lines
+                *dr = result_text.map(|text| {
+                    let lines: Vec<&str> = text.lines().take(8).collect();
+                    let mut result = lines.join("\n");
+                    if text.lines().count() > 8 {
+                        result.push_str("\n  …");
+                    }
+                    result
                 });
                 break;
             }
@@ -288,35 +304,48 @@ impl ConversationView {
                     is_error,
                     complete,
                     result_summary,
+                    detail_args,
+                    detail_result,
                     ..
                 } => {
-                    // Check if this is the first tool in a sequence
                     let prev_is_tool = idx > 0 && matches!(self.messages.get(idx - 1), Some(Message::Tool { .. }));
                     let next_is_tool = matches!(self.messages.get(idx + 1), Some(Message::Tool { .. }));
 
-                    if !prev_is_tool {
-                        // First tool in a group — add a subtle header
-                        lines.push(Line::from(Span::styled(
-                            "  ┌",
-                            Style::default().fg(t.border_dim()),
-                        )));
-                    }
-
-                    lines.push(widgets::tool_card(
-                        name,
-                        *is_error,
-                        *complete,
-                        args_summary.as_deref(),
-                        result_summary.as_deref(),
-                        t,
-                    ));
-
-                    if !next_is_tool {
-                        // Last tool in group — close the bracket
-                        lines.push(Line::from(Span::styled(
-                            "  └",
-                            Style::default().fg(t.border_dim()),
-                        )));
+                    match self.tool_detail {
+                        crate::settings::ToolDetail::Detailed => {
+                            // Bordered card with full args + result
+                            lines.extend(widgets::tool_card_detailed(
+                                name,
+                                *is_error,
+                                *complete,
+                                detail_args.as_deref().or(args_summary.as_deref()),
+                                detail_result.as_deref().or(result_summary.as_deref()),
+                                t,
+                            ));
+                        }
+                        crate::settings::ToolDetail::Compact => {
+                            // Single-line compact card with grouping brackets
+                            if !prev_is_tool {
+                                lines.push(Line::from(Span::styled(
+                                    "  ┌",
+                                    Style::default().fg(t.border_dim()),
+                                )));
+                            }
+                            lines.push(widgets::tool_card(
+                                name,
+                                *is_error,
+                                *complete,
+                                args_summary.as_deref(),
+                                result_summary.as_deref(),
+                                t,
+                            ));
+                            if !next_is_tool {
+                                lines.push(Line::from(Span::styled(
+                                    "  └",
+                                    Style::default().fg(t.border_dim()),
+                                )));
+                            }
+                        }
                     }
                 }
 
@@ -369,7 +398,7 @@ mod tests {
     #[test]
     fn tool_lifecycle() {
         let mut cv = ConversationView::new();
-        cv.push_tool_start("tc1", "read", Some("src/main.rs"));
+        cv.push_tool_start("tc1", "read", Some("src/main.rs"), None);
         cv.push_tool_end("tc1", false, Some("245 lines"));
         if let Message::Tool {
             complete, is_error, args_summary, result_summary, ..
@@ -385,7 +414,7 @@ mod tests {
     #[test]
     fn tool_card_renders_with_bracket() {
         let mut cv = ConversationView::new();
-        cv.push_tool_start("t1", "edit", Some("lib.rs"));
+        cv.push_tool_start("t1", "edit", Some("lib.rs"), None);
         cv.push_tool_end("t1", false, Some("Applied edit"));
         let lines = cv.render_text();
         // First line is the ┌ bracket, second is the tool card, third is └
@@ -396,6 +425,24 @@ mod tests {
         assert!(card.contains("✓"), "card should have checkmark: {card}");
         assert!(card.contains("edit"), "card should have tool name: {card}");
         assert!(card.contains("lib.rs"), "card should have args: {card}");
+    }
+
+    #[test]
+    fn tool_card_detailed_view() {
+        let mut cv = ConversationView::new();
+        cv.tool_detail = crate::settings::ToolDetail::Detailed;
+        cv.push_tool_start("t1", "bash", Some("ls -la"), Some("ls -la /Users/cwilson/workspace"));
+        cv.push_tool_end("t1", false, Some("total 42\ndrwxr-xr-x  5 user  staff  160 Mar 18 10:00 .\ndrwxr-xr-x  3 user  staff   96 Mar 18 09:00 .."));
+        let lines = cv.render_text();
+        // Should have bordered card with header, command, separator, output, footer
+        assert!(lines.len() >= 5, "detailed card should have multiple lines, got {}", lines.len());
+        let all_text: String = lines.iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.to_string())
+            .collect::<Vec<_>>().join(" ");
+        assert!(all_text.contains("bash"), "should show tool name");
+        assert!(all_text.contains("ls -la"), "should show full command");
+        assert!(all_text.contains("total 42"), "should show output");
     }
 
     #[test]

@@ -322,6 +322,85 @@ pub fn tool_card<'a>(
     Line::from(spans)
 }
 
+/// Detailed tool card — bordered box showing full command + output.
+///
+/// ```text
+///   ┌ bash ──────────────────────────────────
+///   │ $ find . -maxdepth 1 -type f | head -20
+///   │ .npmignore
+///   │ README.md
+///   │ package.json
+///   └────────────────────────────────────────
+/// ```
+pub fn tool_card_detailed<'a>(
+    name: &str,
+    is_error: bool,
+    complete: bool,
+    detail_args: Option<&str>,
+    detail_result: Option<&str>,
+    t: &dyn Theme,
+) -> Vec<Line<'a>> {
+    let (icon, color) = if complete {
+        if is_error { ("✗", t.error()) } else { ("✓", t.success()) }
+    } else {
+        ("→", t.warning())
+    };
+
+    let border = Style::default().fg(t.border_dim());
+    let b = box_chars();
+    let mut lines = Vec::new();
+
+    // Header: ┌ ✓ bash ────────────────
+    let header_text = format!(" {} {icon} {name} ", b.tl);
+    let fill = 50usize.saturating_sub(visible_width(&header_text));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {}", b.tl), border),
+        Span::styled(format!(" {icon} "), Style::default().fg(color)),
+        Span::styled(name.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", b.h.repeat(fill)), border),
+    ]));
+
+    // Args lines: │ $ command...
+    if let Some(args) = detail_args {
+        let prefix = if name == "bash" { "$ " } else { "" };
+        for line in args.lines().take(3) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", b.v), border),
+                Span::styled(format!("{prefix}{line}"), Style::default().fg(t.fg())),
+            ]));
+        }
+    }
+
+    // Result lines: │ output...
+    if let Some(result) = detail_result {
+        if detail_args.is_some() {
+            // Thin separator between args and result
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", b.v), border),
+                Span::styled("─".repeat(40), Style::default().fg(t.border_dim())),
+            ]));
+        }
+        for line in result.lines().take(8) {
+            let style = if is_error {
+                Style::default().fg(t.error())
+            } else {
+                Style::default().fg(t.muted())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", b.v), border),
+                Span::styled(line.to_string(), style),
+            ]));
+        }
+    }
+
+    // Footer: └────────────────────
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {}{}", b.bl, b.h.repeat(50)), border),
+    ]));
+
+    lines
+}
+
 /// Lifecycle event card — phase change, decomposition, etc.
 ///
 /// `◈ Phase → implement`
