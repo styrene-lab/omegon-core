@@ -27,6 +27,8 @@ Guidelines:
 - Use write only for new files or complete rewrites
 - Be concise in your responses
 - Show file paths clearly when working with files
+- Every non-trivial code change must include tests. Untested code is incomplete.
+- Write tests alongside implementation, not as a follow-up. Co-locate test files.
 - Always commit your work with clear, descriptive commit messages before finishing
 - Do NOT push — only commit locally
 - When you complete the task, update any task/result sections in the prompt, then summarize what you did
