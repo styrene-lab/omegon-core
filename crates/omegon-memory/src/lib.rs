@@ -23,9 +23,16 @@ pub mod decay;
 pub mod hash;
 pub mod vectors;
 pub mod backend;
+pub mod inmemory;
+pub mod provider;
+
+#[cfg(test)]
+mod tests;
 
 // Re-exports for convenience
 pub use backend::{MemoryBackend, ContextRenderer, MemoryError};
+pub use inmemory::InMemoryBackend;
+pub use provider::MemoryProvider;
 pub use types::*;
 pub use decay::{compute_confidence, DecayProfile};
 pub use hash::{content_hash, normalize_for_hash};

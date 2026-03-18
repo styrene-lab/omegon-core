@@ -114,9 +114,8 @@ mod tests {
         // 20 reinforcements: raw halfLife = 14 * 1.8^19 = absurdly large
         // Should be capped at 90 days
         let c_20 = compute_confidence(90.0, 20, &STANDARD);
-        let c_5 = compute_confidence(90.0, 5, &STANDARD);
-        // Both should be similar because cap applies to both
-        // At 90 days with 90-day half-life: e^(-ln2) ≈ 0.5
+        let _c_5 = compute_confidence(90.0, 5, &STANDARD);
+        // At 90 days with 90-day half-life (capped): e^(-ln2) ≈ 0.5
         assert!((c_20 - 0.5).abs() < 0.01, "c_20={c_20}");
     }
 

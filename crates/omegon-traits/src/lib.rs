@@ -21,6 +21,16 @@ pub enum ContentBlock {
     Image { url: String, media_type: String },
 }
 
+impl ContentBlock {
+    /// Extract text content, or None if this is an image block.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentBlock::Text { text } => Some(text),
+            ContentBlock::Image { .. } => None,
+        }
+    }
+}
+
 /// Result returned from a tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
