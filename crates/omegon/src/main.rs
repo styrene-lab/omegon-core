@@ -366,7 +366,9 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     });
 
     // ─── Interactive agent loop ─────────────────────────────────────────
-    let cancel = CancellationToken::new();
+    // Each prompt gets its own cancellation token so Ctrl+C only cancels
+    // the current turn, not future turns.
+    let mut active_cancel: Option<CancellationToken> = None;
 
     loop {
         // Wait for user input from TUI
@@ -378,7 +380,9 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         match cmd {
             tui::TuiCommand::Quit => break,
             tui::TuiCommand::Cancel => {
-                cancel.cancel();
+                if let Some(ref cancel) = active_cancel {
+                    cancel.cancel();
+                }
             }
             tui::TuiCommand::UserPrompt(text) => {
                 conversation.push_user(text);
@@ -391,18 +395,20 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     model: cli.model.clone(),
                 };
 
-                let child_cancel = CancellationToken::new();
+                let cancel = CancellationToken::new();
+                active_cancel = Some(cancel.clone());
                 if let Err(e) = r#loop::run(
                     &bridge,
                     &tools,
                     &mut context_manager,
                     &mut conversation,
                     &events_tx,
-                    child_cancel,
+                    cancel,
                     &loop_config,
                 ).await {
                     tracing::error!("Agent loop error: {e}");
                 }
+                active_cancel = None;
             }
         }
     }

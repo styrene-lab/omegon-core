@@ -82,7 +82,7 @@ impl LifecycleContextProvider {
 }
 
 impl ContextProvider for LifecycleContextProvider {
-    fn provide_context(&self, signals: &ContextSignals<'_>) -> Option<ContextInjection> {
+    fn provide_context(&self, _signals: &ContextSignals<'_>) -> Option<ContextInjection> {
         let mut parts = Vec::new();
 
         // 1. Focused design node context
