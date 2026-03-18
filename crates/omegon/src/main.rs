@@ -96,8 +96,13 @@ enum Commands {
     /// Run interactive TUI session — ratatui-based terminal interface.
     Interactive,
 
-    /// Log in to Anthropic (Claude Pro/Max subscription) via OAuth.
-    Login,
+    /// Log in to a provider via OAuth. Defaults to Anthropic.
+    /// Usage: omegon-agent login [anthropic|openai]
+    Login {
+        /// Provider to log in to (anthropic or openai). Default: anthropic.
+        #[arg(default_value = "anthropic")]
+        provider: String,
+    },
 
     /// Run a cleave orchestration — dispatch multiple agent children in parallel.
     Cleave {
@@ -206,8 +211,16 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Interactive) => run_interactive_command(&cli).await,
-        Some(Commands::Login) => {
-            match auth::login_anthropic().await {
+        Some(Commands::Login { ref provider }) => {
+            let result = match provider.as_str() {
+                "anthropic" | "claude" => auth::login_anthropic().await,
+                "openai" | "chatgpt" => auth::login_openai().await,
+                _ => {
+                    eprintln!("Unknown provider: {provider}. Use: anthropic, openai");
+                    std::process::exit(1);
+                }
+            };
+            match result {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     eprintln!("Login failed: {e}");

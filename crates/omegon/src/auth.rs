@@ -1,11 +1,8 @@
-//! OAuth authentication — login flow, token refresh, credential storage.
+//! OAuth authentication — login flows, token refresh, credential storage.
 //!
-//! Implements Anthropic's OAuth PKCE flow:
-//!   1. Generate PKCE verifier + challenge
-//!   2. Open browser to claude.ai/oauth/authorize
-//!   3. Listen on localhost:53692 for callback with authorization code
-//!   4. Exchange code for access + refresh tokens
-//!   5. Store in ~/.pi/agent/auth.json
+//! Supported providers:
+//!   - Anthropic (Claude Pro/Max): PKCE flow to claude.ai, callback on :53692
+//!   - OpenAI Codex (ChatGPT Plus/Pro): PKCE flow to auth.openai.com, callback on :1455
 //!
 //! Token refresh happens automatically when the stored token is expired.
 
@@ -96,16 +93,18 @@ pub async fn resolve_with_refresh(provider: &str) -> Option<(String, bool)> {
             }
 
     // 2. auth.json — with refresh if expired
-    let mut creds = read_credentials(provider)?;
+    // OpenAI subscription stored as "openai-codex" in auth.json
+    let auth_key = if provider == "openai" { "openai-codex" } else { provider };
+    let mut creds = read_credentials(auth_key)?;
     if creds.cred_type != "oauth" {
         return Some((creds.access, false));
     }
 
     if creds.is_expired() {
-        tracing::info!(provider, "OAuth token expired — refreshing");
-        match refresh_token(provider, &creds.refresh).await {
+        tracing::info!(provider, auth_key, "OAuth token expired — refreshing");
+        match refresh_token(auth_key, &creds.refresh).await {
             Ok(new_creds) => {
-                if let Err(e) = write_credentials(provider, &new_creds) {
+                if let Err(e) = write_credentials(auth_key, &new_creds) {
                     tracing::warn!("Failed to save refreshed token: {e}");
                 }
                 creds = new_creds;
@@ -121,6 +120,7 @@ pub async fn resolve_with_refresh(provider: &str) -> Option<(String, bool)> {
 
 /// Refresh an OAuth token.
 pub async fn refresh_token(provider: &str, refresh: &str) -> anyhow::Result<OAuthCredentials> {
+    if provider == "openai-codex" { return refresh_openai_token(refresh).await }
     let url = match provider {
         "anthropic" => TOKEN_URL,
         _ => anyhow::bail!("OAuth refresh not supported for provider: {provider}"),
@@ -263,7 +263,205 @@ pub async fn login_anthropic() -> anyhow::Result<OAuthCredentials> {
     Ok(creds)
 }
 
+// ─── OpenAI Codex (ChatGPT Plus/Pro) ────────────────────────────────────────
+
+const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OPENAI_CALLBACK_PORT: u16 = 1455;
+const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OPENAI_SCOPE: &str = "openid profile email offline_access";
+
+/// Run the OpenAI Codex OAuth login flow (ChatGPT Plus/Pro subscription).
+pub async fn login_openai() -> anyhow::Result<OAuthCredentials> {
+    let (verifier, challenge) = generate_pkce();
+
+    // Random state parameter
+    let mut state_bytes = [0u8; 16];
+    getrandom::fill(&mut state_bytes).expect("getrandom failed");
+    let state = hex::encode(&state_bytes);
+
+    let auth_url = format!(
+        "{OPENAI_AUTHORIZE_URL}?response_type=code&client_id={OPENAI_CLIENT_ID}\
+         &redirect_uri={}&scope={}&code_challenge={challenge}\
+         &code_challenge_method=S256&state={state}\
+         &id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=omegon",
+        urlencoding_encode(OPENAI_REDIRECT_URI),
+        urlencoding_encode(OPENAI_SCOPE),
+    );
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{OPENAI_CALLBACK_PORT}")).await?;
+    tracing::info!(port = OPENAI_CALLBACK_PORT, "OpenAI OAuth callback server listening");
+
+    eprintln!("\nOpening browser for OpenAI login...");
+    eprintln!("If the browser doesn't open, visit:\n  {auth_url}\n");
+    let _ = open::that(&auth_url);
+
+    let (mut stream, _addr) = listener.accept().await?;
+    let mut buf = [0u8; 4096];
+    let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    let (code, recv_state) = parse_callback_at_path(&request, "/auth/callback")?;
+
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                    <html><body><p>Authentication successful. Return to your terminal.</p></body></html>";
+    tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await?;
+
+    if recv_state != state {
+        anyhow::bail!("OAuth state mismatch");
+    }
+
+    eprintln!("Exchanging authorization code for tokens...");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(OPENAI_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=authorization_code&client_id={OPENAI_CLIENT_ID}\
+             &code={code}&code_verifier={verifier}\
+             &redirect_uri={}",
+            urlencoding_encode(OPENAI_REDIRECT_URI),
+        ))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI token exchange failed ({status}): {body}");
+    }
+
+    let data: Value = resp.json().await?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let expires_in = data["expires_in"].as_u64().unwrap_or(3600);
+    let access = data["access_token"].as_str().unwrap_or("").to_string();
+
+    // Extract accountId from JWT
+    let account_id = extract_jwt_claim(&access, "https://api.openai.com/auth", "chatgpt_account_id");
+
+    let creds = OAuthCredentials {
+        cred_type: "oauth".into(),
+        access,
+        refresh: data["refresh_token"].as_str().unwrap_or("").into(),
+        expires: now_ms + expires_in * 1000,
+    };
+
+    // Store with accountId as extra field
+    write_credentials_with_extra("openai-codex", &creds, account_id.as_deref())?;
+    eprintln!("✓ OpenAI authentication successful. Credentials saved.");
+
+    Ok(creds)
+}
+
+/// Refresh an OpenAI Codex OAuth token.
+pub async fn refresh_openai_token(refresh: &str) -> anyhow::Result<OAuthCredentials> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(OPENAI_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=refresh_token&refresh_token={refresh}&client_id={OPENAI_CLIENT_ID}"
+        ))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI token refresh failed ({status}): {body}");
+    }
+
+    let data: Value = resp.json().await?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let expires_in = data["expires_in"].as_u64().unwrap_or(3600);
+
+    Ok(OAuthCredentials {
+        cred_type: "oauth".into(),
+        access: data["access_token"].as_str().unwrap_or("").into(),
+        refresh: data["refresh_token"].as_str().unwrap_or(refresh).into(),
+        expires: now_ms + expires_in * 1000,
+    })
+}
+
+/// Extract a claim from a JWT payload (simple base64 decode, no verification).
+fn extract_jwt_claim(token: &str, claim_path: &str, field: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 { return None; }
+    // Add padding for base64
+    let payload = parts[1];
+    let padded = match payload.len() % 4 {
+        2 => format!("{payload}=="),
+        3 => format!("{payload}="),
+        _ => payload.to_string(),
+    };
+    let decoded = base64_decode(&padded)?;
+    let json: Value = serde_json::from_slice(&decoded).ok()?;
+    json.get(claim_path)?.get(field)?.as_str().map(String::from)
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    // Standard base64 decode (handles URL-safe chars too)
+    let input = input.replace('-', "+").replace('_', "/");
+    let mut result = Vec::new();
+    let chars: Vec<u8> = input.bytes().collect();
+    for chunk in chars.chunks(4) {
+        let mut buf = [0u8; 4];
+        let mut valid = 0;
+        for (i, &c) in chunk.iter().enumerate() {
+            buf[i] = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => { continue; }
+                _ => return None,
+            };
+            valid = i + 1;
+        }
+        if valid >= 2 { result.push((buf[0] << 2) | (buf[1] >> 4)); }
+        if valid >= 3 { result.push((buf[1] << 4) | (buf[2] >> 2)); }
+        if valid >= 4 { result.push((buf[2] << 6) | buf[3]); }
+    }
+    Some(result)
+}
+
+fn write_credentials_with_extra(provider: &str, creds: &OAuthCredentials, account_id: Option<&str>) -> anyhow::Result<()> {
+    let path = auth_json_path().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut auth: Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content).unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
+    let mut entry = serde_json::to_value(creds)?;
+    if let Some(id) = account_id {
+        entry["accountId"] = json!(id);
+    }
+    auth[provider] = entry;
+    std::fs::write(&path, serde_json::to_string_pretty(&auth)?)?;
+    Ok(())
+}
+
+/// Hex encode helper (avoids adding hex crate for this one use).
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 fn parse_callback(request: &str) -> anyhow::Result<(String, String)> {
+    parse_callback_at_path(request, "/callback")
+}
+
+fn parse_callback_at_path(request: &str, _expected_path: &str) -> anyhow::Result<(String, String)> {
     // Parse "GET /callback?code=XXX&state=YYY HTTP/1.1"
     let path = request
         .lines()

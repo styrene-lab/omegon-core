@@ -61,6 +61,21 @@ pub fn resolve_api_key_sync(provider: &str) -> Option<(String, bool)> {
             tracing::debug!(provider, "no credentials in auth.json");
         }
     }
+
+    // Fallback: OpenAI subscription stored as "openai-codex" in auth.json
+    if provider == "openai" {
+        match crate::auth::read_credentials("openai-codex") {
+            Some(creds) if creds.cred_type == "oauth" && !creds.is_expired() => {
+                tracing::debug!("OpenAI subscription token from auth.json (openai-codex)");
+                return Some((creds.access, true));
+            }
+            Some(creds) if creds.cred_type == "oauth" => {
+                tracing::debug!("OpenAI subscription token from auth.json (EXPIRED — needs refresh)");
+            }
+            _ => {}
+        }
+    }
+
     None
 }
 

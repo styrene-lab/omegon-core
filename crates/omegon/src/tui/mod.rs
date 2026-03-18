@@ -125,23 +125,29 @@ impl App {
         let mut options: Vec<selector::SelectOption> = Vec::new();
 
         // Only show providers the user is actually authenticated with
-        let has_anthropic = crate::providers::resolve_api_key_sync("anthropic").is_some();
-        let has_openai = crate::providers::resolve_api_key_sync("openai").is_some();
+        let anthropic_auth = crate::providers::resolve_api_key_sync("anthropic");
+        let openai_auth = crate::providers::resolve_api_key_sync("openai");
 
-        if has_anthropic {
-            let auth = if self.footer_data.is_oauth { "subscription" } else { "api-key" };
+        if let Some((_, is_oauth)) = anthropic_auth {
+            let auth = if is_oauth { "subscription" } else { "api-key" };
             options.push(sel_opt("anthropic:claude-sonnet-4-20250514", "Claude Sonnet 4", &format!("fast · 200k · {auth}"), &current));
             options.push(sel_opt("anthropic:claude-opus-4-20250514", "Claude Opus 4", &format!("strongest · 200k · {auth}"), &current));
             options.push(sel_opt("anthropic:claude-haiku-3-20250307", "Claude Haiku 3", &format!("cheapest · 200k · {auth}"), &current));
         }
 
-        if has_openai {
-            options.push(sel_opt("openai:gpt-4.1", "GPT-4.1", "OpenAI · 128k", &current));
-            options.push(sel_opt("openai:o3", "o3", "OpenAI reasoning · 200k", &current));
+        if let Some((_, is_oauth)) = openai_auth {
+            let auth = if is_oauth { "subscription" } else { "api-key" };
+            options.push(sel_opt("openai:gpt-4.1", "GPT-4.1", &format!("OpenAI · 128k · {auth}"), &current));
+            options.push(sel_opt("openai:o3", "o3", &format!("OpenAI reasoning · 200k · {auth}"), &current));
         }
 
         if options.is_empty() {
-            self.conversation.push_system("No providers authenticated.\nRun `omegon-agent login` or set ANTHROPIC_API_KEY / OPENAI_API_KEY.");
+            self.conversation.push_system(
+                "No providers authenticated.\n\
+                 Run: omegon-agent login anthropic  (Claude subscription)\n\
+                 Run: omegon-agent login openai     (ChatGPT subscription)\n\
+                 Or:  export ANTHROPIC_API_KEY=...   (API key)"
+            );
             return;
         }
 
