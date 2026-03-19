@@ -13,6 +13,7 @@
 pub mod conversation;
 pub mod conv_widget;
 pub mod dashboard;
+pub mod image;
 pub mod editor;
 pub mod effects;
 pub mod footer;
@@ -41,6 +42,7 @@ use omegon_traits::AgentEvent;
 
 use self::conversation::ConversationView;
 use self::dashboard::DashboardState;
+use self::segments::Segment;
 use self::footer::FooterData;
 use self::editor::Editor;
 
@@ -342,6 +344,32 @@ impl App {
         let (segments, conv_state) = self.conversation.segments_and_state();
         let conv_widget = conv_widget::ConversationWidget::new(segments, t.as_ref());
         frame.render_stateful_widget(conv_widget, chunks[0], conv_state);
+
+        // Overlay images on top of placeholders (second pass — needs Frame for StatefulImage)
+        {
+            let conv_area = chunks[0];
+            // Collect image info without holding borrows
+            let image_renders: Vec<(usize, Rect, std::path::PathBuf)> = {
+                let segments = self.conversation.segments();
+                let conv_state = &self.conversation.conv_state;
+                conv_state.visible_image_areas(segments, conv_area)
+                    .into_iter()
+                    .filter_map(|(idx, area)| {
+                        if let Segment::Image { ref path, .. } = segments[idx] {
+                            Some((idx, area, path.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            // Now render with mutable access to image_cache
+            for (seg_idx, area, path) in image_renders {
+                if let Some(protocol) = self.conversation.image_cache.get_or_create(seg_idx, &path) {
+                    image::render_image(area, frame, protocol);
+                }
+            }
+        }
 
         // Dashboard panel (right side)
         if show_dashboard && dash_area.width > 0 {
@@ -818,6 +846,25 @@ impl App {
                 });
                 self.conversation.push_tool_end(&id, is_error, summary);
 
+                // Detect image results from view/render tools
+                if !is_error && image::is_available()
+                    && let Some(ref name) = self.last_tool_name
+                    && matches!(name.as_str(), "view" | "render_diagram" | "generate_image_local"
+                        | "render_excalidraw" | "render_composition_still" | "render_native_diagram")
+                    && let Some(text) = summary
+                {
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if image::is_image_path(trimmed) && std::path::Path::new(trimmed).exists() {
+                            self.conversation.push_image(
+                                std::path::PathBuf::from(trimmed),
+                                "",
+                            );
+                            break;
+                        }
+                    }
+                }
+
                 // Dynamic footer: memory tools update fact count
                 if let Some(ref name) = self.last_tool_name {
                     let is_memory_mutation = matches!(name.as_str(),
@@ -912,6 +959,9 @@ pub async fn run_tui(
     cancel: SharedCancel,
     settings: crate::settings::SharedSettings,
 ) -> io::Result<()> {
+    // Initialize image protocol detection before entering alt screen
+    image::init_picker();
+
     // Set up terminal with mouse capture for scroll events
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;

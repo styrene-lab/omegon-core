@@ -101,6 +101,53 @@ impl ConvState {
     fn total_height(&self) -> u16 {
         self.heights.iter().copied().sum()
     }
+
+    /// Compute on-screen areas for Image segments visible in the viewport.
+    /// Called after render to know where to overlay actual images.
+    pub fn visible_image_areas(
+        &self,
+        segments: &[Segment],
+        viewport: Rect,
+    ) -> Vec<(usize, Rect)> {
+        if self.heights.len() != segments.len() {
+            return vec![];
+        }
+
+        let viewport_height = viewport.height;
+        let total_height = self.total_height();
+        let top_offset = if total_height <= viewport_height {
+            0
+        } else {
+            total_height - viewport_height - self.scroll_offset.min(total_height.saturating_sub(viewport_height))
+        };
+
+        let mut result = Vec::new();
+        let mut y_cursor: u16 = 0;
+        for (i, segment) in segments.iter().enumerate() {
+            let seg_height = self.heights[i];
+            let seg_top = y_cursor;
+            let seg_bottom = y_cursor + seg_height;
+            y_cursor = seg_bottom;
+
+            if seg_bottom <= top_offset { continue; }
+            if seg_top >= top_offset + viewport_height { break; }
+
+            if matches!(segment, Segment::Image { .. }) && seg_top >= top_offset {
+                let render_y = viewport.y + (seg_top - top_offset);
+                let available_height = viewport.bottom().saturating_sub(render_y);
+                if available_height > 2 {
+                    // Leave 2 rows for border top/bottom, render image inside
+                    result.push((i, Rect {
+                        x: viewport.x + 1,
+                        y: render_y + 1, // skip top border
+                        width: viewport.width.saturating_sub(2),
+                        height: seg_height.saturating_sub(3).min(available_height - 2),
+                    }));
+                }
+            }
+        }
+        result
+    }
 }
 
 impl Default for ConvState {

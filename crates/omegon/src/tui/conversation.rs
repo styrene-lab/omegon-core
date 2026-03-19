@@ -3,6 +3,7 @@
 //! This module holds the data model. Rendering is handled by
 //! `conv_widget::ConversationWidget`.
 
+use super::image::ImageCache;
 use super::segments::Segment;
 use super::conv_widget::ConvState;
 
@@ -13,6 +14,8 @@ pub struct ConversationView {
     streaming: bool,
     /// Scroll + height cache state — shared with the widget.
     pub conv_state: ConvState,
+    /// Image render state — StatefulProtocol per segment index.
+    pub image_cache: ImageCache,
 }
 
 impl ConversationView {
@@ -21,6 +24,7 @@ impl ConversationView {
             segments: Vec::new(),
             streaming: false,
             conv_state: ConvState::new(),
+            image_cache: ImageCache::default(),
         }
     }
 
@@ -52,6 +56,15 @@ impl ConversationView {
         self.segments.push(Segment::SystemNotification { text: text.to_string() });
         self.conv_state.invalidate();
         self.conv_state.force_scroll_to_bottom();
+    }
+
+    pub fn push_image(&mut self, path: std::path::PathBuf, alt: &str) {
+        self.segments.push(Segment::Image {
+            path,
+            alt: alt.to_string(),
+        });
+        self.conv_state.invalidate();
+        self.conv_state.auto_scroll_to_bottom();
     }
 
     pub fn push_lifecycle(&mut self, icon: &str, text: &str) {
@@ -208,6 +221,7 @@ impl ConversationView {
         self.segments.clear();
         self.conv_state = ConvState::new();
         self.streaming = false;
+        self.image_cache.clear();
     }
 }
 

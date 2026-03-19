@@ -65,6 +65,13 @@ pub enum Segment {
     /// Lifecycle event (phase change, decomposition).
     LifecycleEvent { icon: String, text: String },
 
+    /// Inline image from a tool result.
+    Image {
+        path: std::path::PathBuf,
+        /// Alt text shown when image can't be rendered.
+        alt: String,
+    },
+
     /// Visual separator between turns.
     TurnSeparator,
 }
@@ -89,6 +96,7 @@ impl Segment {
             }
             Self::SystemNotification { text } => render_system(text, area, buf, t),
             Self::LifecycleEvent { icon, text } => render_lifecycle(icon, text, area, buf, t),
+            Self::Image { path, alt } => render_image_placeholder(path, alt, area, buf, t),
             Self::TurnSeparator => render_separator(area, buf, t),
         }
     }
@@ -103,6 +111,7 @@ impl Segment {
         match self {
             Self::TurnSeparator => return 1,
             Self::LifecycleEvent { .. } => return 1,
+            Self::Image { .. } => return 14, // Fixed: 12 rows image + 1 caption + 1 spacing
             _ => {}
         }
 
@@ -504,6 +513,40 @@ fn render_lifecycle(icon: &str, text: &str, area: Rect, buf: &mut Buffer, t: &dy
         Span::styled(text.to_string(), Style::default().fg(t.muted())),
     ]);
     Paragraph::new(line).render(area, buf);
+}
+
+/// Render a placeholder for an image (used when StatefulProtocol isn't available).
+/// The actual image rendering happens in conv_widget.rs via ratatui-image.
+fn render_image_placeholder(
+    path: &std::path::Path, alt: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme,
+) {
+    if area.height == 0 { return; }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.border_dim()))
+        .title(Span::styled(" 🖼 image ", Style::default().fg(t.accent_muted())))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(t.surface_bg()));
+
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    if inner.height == 0 { return; }
+
+    let filename = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image");
+    let caption = if alt.is_empty() { filename.to_string() } else { alt.to_string() };
+
+    let lines = vec![
+        Line::from(Span::styled(caption, Style::default().fg(t.muted()))),
+        Line::from(Span::styled(
+            path.display().to_string(),
+            Style::default().fg(t.dim()),
+        )),
+    ];
+    Paragraph::new(lines).render(inner, buf);
 }
 
 fn render_separator(area: Rect, buf: &mut Buffer, t: &dyn Theme) {
