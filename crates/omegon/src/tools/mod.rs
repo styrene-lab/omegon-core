@@ -15,6 +15,7 @@ pub mod speculate;
 pub mod validate;
 pub mod view;
 pub mod web_search;
+pub mod whoami;
 pub mod write;
 
 // Phase 0+ stubs:
@@ -278,6 +279,19 @@ impl ToolProvider for CoreTools {
                 }),
             },
             ToolDefinition {
+                name: "whoami".into(),
+                label: "whoami".into(),
+                description: "Check authentication status across development tools \
+                    (git, GitHub, GitLab, AWS, Kubernetes, OCI registries). Returns \
+                    structured status with error diagnosis and refresh commands for \
+                    expired or missing sessions.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            ToolDefinition {
                 name: "chronos".into(),
                 label: "chronos".into(),
                 description: "Get authoritative date and time context from the system clock. \
@@ -397,6 +411,9 @@ impl ToolProvider for CoreTools {
             }
             "speculate_rollback" => {
                 speculate::rollback(&self.cwd).await
+            }
+            "whoami" => {
+                whoami::execute().await
             }
             "chronos" => {
                 let sub = args["subcommand"].as_str().unwrap_or("week");
