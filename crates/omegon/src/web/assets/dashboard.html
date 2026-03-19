@@ -123,7 +123,7 @@
     overflow: hidden;
   }
   #graph-canvas {
-    width: 100%; height: 600px; display: block;
+    width: 100%; height: 700px; display: block; cursor: grab;
   }
   #node-detail {
     position: absolute; top: 12px; right: 12px;
@@ -136,7 +136,7 @@
   #node-detail h3 { color: var(--accent); font-size: 13px; margin-bottom: 4px; }
   #node-detail .nd-status { text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
   #node-detail .nd-meta { color: var(--dim); margin-top: 4px; }
-  #node-detail .nd-deps { margin-top: 6px; }
+  #node-detail .nd-deps { margin-top: 6px; white-space: pre-wrap; color: var(--muted); font-size: 11px; }
   #node-detail .nd-close {
     position: absolute; top: 8px; right: 10px; cursor: pointer;
     color: var(--dim); font-size: 14px;
@@ -152,10 +152,11 @@
     content: ''; display: inline-block; width: 8px; height: 8px;
     border-radius: 50%; margin-right: 4px; vertical-align: middle;
   }
+  .legend-seed::before { background: var(--muted); opacity: 0.4; }
   .legend-exploring::before { background: var(--accent); }
   .legend-decided::before { background: var(--success); }
   .legend-implementing::before { background: var(--warning); }
-  .legend-implemented::before { background: var(--dim); }
+  .legend-implemented::before { background: var(--dim); opacity: 0.3; }
   .legend-blocked::before { background: var(--error); }
 
   #conversation {
@@ -249,10 +250,11 @@
         <div class="nd-deps" id="nd-deps"></div>
       </div>
       <div class="graph-legend">
+        <span class="legend-seed">seed</span>
         <span class="legend-exploring">exploring</span>
         <span class="legend-decided">decided</span>
         <span class="legend-implementing">implementing</span>
-        <span class="legend-implemented">implemented</span>
+        <span class="legend-implemented">done</span>
         <span class="legend-blocked">blocked</span>
       </div>
     </div>
@@ -564,42 +566,89 @@ document.getElementById('prompt-input').addEventListener('keydown', (e) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// ── Force-directed graph (vanilla canvas) ────────────────────────
+// ── Force-directed graph (vanilla canvas, polished) ──────────────
 // ═══════════════════════════════════════════════════════════════════
 let graphLoaded = false;
 let graphNodes = [];
 let graphLinks = [];
-let graphSim = null;
 let selectedNode = null;
+let hoverNode = null;
+let simAlpha = 1.0;        // Cooling: starts hot, decays to 0
+let simFrame = 0;
 
-// Camera state for pan/zoom
+// Camera
 let camX = 0, camY = 0, camZoom = 1;
 let isDragging = false, dragStartX = 0, dragStartY = 0;
 let dragNode = null;
+
+// Node importance tiers for rendering priority
+const ACTIVE_GROUPS = new Set([1, 2, 3, 5, 6]); // exploring, decided, implementing, blocked, deferred
 
 async function loadGraph() {
   graphLoaded = true;
   const res = await fetch('/api/graph');
   const data = await res.json();
 
-  // Initialize node positions (random in a circle)
-  const cx = 400, cy = 300, r = 250;
-  data.nodes.forEach((n, i) => {
-    const angle = (i / data.nodes.length) * Math.PI * 2;
-    n.x = cx + Math.cos(angle) * r * (0.5 + Math.random() * 0.5);
-    n.y = cy + Math.sin(angle) * r * (0.5 + Math.random() * 0.5);
-    n.vx = 0; n.vy = 0;
-  });
-
-  // Build index for link lookup
   const nodeMap = {};
-  data.nodes.forEach(n => nodeMap[n.id] = n);
+  data.nodes.forEach(n => { nodeMap[n.id] = n; n.children = []; n.depth = 0; });
   data.links.forEach(l => {
     l.sourceNode = nodeMap[l.source];
     l.targetNode = nodeMap[l.target];
   });
-  // Remove links with missing nodes
   data.links = data.links.filter(l => l.sourceNode && l.targetNode);
+
+  // Build parent→children index for hierarchical layout
+  data.nodes.forEach(n => {
+    const parentLink = data.links.find(l => l.targetNode === n && l.link_type === 'parent');
+    if (parentLink) {
+      parentLink.sourceNode.children.push(n);
+      n._parent = parentLink.sourceNode;
+    }
+  });
+
+  // Compute depths
+  function setDepth(node, d) { node.depth = d; node.children.forEach(c => setDepth(c, d + 1)); }
+  const roots = data.nodes.filter(n => !n._parent);
+  roots.forEach((r, i) => setDepth(r, 0));
+
+  // Hierarchical initial layout: roots spread in a line, children fan below
+  const canvasW = 800, canvasH = 600;
+  const cx = canvasW / 2, cy = canvasH / 2;
+
+  // Place roots in a horizontal line
+  roots.sort((a, b) => b.children.length - a.children.length); // big subtrees first
+  const rootSpacing = Math.min(120, (canvasW - 100) / Math.max(roots.length, 1));
+  const rootStartX = cx - (roots.length - 1) * rootSpacing / 2;
+
+  function layoutTree(node, px, py, angle, spread, depth) {
+    node.x = px; node.y = py;
+    node.vx = 0; node.vy = 0;
+    const n = node.children.length;
+    if (n === 0) return;
+    const childSpread = spread / Math.max(n, 2);
+    const dist = 50 + depth * 10; // children further from parents at deeper levels
+    node.children.forEach((c, i) => {
+      const a = angle + (i - (n - 1) / 2) * childSpread;
+      const childX = px + Math.cos(a) * dist + (Math.random() - 0.5) * 10;
+      const childY = py + Math.sin(a) * dist + (Math.random() - 0.5) * 10;
+      layoutTree(c, childX, childY, a, childSpread * 0.8, depth + 1);
+    });
+  }
+
+  roots.forEach((r, i) => {
+    const rx = rootStartX + i * rootSpacing;
+    const ry = cy - 50 + (Math.random() - 0.5) * 40;
+    const baseAngle = Math.PI / 2 + (i - roots.length / 2) * 0.3; // fan downward
+    layoutTree(r, rx, ry, baseAngle, Math.PI * 0.6, 0);
+  });
+
+  // Orphan nodes (no parent link in the data) — place in outer ring
+  data.nodes.filter(n => n.x === undefined).forEach((n, i) => {
+    const angle = (i / 10) * Math.PI * 2;
+    n.x = cx + Math.cos(angle) * 350;
+    n.y = cy + Math.sin(angle) * 350;
+    n.vx = 0; n.vy = 0;
+  });
 
   graphNodes = data.nodes;
   graphLinks = data.links;
@@ -607,13 +656,23 @@ async function loadGraph() {
   const canvas = document.getElementById('graph-canvas');
   const container = document.getElementById('graph-container');
   canvas.width = container.clientWidth * devicePixelRatio;
-  canvas.height = 600 * devicePixelRatio;
-  canvas.style.height = '600px';
+  canvas.height = 700 * devicePixelRatio;
+  canvas.style.height = '700px';
 
-  // Initial camera to center the graph
-  camX = canvas.width / devicePixelRatio / 2 - cx;
-  camY = canvas.height / devicePixelRatio / 2 - cy;
-  camZoom = Math.min(canvas.width / devicePixelRatio / 900, 1);
+  // Fit camera: compute bounding box of all nodes, then fit
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  graphNodes.forEach(n => {
+    minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+    minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+  });
+  const graphW = (maxX - minX) + 100, graphH = (maxY - minY) + 100;
+  const viewW = canvas.width / devicePixelRatio, viewH = canvas.height / devicePixelRatio;
+  camZoom = Math.min(viewW / graphW, viewH / graphH, 1.2);
+  camX = viewW / 2 - ((minX + maxX) / 2) * camZoom;
+  camY = viewH / 2 - ((minY + maxY) / 2) * camZoom;
+
+  simAlpha = 1.0;
+  simFrame = 0;
 
   setupGraphEvents(canvas);
   runSimulation(canvas);
@@ -622,9 +681,8 @@ async function loadGraph() {
 function setupGraphEvents(canvas) {
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newZoom = Math.max(0.2, Math.min(3, camZoom * delta));
-    // Zoom toward mouse position
+    const delta = e.deltaY > 0 ? 0.92 : 1.08;
+    const newZoom = Math.max(0.15, Math.min(4, camZoom * delta));
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -638,57 +696,104 @@ function setupGraphEvents(canvas) {
     const mx = (e.clientX - rect.left - camX) / camZoom;
     const my = (e.clientY - rect.top - camY) / camZoom;
 
-    // Check if clicking on a node
     for (const n of graphNodes) {
       const dx = n.x - mx, dy = n.y - my;
-      const r = nodeRadius(n);
-      if (dx*dx + dy*dy < (r+4)*(r+4)) {
+      const r = nodeRadius(n) + 3;
+      if (dx*dx + dy*dy < r*r) {
         dragNode = n;
+        n._pinned = true;
         showDetail(n);
-        break;
+        simAlpha = Math.max(simAlpha, 0.3); // Reheat slightly for drag
+        return;
       }
     }
-
-    if (!dragNode) {
-      isDragging = true;
-      dragStartX = e.clientX - camX;
-      dragStartY = e.clientY - camY;
-    }
+    isDragging = true;
+    dragStartX = e.clientX - camX;
+    dragStartY = e.clientY - camY;
   });
 
   canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
     if (isDragging) {
       camX = e.clientX - dragStartX;
       camY = e.clientY - dragStartY;
-    } else if (dragNode) {
-      const rect = canvas.getBoundingClientRect();
+      return;
+    }
+    if (dragNode) {
       dragNode.x = (e.clientX - rect.left - camX) / camZoom;
       dragNode.y = (e.clientY - rect.top - camY) / camZoom;
       dragNode.vx = 0; dragNode.vy = 0;
+      return;
     }
+    // Hover detection
+    const mx = (e.clientX - rect.left - camX) / camZoom;
+    const my = (e.clientY - rect.top - camY) / camZoom;
+    let found = null;
+    for (const n of graphNodes) {
+      const dx = n.x - mx, dy = n.y - my;
+      const r = nodeRadius(n) + 3;
+      if (dx*dx + dy*dy < r*r) { found = n; break; }
+    }
+    hoverNode = found;
+    canvas.style.cursor = found ? 'pointer' : (isDragging ? 'grabbing' : 'grab');
   });
 
   canvas.addEventListener('mouseup', () => {
+    if (dragNode) dragNode._pinned = false;
     isDragging = false;
     dragNode = null;
   });
 
   canvas.addEventListener('mouseleave', () => {
+    if (dragNode) dragNode._pinned = false;
     isDragging = false;
     dragNode = null;
+    hoverNode = null;
+  });
+
+  // Double-click to focus + recenter
+  canvas.addEventListener('dblclick', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left - camX) / camZoom;
+    const my = (e.clientY - rect.top - camY) / camZoom;
+    for (const n of graphNodes) {
+      const dx = n.x - mx, dy = n.y - my;
+      if (dx*dx + dy*dy < 100) {
+        // Center on this node
+        const viewW = canvas.width / devicePixelRatio;
+        const viewH = canvas.height / devicePixelRatio;
+        camX = viewW / 2 - n.x * camZoom;
+        camY = viewH / 2 - n.y * camZoom;
+        showDetail(n);
+        return;
+      }
+    }
   });
 }
 
 function nodeRadius(n) {
-  let r = 5;
-  if (n.group === 3) r = 7;       // implementing — larger
-  if (n.group <= 1) r = 4;        // seed/exploring — smaller
-  if (n.questions > 0) r += 1;
-  return r;
+  if (n.group === 4) return 3;          // implemented — tiny
+  if (n.group === 0) return 3;          // seed — tiny
+  if (n.group === 3) return 6;          // implementing
+  if (n.group === 2) return 5;          // decided
+  if (n.group === 1) return 4.5;        // exploring
+  if (n.group === 5) return 5;          // blocked
+  return 4;
+}
+
+function nodeAlpha(n) {
+  if (n.group === 4) return 0.3;        // implemented — very faded
+  if (n.group === 0) return 0.4;        // seed — faded
+  return 1.0;                           // active nodes — full opacity
 }
 
 function nodeColor(n) {
   return STATUS_HEX[n.status] || '#607888';
+}
+
+// Is this node "interesting" enough to always show its label?
+function isLabelWorthy(n) {
+  return n.group === 3 || n.group === 5 || (n.group >= 1 && n.group <= 2 && n.questions > 0);
 }
 
 function showDetail(n) {
@@ -704,14 +809,23 @@ function showDetail(n) {
   if (n.has_openspec) meta += '\n◎ has OpenSpec change';
   document.getElementById('nd-meta').textContent = meta;
 
-  // Find connections
-  const incoming = graphLinks.filter(l => l.target === n.id || (l.targetNode && l.targetNode.id === n.id));
-  const outgoing = graphLinks.filter(l => l.source === n.id || (l.sourceNode && l.sourceNode.id === n.id));
+  // Connections
+  const incoming = graphLinks.filter(l => l.targetNode === n);
+  const outgoing = graphLinks.filter(l => l.sourceNode === n);
   let deps = '';
-  if (incoming.length > 0) deps += `← ${incoming.map(l => l.source).join(', ')}\n`;
-  if (outgoing.length > 0) deps += `→ ${outgoing.map(l => l.target).join(', ')}`;
-  document.getElementById('nd-deps').textContent = deps;
-
+  if (incoming.length > 0) {
+    const parents = incoming.filter(l => l.link_type === 'parent').map(l => l.sourceNode.id);
+    const depSources = incoming.filter(l => l.link_type === 'dependency').map(l => l.sourceNode.id);
+    if (parents.length) deps += `parent: ${parents.join(', ')}\n`;
+    if (depSources.length) deps += `depends on: ${depSources.join(', ')}\n`;
+  }
+  if (outgoing.length > 0) {
+    const children = outgoing.filter(l => l.link_type === 'parent').map(l => l.targetNode.id);
+    const depTargets = outgoing.filter(l => l.link_type === 'dependency').map(l => l.targetNode.id);
+    if (children.length) deps += `children: ${children.join(', ')}\n`;
+    if (depTargets.length) deps += `depended on by: ${depTargets.join(', ')}`;
+  }
+  document.getElementById('nd-deps').textContent = deps.trim();
   el.classList.add('visible');
 }
 
@@ -724,115 +838,233 @@ function runSimulation(canvas) {
   const ctx = canvas.getContext('2d');
   const dpr = devicePixelRatio;
 
-  function tick() {
-    // Force simulation step
-    const alpha = 0.3;
-    const repulsion = 800;
-    const springLen = 60;
-    const springK = 0.05;
-    const centerX = 400, centerY = 300;
-    const centerGrav = 0.01;
-    const damping = 0.85;
+  // Precompute neighbor sets for connected-component locality
+  const neighborSet = new Map();
+  graphNodes.forEach(n => neighborSet.set(n, new Set()));
+  graphLinks.forEach(l => {
+    if (l.sourceNode && l.targetNode) {
+      neighborSet.get(l.sourceNode).add(l.targetNode);
+      neighborSet.get(l.targetNode).add(l.sourceNode);
+    }
+  });
 
-    // Repulsion (Barnes-Hut would be faster but 140 nodes is fine with O(n²))
-    for (let i = 0; i < graphNodes.length; i++) {
-      const a = graphNodes[i];
-      for (let j = i + 1; j < graphNodes.length; j++) {
-        const b = graphNodes[j];
+  function tick() {
+    simFrame++;
+    const w = canvas.width / dpr, h = canvas.height / dpr;
+
+    // ── Physics ──────────────────────────────────────
+    // Alpha cooling: rapid initial convergence, then settles
+    if (!dragNode) {
+      simAlpha *= 0.985; // Cool toward 0
+      if (simAlpha < 0.001) simAlpha = 0;
+    }
+
+    if (simAlpha > 0) {
+      const alpha = simAlpha;
+      const repulsion = 2000;       // Strong repulsion to spread nodes
+      const springLen = 80;          // Base spring rest length
+      const springK = 0.08;          // Spring stiffness
+      const centerGrav = 0.008;      // Gentle center pull
+      const damping = 0.7;           // Strong damping for fast settling
+
+      // Compute center of mass
+      let cmx = 0, cmy = 0;
+      graphNodes.forEach(n => { cmx += n.x; cmy += n.y; });
+      cmx /= graphNodes.length; cmy /= graphNodes.length;
+
+      // Repulsion (O(n²) — fine for 140 nodes)
+      for (let i = 0; i < graphNodes.length; i++) {
+        const a = graphNodes[i];
+        for (let j = i + 1; j < graphNodes.length; j++) {
+          const b = graphNodes[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let dist2 = dx*dx + dy*dy;
+          if (dist2 < 1) { dx = (Math.random()-0.5)*2; dy = (Math.random()-0.5)*2; dist2 = 4; }
+          const dist = Math.sqrt(dist2);
+          // Implemented nodes repel less (they can pack tighter)
+          const repMult = (a.group === 4 && b.group === 4) ? 0.3 : 1.0;
+          const force = repulsion * repMult / dist2 * alpha;
+          const fx = dx / dist * force, fy = dy / dist * force;
+          a.vx -= fx; a.vy -= fy;
+          b.vx += fx; b.vy += fy;
+        }
+      }
+
+      // Spring forces along links
+      for (const l of graphLinks) {
+        const a = l.sourceNode, b = l.targetNode;
+        if (!a || !b) continue;
         let dx = b.x - a.x, dy = b.y - a.y;
-        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
-        let force = repulsion / (dist * dist);
-        let fx = dx / dist * force, fy = dy / dist * force;
-        a.vx -= fx * alpha; a.vy -= fy * alpha;
-        b.vx += fx * alpha; b.vy += fy * alpha;
+        const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        // Parent links: shorter. Dependency links: longer
+        const targetLen = l.link_type === 'parent' ? springLen : springLen * 1.8;
+        const force = (dist - targetLen) * springK * alpha;
+        const fx = dx / dist * force, fy = dy / dist * force;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      }
+
+      // Center gravity — toward center of mass
+      for (const n of graphNodes) {
+        n.vx += (cmx - n.x) * centerGrav * alpha;
+        n.vy += (cmy - n.y) * centerGrav * alpha;
+      }
+
+      // Integrate
+      for (const n of graphNodes) {
+        if (n._pinned) continue;
+        n.vx *= damping;
+        n.vy *= damping;
+        // Clamp velocity to prevent explosions
+        const maxV = 15;
+        n.vx = Math.max(-maxV, Math.min(maxV, n.vx));
+        n.vy = Math.max(-maxV, Math.min(maxV, n.vy));
+        n.x += n.vx;
+        n.y += n.vy;
       }
     }
 
-    // Spring forces along links
-    for (const l of graphLinks) {
-      const a = l.sourceNode, b = l.targetNode;
-      if (!a || !b) continue;
-      let dx = b.x - a.x, dy = b.y - a.y;
-      let dist = Math.sqrt(dx*dx + dy*dy) || 1;
-      let force = (dist - springLen) * springK;
-      // Dependency links are longer
-      const targetLen = l.link_type === 'dependency' ? springLen * 2 : springLen;
-      force = (dist - targetLen) * springK;
-      let fx = dx / dist * force, fy = dy / dist * force;
-      a.vx += fx; a.vy += fy;
-      b.vx -= fx; b.vy -= fy;
-    }
-
-    // Center gravity
-    for (const n of graphNodes) {
-      n.vx += (centerX - n.x) * centerGrav;
-      n.vy += (centerY - n.y) * centerGrav;
-    }
-
-    // Integrate
-    for (const n of graphNodes) {
-      if (n === dragNode) continue; // Don't move dragged node
-      n.vx *= damping;
-      n.vy *= damping;
-      n.x += n.vx;
-      n.y += n.vy;
-    }
-
-    // Render
-    const w = canvas.width / dpr, h = canvas.height / dpr;
+    // ── Render ──────────────────────────────────────
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
     ctx.translate(camX, camY);
     ctx.scale(camZoom, camZoom);
 
-    // Draw links
+    // Links — draw underneath
+    ctx.lineWidth = 1;
     for (const l of graphLinks) {
       const a = l.sourceNode, b = l.targetNode;
       if (!a || !b) continue;
+      const isDep = l.link_type === 'dependency';
+      const isHighlight = selectedNode && (a === selectedNode || b === selectedNode);
+      const isHoverHL = hoverNode && (a === hoverNode || b === hoverNode);
+
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      ctx.strokeStyle = l.link_type === 'dependency' ? '#1a4458' : '#0c1828';
-      ctx.lineWidth = l.link_type === 'dependency' ? 1.5 : 0.8;
-      if (l.link_type === 'dependency') ctx.setLineDash([4, 4]);
-      else ctx.setLineDash([]);
+
+      if (isHighlight || isHoverHL) {
+        ctx.strokeStyle = isDep ? '#2ab4c8' : '#1a4458';
+        ctx.lineWidth = isDep ? 2 : 1.5;
+        ctx.globalAlpha = 0.8;
+      } else {
+        ctx.strokeStyle = isDep ? '#152838' : '#0a1420';
+        ctx.lineWidth = isDep ? 1 : 0.5;
+        ctx.globalAlpha = 0.5;
+      }
+
+      if (isDep) { ctx.setLineDash([3, 3]); } else { ctx.setLineDash([]); }
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
     }
 
-    // Draw nodes
-    for (const n of graphNodes) {
+    // Nodes — sort so active nodes render on top
+    const sortedNodes = [...graphNodes].sort((a, b) => {
+      if (a === selectedNode) return 1;
+      if (b === selectedNode) return -1;
+      return a.group === 4 ? -1 : b.group === 4 ? 1 : 0;
+    });
+
+    for (const n of sortedNodes) {
       const r = nodeRadius(n);
+      const alpha = nodeAlpha(n);
+      const isSelected = selectedNode && selectedNode.id === n.id;
+      const isHovered = hoverNode && hoverNode.id === n.id;
+      const isNeighborOfSelected = selectedNode && neighborSet.get(selectedNode)?.has(n);
+
+      // Glow for selected/hovered
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r + 6, 0, Math.PI * 2);
+        ctx.fillStyle = nodeColor(n);
+        ctx.globalAlpha = 0.2;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      // Node circle
       ctx.beginPath();
       ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = nodeColor(n);
-      if (selectedNode && selectedNode.id === n.id) {
-        ctx.fillStyle = '#ffffff';
-        ctx.shadowColor = nodeColor(n);
-        ctx.shadowBlur = 12;
-      }
+      ctx.globalAlpha = isSelected ? 1 : isHovered ? 1 : isNeighborOfSelected ? 0.9 : alpha;
+      ctx.fillStyle = isSelected ? '#ffffff' : nodeColor(n);
       ctx.fill();
-      ctx.shadowBlur = 0;
 
-      // Label for non-implemented nodes (too many otherwise)
-      if (n.group !== 4 && camZoom > 0.5) {
-        ctx.font = `${10 / Math.max(camZoom, 0.7)}px monospace`;
-        ctx.fillStyle = '#607888';
+      // Stroke for active nodes
+      if (n.group !== 4 && n.group !== 0) {
+        ctx.strokeStyle = nodeColor(n);
+        ctx.lineWidth = isSelected ? 2 : 1;
+        ctx.globalAlpha = isSelected ? 1 : 0.5;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      // ── Labels ──────────────────────────────────
+      const showLabel = isSelected || isHovered || isNeighborOfSelected
+        || (isLabelWorthy(n) && camZoom > 0.45)
+        || (ACTIVE_GROUPS.has(n.group) && camZoom > 0.8)
+        || camZoom > 1.6;
+
+      if (showLabel) {
+        const fontSize = Math.max(8, Math.min(11, 10 / camZoom));
+        ctx.font = `${fontSize}px 'SF Mono','Fira Code',monospace`;
         ctx.textAlign = 'center';
-        ctx.fillText(n.id.length > 20 ? n.id.substring(0,18) + '…' : n.id, n.x, n.y + r + 12);
+        ctx.textBaseline = 'top';
+
+        // Truncate label
+        let label = n.id;
+        const maxChars = camZoom > 1.2 ? 24 : camZoom > 0.8 ? 18 : 14;
+        if (label.length > maxChars) label = label.substring(0, maxChars - 1) + '…';
+
+        // Text with background for legibility
+        const textW = ctx.measureText(label).width;
+        const tx = n.x, ty = n.y + r + 3;
+        ctx.fillStyle = '#02030a';
+        ctx.globalAlpha = 0.7;
+        ctx.fillRect(tx - textW/2 - 2, ty - 1, textW + 4, fontSize + 2);
+        ctx.globalAlpha = isSelected || isHovered ? 1 : isNeighborOfSelected ? 0.8 : 0.6;
+        ctx.fillStyle = isSelected ? '#c4d8e4' : isHovered ? '#c4d8e4' : '#607888';
+        ctx.fillText(label, tx, ty);
+        ctx.globalAlpha = 1;
       }
 
-      // Question badge
-      if (n.questions > 0) {
-        ctx.font = 'bold 8px monospace';
+      // ── Question badge (small, offset) ─────────
+      if (n.questions > 0 && (camZoom > 0.5 || isSelected || isHovered)) {
+        const bx = n.x + r + 2, by = n.y - r - 2;
+        const badgeText = String(n.questions);
+        ctx.font = 'bold 7px monospace';
+        const bw = ctx.measureText(badgeText).width + 4;
+        // Badge background
         ctx.fillStyle = '#f59e0b';
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(bx + bw/2 - 1, by, 5, 0, Math.PI * 2);
+        ctx.fill();
+        // Badge text
+        ctx.fillStyle = '#02030a';
         ctx.textAlign = 'center';
-        ctx.fillText(n.questions + '?', n.x + r + 6, n.y - 2);
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, bx + bw/2 - 1, by);
+        ctx.globalAlpha = 1;
       }
     }
 
-    ctx.restore();
+    // Status indicator
+    if (simAlpha > 0.01) {
+      ctx.restore();
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.fillStyle = '#1a4458';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`settling… ${(simAlpha * 100).toFixed(0)}%`, w - 12, 16);
+      ctx.restore();
+    } else {
+      ctx.restore();
+    }
+
     requestAnimationFrame(tick);
   }
 
