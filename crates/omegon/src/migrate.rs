@@ -466,3 +466,95 @@ fn save_thinking_to_profile(cwd: &Path, level: &str) {
     profile.thinking_level = Some(level.to_string());
     let _ = profile.save(cwd);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_sources_returns_list() {
+        let sources = detect_sources();
+        assert!(!sources.is_empty(), "should list at least some sources");
+        // Every source should have a name and description
+        for (name, desc, _found) in &sources {
+            assert!(!name.is_empty());
+            assert!(!desc.is_empty());
+        }
+    }
+
+    #[test]
+    fn run_auto_doesnt_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = run("auto", dir.path());
+        assert_eq!(report.source, "auto-detect");
+        // Should complete without panic even with no sources
+    }
+
+    #[test]
+    fn run_unknown_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = run("nonexistent", dir.path());
+        assert!(!report.warnings.is_empty() || report.items.is_empty(),
+            "unknown source should warn or have no items");
+    }
+
+    #[test]
+    fn migration_report_summary() {
+        let mut report = MigrationReport::new("test");
+        assert!(report.summary().contains("test"));
+
+        report.add("auth", "Found API key");
+        report.add("model", "claude-sonnet-4");
+        assert!(report.summary().contains("auth"));
+        assert!(report.summary().contains("model"));
+    }
+
+    #[test]
+    fn migration_report_with_warnings() {
+        let mut report = MigrationReport::new("test");
+        report.warnings.push("Config file malformed".into());
+        let summary = report.summary();
+        assert!(summary.contains("malformed") || summary.contains("warning"),
+            "should surface warnings: {summary}");
+    }
+
+    #[test]
+    fn migrate_cursor_from_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = migrate_cursor(dir.path());
+        // Should complete without panic
+        assert_eq!(report.source, "Cursor IDE");
+    }
+
+    #[test]
+    fn migrate_aider_from_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = migrate_aider(dir.path());
+        assert_eq!(report.source, "Aider");
+    }
+
+    #[test]
+    fn migrate_windsurf_from_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = migrate_windsurf(dir.path());
+        assert_eq!(report.source, "Windsurf IDE");
+    }
+
+    #[test]
+    fn migrate_windsurf_with_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".windsurfrules"), "Always use TypeScript\nPrefer functional style\n").unwrap();
+        let report = migrate_windsurf(dir.path());
+        assert!(!report.items.is_empty(), "should find windsurf rules");
+    }
+
+    #[test]
+    fn migrate_cursor_with_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor_dir = dir.path().join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(cursor_dir.join("rules"), "Use Rust\nNo unwrap\n").unwrap();
+        let report = migrate_cursor(dir.path());
+        assert!(!report.items.is_empty(), "should find cursor rules");
+    }
+}

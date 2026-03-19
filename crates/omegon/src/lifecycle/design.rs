@@ -923,3 +923,129 @@ mod integration_tests {
         eprintln!("Scanned {} design nodes from {}", nodes.len(), docs_dir.display());
     }
 }
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    #[test]
+    fn create_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+
+        let node = create_node(&docs, "new-node", "New Node", Some("parent"), None, &["rust".into(), "test".into()], "Overview text.").unwrap();
+        assert_eq!(node.id, "new-node");
+        assert_eq!(node.status, NodeStatus::Seed);
+
+        // Read it back
+        let content = fs::read_to_string(&node.file_path).unwrap();
+        let fm = parse_frontmatter(&content).unwrap();
+        let read_node = node_from_frontmatter(&fm, node.file_path.clone()).unwrap();
+        assert_eq!(read_node.id, "new-node");
+        assert_eq!(read_node.title, "New Node");
+        assert_eq!(read_node.parent.as_deref(), Some("parent"));
+        assert_eq!(read_node.tags, vec!["rust", "test"]);
+    }
+
+    #[test]
+    fn create_duplicate_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        create_node(&docs, "dup", "Dup", None, None, &[], "").unwrap();
+        assert!(create_node(&docs, "dup", "Dup2", None, None, &[], "").is_err());
+    }
+
+    #[test]
+    fn update_node_preserves_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let mut node = create_node(&docs, "upd", "Update Test", None, None, &[], "Original overview.").unwrap();
+
+        // Add a decision first
+        add_decision(&node, "Use X", "decided", "Because Y").unwrap();
+
+        // Now update status — body should be preserved
+        let content_before = fs::read_to_string(&node.file_path).unwrap();
+        assert!(content_before.contains("Use X"));
+
+        update_node(&mut node, |n| { n.status = NodeStatus::Decided; }).unwrap();
+        assert_eq!(node.status, NodeStatus::Decided);
+
+        let content_after = fs::read_to_string(&node.file_path).unwrap();
+        assert!(content_after.contains("Use X"), "decision should be preserved after status update");
+        assert!(content_after.contains("decided"), "frontmatter should show new status");
+        assert!(content_after.contains("Original overview"), "overview should be preserved");
+    }
+
+    #[test]
+    fn add_research_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let node = create_node(&docs, "res", "Research Test", None, None, &[], "").unwrap();
+
+        add_research(&node, "First Topic", "Content of first.").unwrap();
+        add_research(&node, "Second Topic", "Content of second.").unwrap();
+
+        let sections = read_node_sections(&node).unwrap();
+        assert_eq!(sections.research.len(), 2);
+        assert_eq!(sections.research[0].heading, "First Topic");
+        assert_eq!(sections.research[1].heading, "Second Topic");
+    }
+
+    #[test]
+    fn add_impl_notes_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let node = create_node(&docs, "impl", "Impl Test", None, None, &[], "").unwrap();
+
+        add_impl_notes(&node, &[
+            FileScope { path: "src/foo.rs".into(), description: "Main impl".into(), action: Some("new".into()) },
+        ], &["Must handle UTF-8".into()]).unwrap();
+
+        let sections = read_node_sections(&node).unwrap();
+        assert_eq!(sections.impl_file_scope.len(), 1);
+        assert_eq!(sections.impl_file_scope[0].path, "src/foo.rs");
+        assert_eq!(sections.impl_constraints.len(), 1);
+    }
+
+    #[test]
+    fn update_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let mut node = create_node(&docs, "q", "Q Test", None, None, &[], "").unwrap();
+
+        update_node(&mut node, |n| {
+            n.open_questions.push("Question 1?".into());
+            n.open_questions.push("Question 2?".into());
+        }).unwrap();
+
+        let content = fs::read_to_string(&node.file_path).unwrap();
+        let fm = parse_frontmatter(&content).unwrap();
+        let read = node_from_frontmatter(&fm, node.file_path.clone()).unwrap();
+        assert_eq!(read.open_questions.len(), 2);
+
+        // Remove one
+        update_node(&mut node, |n| {
+            n.open_questions.retain(|q| q != "Question 1?");
+        }).unwrap();
+
+        let content = fs::read_to_string(&node.file_path).unwrap();
+        let fm = parse_frontmatter(&content).unwrap();
+        let read = node_from_frontmatter(&fm, node.file_path.clone()).unwrap();
+        assert_eq!(read.open_questions.len(), 1);
+        assert_eq!(read.open_questions[0], "Question 2?");
+    }
+
+    #[test]
+    fn serialization_handles_special_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let node = create_node(&docs, "special", "Node with \"quotes\" and — dashes", None, None, &[], "").unwrap();
+
+        let content = fs::read_to_string(&node.file_path).unwrap();
+        let fm = parse_frontmatter(&content).unwrap();
+        let read = node_from_frontmatter(&fm, node.file_path).unwrap();
+        assert!(read.title.contains("quotes"));
+        assert!(read.title.contains("—"));
+    }
+}

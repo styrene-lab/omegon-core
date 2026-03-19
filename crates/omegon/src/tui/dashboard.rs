@@ -226,3 +226,137 @@ fn stage_badge(stage: ChangeStage, t: &dyn Theme) -> (&'static str, Color) {
         ChangeStage::Archived => ("✓", t.success()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::cleave::ChildProgress;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn buf_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| buf[(x, y)].symbol().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn empty_dashboard_renders() {
+        let state = DashboardState::default();
+        let backend = TestBackend::new(36, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+    }
+
+    #[test]
+    fn dashboard_with_focused_node() {
+        let mut state = DashboardState::default();
+        state.focused_node = Some(FocusedNodeSummary {
+            id: "test-node".into(),
+            title: "Test Node".into(),
+            status: NodeStatus::Exploring,
+            open_questions: 3,
+            decisions: 2,
+        });
+        let backend = TestBackend::new(36, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text = buf_text(&terminal);
+        assert!(text.contains("test-node"), "should render node id: {text}");
+    }
+
+    #[test]
+    fn dashboard_with_changes() {
+        let mut state = DashboardState::default();
+        state.active_changes = vec![ChangeSummary {
+            name: "my-change".into(),
+            stage: ChangeStage::Implementing,
+            done_tasks: 3,
+            total_tasks: 8,
+        }];
+        let backend = TestBackend::new(36, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text = buf_text(&terminal);
+        assert!(text.contains("my-change"), "should render change name: {text}");
+    }
+
+    #[test]
+    fn dashboard_with_cleave_progress() {
+        let mut state = DashboardState::default();
+        state.cleave = Some(CleaveProgress {
+            active: true,
+            run_id: "clv-test".into(),
+            total_children: 3,
+            completed: 1,
+            failed: 0,
+            children: vec![
+                ChildProgress { label: "task-a".into(), status: "completed".into(), duration_secs: Some(12.0) },
+                ChildProgress { label: "task-b".into(), status: "running".into(), duration_secs: None },
+                ChildProgress { label: "task-c".into(), status: "pending".into(), duration_secs: None },
+            ],
+        });
+        let backend = TestBackend::new(36, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text = buf_text(&terminal);
+        assert!(text.contains("1/3"), "should show progress: {text}");
+    }
+
+    #[test]
+    fn dashboard_handles_refresh_empty() {
+        let handles = DashboardHandles::default();
+        let mut state = DashboardState::default();
+        handles.refresh_into(&mut state);
+        assert!(state.focused_node.is_none());
+        assert!(state.active_changes.is_empty());
+    }
+
+    #[test]
+    fn session_stats_render() {
+        let mut state = DashboardState::default();
+        state.turns = 15;
+        state.tool_calls = 42;
+        state.compactions = 2;
+        let backend = TestBackend::new(36, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text = buf_text(&terminal);
+        assert!(text.contains("15"), "should show turns: {text}");
+        assert!(text.contains("42"), "should show tool calls: {text}");
+    }
+
+    #[test]
+    fn status_color_mapping() {
+        let t = super::super::theme::Alpharius;
+        assert_eq!(status_color(NodeStatus::Seed, &t), t.dim());
+        assert_eq!(status_color(NodeStatus::Exploring, &t), t.accent());
+        assert_eq!(status_color(NodeStatus::Implemented, &t), t.success());
+        assert_eq!(status_color(NodeStatus::Blocked, &t), t.error());
+    }
+
+    #[test]
+    fn stage_badge_mapping() {
+        let t = super::super::theme::Alpharius;
+        let (icon, _) = stage_badge(ChangeStage::Implementing, &t);
+        assert_eq!(icon, "⟳");
+        let (icon, _) = stage_badge(ChangeStage::Archived, &t);
+        assert_eq!(icon, "✓");
+    }
+}

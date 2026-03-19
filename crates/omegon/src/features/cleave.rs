@@ -497,3 +497,69 @@ mod tests {
         assert!(text.contains("decision"), "should return assessment: {text}");
     }
 }
+
+#[cfg(test)]
+mod assessment_tests {
+    use super::*;
+
+    #[test]
+    fn ui_component_matches() {
+        let r = assess_directive("Build a dialog component for settings", 2.0);
+        assert_eq!(r["pattern_id"], "ui-feature");
+    }
+
+    #[test]
+    fn auth_matches() {
+        let r = assess_directive("Add OAuth token refresh with encryption", 2.0);
+        assert_eq!(r["pattern_id"], "auth-security");
+        assert_eq!(r["decision"], "cleave"); // systems=3 + modifier
+    }
+
+    #[test]
+    fn test_coverage_is_simple() {
+        let r = assess_directive("Add unit test fixtures for the parser", 2.0);
+        assert_eq!(r["pattern_id"], "test-coverage");
+        assert_eq!(r["decision"], "execute"); // systems=1
+    }
+
+    #[test]
+    fn multi_service_is_complex() {
+        let r = assess_directive("Integrate the gRPC service with the message queue", 2.0);
+        assert_eq!(r["pattern_id"], "multi-service");
+        assert_eq!(r["decision"], "cleave"); // systems=4
+    }
+
+    #[test]
+    fn no_keywords_returns_needs_assessment() {
+        let r = assess_directive("make it better", 2.0);
+        assert_eq!(r["method"], "needs_assessment");
+        assert_eq!(r["decision"], "execute");
+    }
+
+    #[test]
+    fn all_modifiers_stack() {
+        let r = assess_directive(
+            "concurrent performance optimization with backward compatibility for cross-platform validation",
+            100.0  // High threshold so we can just check complexity
+        );
+        let mods = r["modifiers"].as_array().unwrap();
+        assert!(mods.len() >= 3, "should detect multiple modifiers: {mods:?}");
+        assert!(r["complexity"].as_f64().unwrap() > 1.0);
+    }
+
+    #[test]
+    fn custom_threshold() {
+        let r = assess_directive("simple refactor extract helpers", 100.0);
+        assert_eq!(r["decision"], "execute", "high threshold should always execute");
+
+        let r = assess_directive("simple refactor extract helpers", 0.5);
+        assert_eq!(r["decision"], "cleave", "low threshold should always cleave");
+    }
+
+    #[test]
+    fn confidence_between_0_and_1() {
+        let r = assess_directive("Deploy a containerized service", 2.0);
+        let conf = r["confidence"].as_f64().unwrap();
+        assert!(conf > 0.0 && conf <= 1.0, "confidence should be (0,1]: {conf}");
+    }
+}

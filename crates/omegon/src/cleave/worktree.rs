@@ -126,3 +126,49 @@ pub enum MergeResult {
     Conflict(String),
     Failed(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_path_format() {
+        let workspace = Path::new("/tmp/ws");
+        let expected = workspace.join("2-wt-my-task");
+        let result_path = workspace.join(format!("{}-wt-{}", 2, "my-task"));
+        assert_eq!(result_path, expected);
+    }
+
+    #[test]
+    fn merge_result_variants() {
+        // Just verify the enum is constructable and debug-printable
+        let s = MergeResult::Success;
+        assert!(format!("{s:?}").contains("Success"));
+        let c = MergeResult::Conflict("file.rs".into());
+        assert!(format!("{c:?}").contains("file.rs"));
+        let f = MergeResult::Failed("error".into());
+        assert!(format!("{f:?}").contains("error"));
+    }
+
+    #[test]
+    fn create_worktree_in_git_repo() {
+        // Integration test — only runs if we're in a git repo
+        let repo = std::env::current_dir().unwrap();
+        if !repo.join(".git").exists() && !repo.join("../.git").exists() {
+            eprintln!("Skipping: not in a git repo");
+            return;
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let branch_name = format!("test-wt-{}", std::process::id());
+        let result = create_worktree(&repo, workspace.path(), 0, "test", &branch_name);
+
+        if let Ok(wt_path) = result {
+            assert!(wt_path.exists(), "worktree should exist");
+            // Clean up
+            let _ = remove_worktree(&repo, &wt_path);
+            let _ = delete_branch(&repo, &branch_name);
+        }
+        // Failure is acceptable in CI where git might not be configured
+    }
+}

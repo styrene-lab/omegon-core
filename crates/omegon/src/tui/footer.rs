@@ -263,3 +263,80 @@ fn short_model(model_id: &str) -> &str {
         .or_else(|| model_id.split('/').next_back())
         .unwrap_or(model_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn footer_renders_without_panic() {
+        let data = FooterData {
+            model_id: "claude-sonnet-4-6".into(),
+            model_provider: "anthropic".into(),
+            context_percent: 45.0,
+            context_window: 200_000,
+            total_facts: 150,
+            turn: 5,
+            tool_calls: 12,
+            ..Default::default()
+        };
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            data.render(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+    }
+
+    #[test]
+    fn footer_narrow_terminal() {
+        let data = FooterData::default();
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            data.render(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+    }
+
+    #[test]
+    fn footer_shows_model() {
+        let data = FooterData {
+            model_id: "claude-opus-4-6".into(),
+            model_provider: "anthropic".into(),
+            ..Default::default()
+        };
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            data.render(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text: String = { let buf = terminal.backend().buffer(); let a = buf.area; (0..a.height).flat_map(|y| (0..a.width).map(move |x| buf[(x, y)].symbol().to_string())).collect() };
+        assert!(text.contains("opus"), "should show model: {text}");
+    }
+
+    #[test]
+    fn footer_shows_context_percent() {
+        let data = FooterData {
+            context_percent: 75.0,
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let backend = TestBackend::new(120, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            data.render(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+        
+        let text: String = { let buf = terminal.backend().buffer(); let a = buf.area; (0..a.height).flat_map(|y| (0..a.width).map(move |x| buf[(x, y)].symbol().to_string())).collect() };
+        assert!(text.contains("75") || text.contains("200k"), "should show context info: {text}");
+    }
+
+    #[test]
+    fn cwd_default_is_empty() {
+        let data = FooterData::default();
+        assert!(data.model_id.is_empty());
+        assert_eq!(data.context_percent, 0.0);
+    }
+}

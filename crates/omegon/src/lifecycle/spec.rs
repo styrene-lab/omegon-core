@@ -620,3 +620,98 @@ mod integration_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    #[test]
+    fn propose_creates_directory_and_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+
+        let change = propose_change(repo, "my-change", "My Change", "Do things").unwrap();
+        assert_eq!(change.name, "my-change");
+        assert_eq!(change.stage, ChangeStage::Proposed);
+        assert!(change.has_proposal);
+        assert!(change.path.join("proposal.md").exists());
+
+        let content = fs::read_to_string(change.path.join("proposal.md")).unwrap();
+        assert!(content.contains("My Change"));
+        assert!(content.contains("Do things"));
+    }
+
+    #[test]
+    fn propose_duplicate_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        propose_change(dir.path(), "dup", "Dup", "intent").unwrap();
+        assert!(propose_change(dir.path(), "dup", "Dup2", "intent2").is_err());
+    }
+
+    #[test]
+    fn add_spec_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        propose_change(dir.path(), "spec-test", "Spec Test", "intent").unwrap();
+
+        let path = add_spec(dir.path(), "spec-test", "auth", "# auth specs").unwrap();
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# auth specs");
+    }
+
+    #[test]
+    fn add_spec_nested_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        propose_change(dir.path(), "nested", "Nested", "intent").unwrap();
+
+        let path = add_spec(dir.path(), "nested", "auth/tokens", "# token specs").unwrap();
+        assert!(path.exists());
+        assert!(path.to_str().unwrap().contains("auth"));
+    }
+
+    #[test]
+    fn add_spec_nonexistent_change_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(add_spec(dir.path(), "nope", "auth", "specs").is_err());
+    }
+
+    #[test]
+    fn archive_moves_to_archive_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let change = propose_change(dir.path(), "to-archive", "Archive Me", "intent").unwrap();
+        assert!(change.path.exists());
+
+        archive_change(dir.path(), "to-archive").unwrap();
+        assert!(!change.path.exists(), "original should be gone");
+        assert!(dir.path().join("openspec/archive/to-archive").exists(), "should be in archive");
+    }
+
+    #[test]
+    fn archive_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(archive_change(dir.path(), "nope").is_err());
+    }
+
+    #[test]
+    fn propose_then_list() {
+        let dir = tempfile::tempdir().unwrap();
+        propose_change(dir.path(), "listed", "Listed Change", "intent").unwrap();
+
+        let changes = list_changes(dir.path());
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "listed");
+        assert_eq!(changes[0].stage, ChangeStage::Proposed);
+    }
+
+    #[test]
+    fn propose_add_spec_updates_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        propose_change(dir.path(), "staged", "Staged", "intent").unwrap();
+        add_spec(dir.path(), "staged", "core", "# core\n\n### Requirement: Works\n\n#### Scenario: Basic\n\nGiven X\nWhen Y\nThen Z\n").unwrap();
+
+        let changes = list_changes(dir.path());
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].stage, ChangeStage::Specified);
+        assert!(changes[0].has_specs);
+    }
+}

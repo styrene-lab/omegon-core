@@ -127,3 +127,75 @@ impl Selector {
         frame.render_widget(widget, popup_area);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_options() -> Vec<SelectOption> {
+        vec![
+            SelectOption { value: "a".into(), label: "Alpha".into(), description: "First".into(), active: false },
+            SelectOption { value: "b".into(), label: "Beta".into(), description: "Second".into(), active: true },
+            SelectOption { value: "c".into(), label: "Gamma".into(), description: "Third".into(), active: false },
+        ]
+    }
+
+    #[test]
+    fn cursor_starts_on_active() {
+        let sel = Selector::new("Test", make_options());
+        assert_eq!(sel.cursor, 1, "should start on the active option");
+        assert_eq!(sel.selected_value(), "b");
+    }
+
+    #[test]
+    fn move_up_and_down() {
+        let mut sel = Selector::new("Test", make_options());
+        assert_eq!(sel.cursor, 1);
+
+        sel.move_up();
+        assert_eq!(sel.cursor, 0);
+        assert_eq!(sel.selected_value(), "a");
+
+        sel.move_up(); // already at top
+        assert_eq!(sel.cursor, 0);
+
+        sel.move_down();
+        sel.move_down();
+        assert_eq!(sel.cursor, 2);
+        assert_eq!(sel.selected_value(), "c");
+
+        sel.move_down(); // already at bottom
+        assert_eq!(sel.cursor, 2);
+    }
+
+    #[test]
+    fn dismiss() {
+        let mut sel = Selector::new("Test", make_options());
+        assert!(sel.visible);
+        sel.dismiss();
+        assert!(!sel.visible);
+    }
+
+    #[test]
+    fn no_active_starts_at_zero() {
+        let options = vec![
+            SelectOption { value: "x".into(), label: "X".into(), description: "".into(), active: false },
+            SelectOption { value: "y".into(), label: "Y".into(), description: "".into(), active: false },
+        ];
+        let sel = Selector::new("Test", options);
+        assert_eq!(sel.cursor, 0);
+    }
+
+    #[test]
+    fn single_option() {
+        let options = vec![
+            SelectOption { value: "only".into(), label: "Only".into(), description: "".into(), active: true },
+        ];
+        let mut sel = Selector::new("Test", options);
+        sel.move_up();
+        assert_eq!(sel.cursor, 0);
+        sel.move_down();
+        assert_eq!(sel.cursor, 0);
+        assert_eq!(sel.selected_value(), "only");
+    }
+}

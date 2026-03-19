@@ -118,3 +118,84 @@ fn truncate_tail(output: &str) -> Truncated {
         total_bytes,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_tail_no_truncation() {
+        let output = "line1\nline2\nline3";
+        let result = truncate_tail(output);
+        assert!(!result.was_truncated);
+        assert_eq!(result.total_lines, 3);
+        assert_eq!(result.content, output);
+    }
+
+    #[test]
+    fn truncate_tail_by_lines() {
+        let output = (0..3000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_tail(&output);
+        assert!(result.was_truncated);
+        assert_eq!(result.total_lines, 3000);
+        assert!(result.content.lines().count() <= MAX_OUTPUT_LINES);
+        // Should keep the LAST lines (tail)
+        assert!(result.content.contains("line 2999"));
+    }
+
+    #[test]
+    fn truncate_tail_by_bytes() {
+        let output = (0..100).map(|_| "x".repeat(1000)).collect::<Vec<_>>().join("\n");
+        let result = truncate_tail(&output);
+        assert!(result.was_truncated);
+        assert!(result.content.len() <= MAX_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn truncate_empty() {
+        let result = truncate_tail("");
+        assert!(!result.was_truncated);
+        assert_eq!(result.total_lines, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_echo() {
+        let cancel = CancellationToken::new();
+        let result = execute("echo hello", Path::new("."), None, cancel).await.unwrap();
+        let text = result.content[0].as_text().unwrap();
+        assert!(text.contains("hello"), "should contain output: {text}");
+        assert_eq!(result.details["exitCode"], 0);
+    }
+
+    #[tokio::test]
+    async fn execute_nonzero_exit() {
+        let cancel = CancellationToken::new();
+        let result = execute("exit 42", Path::new("."), None, cancel).await.unwrap();
+        assert_eq!(result.details["exitCode"], 42);
+        let text = result.content[0].as_text().unwrap();
+        assert!(text.contains("42"), "should mention exit code: {text}");
+    }
+
+    #[tokio::test]
+    async fn execute_stderr() {
+        let cancel = CancellationToken::new();
+        let result = execute("echo err >&2", Path::new("."), None, cancel).await.unwrap();
+        let text = result.content[0].as_text().unwrap();
+        assert!(text.contains("err"), "should capture stderr: {text}");
+    }
+
+    #[tokio::test]
+    async fn execute_cancel() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = execute("sleep 10", Path::new("."), None, cancel).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_timeout() {
+        let cancel = CancellationToken::new();
+        let result = execute("sleep 10", Path::new("."), Some(1), cancel).await;
+        assert!(result.is_err());
+    }
+}
