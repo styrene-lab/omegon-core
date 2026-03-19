@@ -257,10 +257,51 @@ fn render_tool_card(
     };
 
     // ── Card block with rounded borders ─────────────────────────
+    // For bash, show a short description of what the command does
+    let display_name = if name == "bash" {
+        if let Some(args) = detail_args {
+            let cmd = args.lines().next().unwrap_or(args);
+            let first_word = cmd.split_whitespace().next().unwrap_or("bash");
+            match first_word {
+                "grep" | "rg" => "search",
+                "find" => "find",
+                "ls" | "dir" => "list",
+                "cat" | "head" | "tail" | "bat" => "read",
+                "sed" | "awk" => "transform",
+                "curl" | "wget" => "fetch",
+                "git" => "git",
+                "cargo" => "cargo",
+                "npm" | "npx" | "pnpm" | "yarn" | "bun" => "npm",
+                "docker" | "podman" => "container",
+                "kubectl" | "k" => "kubectl",
+                "make" | "cmake" => "build",
+                "python" | "python3" | "pip" => "python",
+                "rustc" | "rustup" => "rust",
+                "go" => "go",
+                "dig" | "nslookup" | "host" => "dns",
+                "ssh" | "scp" | "rsync" => "remote",
+                "tar" | "zip" | "unzip" | "gzip" => "archive",
+                "wc" => "count",
+                "sort" | "uniq" => "sort",
+                "diff" | "patch" => "diff",
+                "mkdir" | "rm" | "mv" | "cp" | "chmod" | "chown" => "fs",
+                "echo" | "printf" => "echo",
+                "test" | "[" => "test",
+                "vault" => "vault",
+                "sh" | "bash" | "zsh" => "shell",
+                _ => first_word,
+            }
+        } else {
+            "bash"
+        }
+    } else {
+        name
+    };
+
     let title = Line::from(vec![
         Span::styled(format!(" {icon} "), Style::default().fg(status_color)),
         Span::styled(
-            format!("{name} "),
+            format!("{display_name} "),
             Style::default().fg(status_color).add_modifier(Modifier::BOLD),
         ),
     ]);
@@ -433,7 +474,19 @@ fn try_highlight<'a>(
 
     let cache = syntax_cache();
     let syntax = cache.syntax_set.find_syntax_by_name(syntax_name)?;
-    let highlighter = Highlighter::new(cache.theme.clone());
+    // Show line numbers for file content, not command output.
+    // For read/edit/write tools: always show (it's file content).
+    // For bash: show only if the command reads a file (cat, head, tail, sed, etc.)
+    let show_line_numbers = match tool_name {
+        "read" | "edit" | "write" => true,
+        "bash" => detail_args.is_some_and(|cmd| {
+            let first_word = cmd.split_whitespace().next().unwrap_or("");
+            matches!(first_word, "cat" | "head" | "tail" | "sed" | "awk" | "less" | "bat" | "nl")
+        }),
+        _ => false,
+    };
+    let highlighter = Highlighter::new(cache.theme.clone())
+        .line_numbers(show_line_numbers);
     let text_lines: Vec<&str> = text.lines().collect();
     let highlighted = highlighter.highlight_lines(text_lines, syntax, &cache.syntax_set).ok()?;
     Some(highlighted.lines.into_iter().map(|line| {
@@ -642,7 +695,7 @@ mod tests {
         let text = buf_text(&buf, area);
         assert!(text.contains("╭"), "should have top border: {text}");
         assert!(text.contains("╰"), "should have bottom border: {text}");
-        assert!(text.contains("bash"), "should have tool name: {text}");
+        assert!(text.contains("list"), "should have display name for ls: {text}");
         assert!(text.contains("✓"), "should have checkmark: {text}");
     }
 

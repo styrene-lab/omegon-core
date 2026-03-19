@@ -334,7 +334,7 @@ mod tests {
             let mut row = String::new();
             for x in 0..80 { row.push_str(buf[(x, y)].symbol()); }
             if row.contains("hello") { found_hello = true; }
-            if row.contains("bash") { found_bash = true; }
+            if row.contains("echo") { found_bash = true; } // "echo" from args renders in card
         }
         assert!(found_hello, "should render user prompt");
         assert!(found_bash, "should render tool card");
