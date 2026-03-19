@@ -16,7 +16,9 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod bridge;
+pub mod bus;
 mod cleave;
+pub mod features;
 mod context;
 mod migrate;
 
