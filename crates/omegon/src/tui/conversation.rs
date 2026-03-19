@@ -175,24 +175,32 @@ impl ConversationView {
         }
     }
 
-    /// Find the nearest tool card segment at or above the current scroll position.
-    /// Returns the segment index if found.
-    pub fn focused_tool_card(&self, _viewport_height: u16, theme: &dyn super::theme::Theme) -> Option<usize> {
-        // Find the first visible tool card
-        let width = 80; // approximate — will be corrected by actual render
-        let mut y: u16 = 0;
+    /// Find the nearest tool card segment visible in the viewport.
+    /// Uses cached heights from the last render (which used the real width).
+    pub fn focused_tool_card(&self) -> Option<usize> {
         let offset = self.conv_state.scroll_offset;
+        let heights = &self.conv_state.heights;
+        if heights.len() != self.segments.len() {
+            // Heights not computed yet — fall back to last tool card
+            return self.segments.iter().rposition(|s| matches!(s, Segment::ToolCard { .. }));
+        }
 
+        let total: u16 = heights.iter().sum();
+        // Convert bottom-based offset to top-based
+        let viewport_top = total.saturating_sub(offset);
+
+        let mut y: u16 = 0;
         for (i, seg) in self.segments.iter().enumerate() {
-            let h = seg.height(width, theme);
-            let seg_top = y;
-            y += h;
+            y += heights[i];
 
-            if matches!(seg, Segment::ToolCard { .. }) && seg_top >= offset {
+            if matches!(seg, Segment::ToolCard { .. })
+                && y > viewport_top.saturating_sub(total / 2)
+            {
                 return Some(i);
             }
         }
-        None
+        // Fall back to last tool card
+        self.segments.iter().rposition(|s| matches!(s, Segment::ToolCard { .. }))
     }
 
     /// Clear all segments (for /clear command).
@@ -316,5 +324,80 @@ mod tests {
         }
         assert!(found_hello, "should render user prompt");
         assert!(found_bash, "should render tool card");
+    }
+
+    #[test]
+    fn toggle_expand_changes_state() {
+        let mut cv = ConversationView::new();
+        cv.push_tool_start("t1", "read", Some("file.rs"), Some("file.rs"));
+        cv.push_tool_end("t1", false, Some("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15"));
+
+        // Default is collapsed
+        if let Segment::ToolCard { expanded, .. } = &cv.segments[0] {
+            assert!(!expanded, "should start collapsed");
+        }
+
+        // Toggle to expanded
+        cv.toggle_expand(0);
+        if let Segment::ToolCard { expanded, .. } = &cv.segments[0] {
+            assert!(expanded, "should be expanded after toggle");
+        }
+
+        // Toggle back to collapsed
+        cv.toggle_expand(0);
+        if let Segment::ToolCard { expanded, .. } = &cv.segments[0] {
+            assert!(!expanded, "should be collapsed after second toggle");
+        }
+    }
+
+    #[test]
+    fn toggle_expand_on_non_tool_is_noop() {
+        let mut cv = ConversationView::new();
+        cv.push_user("hello");
+        cv.toggle_expand(0); // UserPrompt — should not panic
+    }
+
+    #[test]
+    fn expanded_card_has_more_height() {
+        let mut cv = ConversationView::new();
+        let long_result = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        cv.push_tool_start("t1", "read", Some("file.rs"), Some("file.rs"));
+        cv.push_tool_end("t1", false, Some(&long_result));
+
+        let t = Alpharius;
+        let collapsed_h = cv.segments[0].height(80, &t);
+        cv.toggle_expand(0);
+        let expanded_h = cv.segments[0].height(80, &t);
+        assert!(expanded_h > collapsed_h,
+            "expanded ({expanded_h}) should be taller than collapsed ({collapsed_h})");
+    }
+
+    #[test]
+    fn focused_tool_card_finds_card() {
+        let mut cv = ConversationView::new();
+        cv.push_user("hello");
+        cv.push_tool_start("t1", "bash", Some("ls"), Some("ls"));
+        cv.push_tool_end("t1", false, Some("file.txt"));
+        cv.push_user("another");
+        cv.push_tool_start("t2", "read", Some("a.rs"), Some("a.rs"));
+        cv.push_tool_end("t2", false, Some("fn main(){}"));
+
+        let result = cv.focused_tool_card();
+        assert!(result.is_some(), "should find a tool card");
+        let idx = result.unwrap();
+        assert!(matches!(&cv.segments[idx], Segment::ToolCard { .. }));
+    }
+
+    #[test]
+    fn full_result_stored_not_truncated() {
+        let mut cv = ConversationView::new();
+        let long_result = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        cv.push_tool_start("t1", "read", Some("file.rs"), Some("file.rs"));
+        cv.push_tool_end("t1", false, Some(&long_result));
+
+        if let Segment::ToolCard { detail_result, .. } = &cv.segments[0] {
+            let dr = detail_result.as_ref().unwrap();
+            assert_eq!(dr.lines().count(), 50, "full result should be stored, not truncated");
+        }
     }
 }

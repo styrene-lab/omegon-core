@@ -4,11 +4,29 @@
 //! background, borders, and internal layout. The ConversationWidget
 //! composes these into a scrollable view.
 
+use std::sync::OnceLock;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, BorderType, Padding, Paragraph, Wrap};
-use tui_syntax_highlight::Highlighter as SyntaxHighlighter;
+use tui_syntax_highlight::Highlighter;
 
 use super::theme::Theme;
+
+/// Cached syntax highlighting resources — loaded once, reused forever.
+struct SyntaxCache {
+    syntax_set: syntect::parsing::SyntaxSet,
+    theme: syntect::highlighting::Theme,
+}
+
+fn syntax_cache() -> &'static SyntaxCache {
+    static CACHE: OnceLock<SyntaxCache> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let ss = syntect::parsing::SyntaxSet::load_defaults_newlines();
+        let ts = syntect::highlighting::ThemeSet::load_defaults();
+        let theme = ts.themes["base16-ocean.dark"].clone();
+        SyntaxCache { syntax_set: ss, theme }
+    })
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment enum — the typed conversation model
@@ -76,82 +94,60 @@ impl Segment {
     }
 
     /// Calculate the height this segment needs at the given width.
-    /// Uses line counting rather than render-and-measure — simpler and
-    /// avoids temp buffer allocation.
-    pub fn height(&self, width: u16, _t: &dyn Theme) -> u16 {
+    /// Renders into a temp buffer to get the exact height — matches
+    /// Paragraph's word-aware wrapping precisely.
+    pub fn height(&self, width: u16, t: &dyn Theme) -> u16 {
         if width == 0 { return 1; }
-        let w = width as usize;
 
+        // Quick paths for fixed-height types
         match self {
-            Self::TurnSeparator => 1,
-            Self::LifecycleEvent { .. } => 1,
+            Self::TurnSeparator => return 1,
+            Self::LifecycleEvent { .. } => return 1,
+            _ => {}
+        }
 
-            Self::UserPrompt { text } => {
-                // ▸ prefix + text, wrapped, + 1 blank line after
-                let text_lines = wrapped_line_count(text, w.saturating_sub(4));
-                (text_lines as u16).max(1) + 1
-            }
-
+        // Estimate max height for the temp buffer
+        let estimate = match self {
+            Self::UserPrompt { text } => (text.len() / width.max(1) as usize) as u16 + 4,
             Self::AssistantText { text, thinking, .. } => {
-                let mut h: u16 = 0;
-                if !thinking.is_empty() {
-                    h += 1; // "◌ thinking…" header
-                    h += thinking.lines().count().min(20) as u16;
-                    h += 1; // gap
-                }
-                // Each text line may wrap
-                for line in text.lines() {
-                    h += wrapped_line_count(line, w.saturating_sub(2)) as u16;
-                }
-                if text.is_empty() && thinking.is_empty() {
-                    h += 1; // streaming cursor "…"
-                }
-                h.max(1) + 1 // +1 spacing after
+                (text.lines().count() + thinking.lines().count()) as u16 + 6
             }
-
-            Self::ToolCard { name, detail_args, detail_result, expanded, .. } => {
-                let mut h: u16 = 2; // top border + bottom border
-                let inner_w = w.saturating_sub(6); // borders + padding
-                let max_lines: usize = if *expanded { 200 } else { 12 };
-
-                // Args
-                if let Some(args) = detail_args {
-                    let lines = if *name == "bash" {
-                        args.lines().count().min(4)
-                    } else {
-                        1
-                    };
-                    h += lines as u16;
-                }
-                // Separator
-                if detail_args.is_some() && detail_result.is_some() {
-                    h += 1;
-                }
-                // Result
-                if let Some(result) = detail_result {
-                    let total = result.lines().count();
-                    let show = total.min(max_lines);
-                    for line in result.lines().take(show) {
-                        h += wrapped_line_count(line, inner_w) as u16;
-                    }
-                    if total > show { h += 1; } // truncation notice
-                }
-                h.max(3) + 1
+            Self::ToolCard { detail_args, detail_result, expanded, .. } => {
+                let max_r = if *expanded { 200 } else { 12 };
+                let a = detail_args.as_ref().map(|a| a.lines().count()).unwrap_or(0);
+                let r = detail_result.as_ref().map(|r| r.lines().count().min(max_r)).unwrap_or(0);
+                (a + r + 6) as u16
             }
+            Self::SystemNotification { text } => text.lines().count() as u16 + 3,
+            _ => 4,
+        };
 
-            Self::SystemNotification { text } => {
-                let lines = text.lines().count();
-                (lines as u16).max(1) + 1
+        // Render into temp buffer — cap at 300 rows to avoid absurd allocations
+        let h = estimate.clamp(4, 300);
+        let temp_area = Rect::new(0, 0, width, h);
+        let mut temp_buf = Buffer::empty(temp_area);
+        self.render(temp_area, &mut temp_buf, t);
+
+        // Find the last row that has any non-default content
+        let mut last_used: u16 = 0;
+        for y in (0..h).rev() {
+            let mut has_content = false;
+            for x in 0..width {
+                let cell = &temp_buf[(x, y)];
+                if cell.symbol() != " " || cell.fg != Color::Reset || cell.bg != Color::Reset {
+                    has_content = true;
+                    break;
+                }
+            }
+            if has_content {
+                last_used = y + 1; // +1 because y is 0-indexed
+                break;
             }
         }
-    }
-}
 
-/// How many terminal rows a line of text occupies when wrapped at `width`.
-fn wrapped_line_count(text: &str, width: usize) -> usize {
-    if width == 0 || text.is_empty() { return 1; }
-    let len = text.chars().count();
-    len.div_ceil(width).max(1)
+        // Add 1 row spacing after the segment
+        (last_used + 1).max(1)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -415,13 +411,11 @@ fn try_highlight<'a>(
         None
     }?;
 
-    let ss = syntect::parsing::SyntaxSet::load_defaults_newlines();
-    let ts = syntect::highlighting::ThemeSet::load_defaults();
-    let theme = ts.themes.get("base16-ocean.dark")?;
-    let syntax = ss.find_syntax_by_name(syntax_name)?;
-    let highlighter = SyntaxHighlighter::new(theme.clone());
+    let cache = syntax_cache();
+    let syntax = cache.syntax_set.find_syntax_by_name(syntax_name)?;
+    let highlighter = Highlighter::new(cache.theme.clone());
     let text_lines: Vec<&str> = text.lines().collect();
-    let highlighted = highlighter.highlight_lines(text_lines, syntax, &ss).ok()?;
+    let highlighted = highlighter.highlight_lines(text_lines, syntax, &cache.syntax_set).ok()?;
     Some(highlighted.lines.into_iter().map(|line| {
         Line::from(line.spans.into_iter().map(|span| {
             Span::styled(span.content.to_string(), span.style)
@@ -466,7 +460,7 @@ fn render_table_line<'a>(line: &str, t: &dyn Theme) -> Line<'a> {
         // First row cells (header) get bold accent, content rows get fg
         // We can't distinguish header from content without multi-line context,
         // so just use accent_muted for all cells with inline highlighting
-        let cell_spans = super::widgets::highlight_inline_pub(cell_text, t);
+        let cell_spans = super::widgets::highlight_inline(cell_text, t);
         for mut s in cell_spans {
             s.style = s.style.bg(t.surface_bg());
             spans.push(s);
@@ -629,5 +623,53 @@ mod tests {
         seg.render(area, &mut buf, &Alpharius);
         let text = buf_text(&buf, area);
         assert!(text.contains("detailed"), "should show text: {text}");
+    }
+
+    #[test]
+    fn table_line_detection() {
+        assert!(is_table_line("| a | b |"));
+        assert!(is_table_line("|---|---|"));
+        assert!(is_table_line("| Name | Value |"));
+        assert!(!is_table_line("not a table"));
+        assert!(!is_table_line("|")); // too short
+        assert!(!is_table_line("||")); // too short
+    }
+
+    #[test]
+    fn table_separator_detection() {
+        assert!(is_table_separator("|---|---|"));
+        assert!(is_table_separator("| --- | --- |"));
+        assert!(is_table_separator("|:---:|:---:|"));
+        assert!(!is_table_separator("| a | b |")); // has letters
+    }
+
+    #[test]
+    fn table_line_renders() {
+        let line = render_table_line("| Name | Value |", &Alpharius);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("Name"), "should contain cell text: {text}");
+        assert!(text.contains("│"), "should contain box drawing separator: {text}");
+    }
+
+    #[test]
+    fn expanded_tool_card_shows_more() {
+        let long_result = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let seg_collapsed = Segment::ToolCard {
+            id: "1".into(), name: "read".into(),
+            args_summary: None, detail_args: Some("file.rs".into()),
+            result_summary: None, detail_result: Some(long_result.clone()),
+            is_error: false, complete: true, expanded: false,
+        };
+        let seg_expanded = Segment::ToolCard {
+            id: "1".into(), name: "read".into(),
+            args_summary: None, detail_args: Some("file.rs".into()),
+            result_summary: None, detail_result: Some(long_result),
+            is_error: false, complete: true, expanded: true,
+        };
+
+        let h_collapsed = seg_collapsed.height(80, &Alpharius);
+        let h_expanded = seg_expanded.height(80, &Alpharius);
+        assert!(h_expanded > h_collapsed,
+            "expanded ({h_expanded}) should be taller than collapsed ({h_collapsed})");
     }
 }

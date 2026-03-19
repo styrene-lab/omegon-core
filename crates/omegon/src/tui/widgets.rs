@@ -592,12 +592,7 @@ pub fn highlight_line<'a>(line: &str, t: &dyn Theme) -> Line<'a> {
 }
 
 /// Apply inline highlighting: **bold**, `code`, *italic*.
-/// Public alias for use by segments.rs table rendering.
-pub fn highlight_inline_pub<'a>(text: &str, t: &dyn Theme) -> Vec<Span<'a>> {
-    highlight_inline(text, t)
-}
-
-fn highlight_inline<'a>(text: &str, t: &dyn Theme) -> Vec<Span<'a>> {
+pub fn highlight_inline<'a>(text: &str, t: &dyn Theme) -> Vec<Span<'a>> {
     let mut spans: Vec<Span<'a>> = Vec::new();
     let mut chars = text.char_indices().peekable();
     let mut buf = String::new();

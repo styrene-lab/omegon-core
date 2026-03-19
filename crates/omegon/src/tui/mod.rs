@@ -1206,9 +1206,7 @@ pub async fn run_tui(
                             }
                         } else if text.is_empty() {
                             // Toggle nearest tool card expansion
-                            let t = &app.theme;
-                            let viewport_h = terminal.size().map(|s| s.height).unwrap_or(24);
-                            if let Some(idx) = app.conversation.focused_tool_card(viewport_h, t.as_ref()) {
+                            if let Some(idx) = app.conversation.focused_tool_card() {
                                 app.conversation.toggle_expand(idx);
                             }
                         }

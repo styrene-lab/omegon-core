@@ -285,13 +285,15 @@ mod tests {
 
     #[test]
     fn json_theme_loads_from_file() {
-        // This test only works when run from the repo root
-        let path = std::path::Path::new("../../themes/alpharius.json");
+        // Resolve relative to the crate manifest, not cwd
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("../../themes/alpharius.json");
         if path.exists() {
-            let theme = JsonTheme::load(path).expect("should load alpharius.json");
-            // Verify some known values from the file
+            let theme = JsonTheme::load(&path).expect("should load alpharius.json");
             assert_ne!(theme.bg(), Color::Reset, "bg should be loaded");
             assert_ne!(theme.accent(), Color::Reset, "accent should be loaded");
+            // Verify known values from the file
+            assert_eq!(theme.accent(), Color::Rgb(42, 180, 200), "primary should be #2ab4c8");
         }
     }
 }

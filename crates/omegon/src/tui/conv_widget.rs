@@ -17,7 +17,7 @@ pub struct ConvState {
     /// True when the user has manually scrolled away from the bottom.
     pub user_scrolled: bool,
     /// Cached heights for each segment at the last known width.
-    heights: Vec<u16>,
+    pub heights: Vec<u16>,
     /// Terminal width when heights were last computed.
     cached_width: u16,
     /// Number of segments when heights were last computed.
@@ -197,9 +197,10 @@ impl<'a> StatefulWidget for ConversationWidget<'a> {
                     let dst_y = area.y + row;
                     if dst_y >= area.bottom() { break; }
                     for x in 0..area.width {
-                        if src_y < seg_height && x < area.width {
-                            *buf.cell_mut((area.x + x, dst_y)).unwrap() =
-                                temp_buf[(x, src_y)].clone();
+                        if src_y < seg_height
+                            && let Some(cell) = buf.cell_mut((area.x + x, dst_y))
+                        {
+                            *cell = temp_buf[(x, src_y)].clone();
                         }
                     }
                 }
