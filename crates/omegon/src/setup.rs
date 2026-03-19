@@ -19,13 +19,8 @@ use crate::tools;
 /// Everything needed to run an agent loop.
 pub struct AgentSetup {
     /// The event bus — owns all features. The loop dispatches tools and
-    /// emits events through the bus. The bus replaces the old
-    /// `Vec<Box<dyn ToolProvider>>`.
+    /// emits events through the bus.
     pub bus: EventBus,
-    /// Legacy tool providers — kept temporarily so the loop can dispatch
-    /// tools via the existing `&[Box<dyn ToolProvider>]` parameter.
-    /// Will be removed once the loop dispatches through the bus directly.
-    pub tools: Vec<Box<dyn omegon_traits::ToolProvider>>,
     pub context_manager: ContextManager,
     pub conversation: ConversationState,
     pub cwd: PathBuf,
@@ -196,14 +191,6 @@ impl AgentSetup {
         // the bus will provide context via collect_context().
         let context_manager = ContextManager::new(base_prompt, vec![]);
 
-        // ─── Legacy tools vec — bridge until loop uses bus directly ──────
-        // Rebuild a Vec<Box<dyn ToolProvider>> from bus features for backward compat.
-        // This is temporary and will be removed when loop.rs dispatches through bus.
-        let tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![
-            // The bus owns the features; the loop can dispatch through it.
-            // For now, use a BusToolBridge that delegates to the bus.
-        ];
-
         // ─── Conversation ───────────────────────────────────────────────
         let conversation = if let Some(resume_arg) = resume {
             let resume_id = resume_arg;
@@ -230,7 +217,6 @@ impl AgentSetup {
 
         Ok(Self {
             bus,
-            tools,
             context_manager,
             conversation,
             cwd,

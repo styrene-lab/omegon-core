@@ -51,6 +51,8 @@ pub enum TuiCommand {
     Quit,
     /// Switch the model for the next turn.
     SetModel(String),
+    /// Dispatch a bus command from a feature (name, args).
+    BusCommand { name: String, args: String },
     /// Trigger manual compaction.
     Compact,
     /// List saved sessions.
@@ -94,6 +96,8 @@ pub struct App {
     replay_splash: bool,
     /// Visual effects manager (tachyonfx).
     effects: effects::Effects,
+    /// Command definitions from bus features.
+    bus_commands: Vec<omegon_traits::CommandDefinition>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +150,7 @@ impl App {
             working_verb: "Working",
             replay_splash: false,
             effects: effects::Effects::new(),
+            bus_commands: Vec::new(),
         }
     }
 
@@ -611,7 +616,18 @@ impl App {
             }
 
             "exit" | "quit" => SlashResult::Quit,
-            _ => SlashResult::NotACommand,
+            _ => {
+                // Check if a bus feature handles this command
+                if self.bus_commands.iter().any(|c| c.name == cmd) {
+                    let _ = tx.try_send(TuiCommand::BusCommand {
+                        name: cmd.to_string(),
+                        args: args.to_string(),
+                    });
+                    SlashResult::Handled
+                } else {
+                    SlashResult::NotACommand
+                }
+            }
         }
     }
 
@@ -624,18 +640,32 @@ impl App {
 
         if parts.len() <= 1 {
             let prefix = parts.first().copied().unwrap_or("");
-            if prefix.is_empty() {
-                return Self::COMMANDS.iter().map(|(n, d, _)| (n.to_string(), d.to_string())).collect();
+            let mut matches: Vec<(String, String)> = if prefix.is_empty() {
+                Self::COMMANDS.iter().map(|(n, d, _)| (n.to_string(), d.to_string())).collect()
+            } else {
+                Self::COMMANDS.iter()
+                    .filter(|(name, _, _)| name.starts_with(prefix))
+                    .map(|(n, d, _)| (n.to_string(), d.to_string()))
+                    .collect()
+            };
+            // Append bus feature commands
+            for cmd in &self.bus_commands {
+                if prefix.is_empty() || cmd.name.starts_with(prefix) {
+                    matches.push((cmd.name.clone(), cmd.description.clone()));
+                }
             }
-            Self::COMMANDS.iter()
-                .filter(|(name, _, _)| name.starts_with(prefix))
-                .map(|(n, d, _)| (n.to_string(), d.to_string()))
-                .collect()
+            matches
         } else {
             let cmd = parts[0];
             let sub_prefix = parts.get(1).copied().unwrap_or("");
+            // Check built-in commands first, then bus commands
             if let Some((_, _, subs)) = Self::COMMANDS.iter().find(|(n, _, _)| *n == cmd) {
                 subs.iter()
+                    .filter(|s| s.starts_with(sub_prefix))
+                    .map(|s| (format!("{cmd} {s}"), String::new()))
+                    .collect()
+            } else if let Some(bus_cmd) = self.bus_commands.iter().find(|c| c.name == cmd) {
+                bus_cmd.subcommands.iter()
                     .filter(|s| s.starts_with(sub_prefix))
                     .map(|s| (format!("{cmd} {s}"), String::new()))
                     .collect()
@@ -772,6 +802,8 @@ pub struct TuiConfig {
     pub initial: TuiInitialState,
     /// Skip the splash animation on startup.
     pub no_splash: bool,
+    /// Command definitions from bus features — shown in command palette.
+    pub bus_commands: Vec<omegon_traits::CommandDefinition>,
 }
 
 /// Initial state snapshot gathered during setup, before the TUI event loop starts.
@@ -824,6 +856,7 @@ pub async fn run_tui(
     let mut app = App::new(settings);
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
+    app.bus_commands = config.bus_commands;
     app.cancel = cancel;
 
     // Pre-populate from initial state so first frame isn't empty

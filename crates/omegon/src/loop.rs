@@ -7,7 +7,7 @@
 use crate::bridge::{LlmBridge, LlmEvent, StreamOptions};
 use crate::context::ContextManager;
 use crate::conversation::{AssistantMessage, ConversationState, ToolCall, ToolResultEntry};
-use omegon_traits::{AgentEvent, ContentBlock, ToolProvider};
+use omegon_traits::{AgentEvent, ContentBlock};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -50,15 +50,10 @@ impl Default for LoopConfig {
 
 /// Run the agent loop to completion.
 ///
-/// The `bus` owns all features and dispatches tool calls. The `tools` parameter
-/// is the legacy provider list — kept temporarily for the auto-batch rollback
-/// logic which needs direct provider access. Once auto-batch moves to the bus,
-/// this parameter will be removed.
-#[allow(clippy::too_many_arguments)] // Will shrink when tools param is removed
+/// The `bus` owns all features and dispatches tool calls.
 pub async fn run(
     bridge: &dyn LlmBridge,
     bus: &mut crate::bus::EventBus,
-    tools: &[Box<dyn ToolProvider>],
     context: &mut ContextManager,
     conversation: &mut ConversationState,
     events: &broadcast::Sender<AgentEvent>,
@@ -66,14 +61,6 @@ pub async fn run(
     config: &LoopConfig,
 ) -> anyhow::Result<()> {
     let tool_defs = bus.tool_definitions();
-
-    // Pre-build tool name → provider index lookup (legacy — for auto-batch)
-    let mut tool_index: HashMap<String, usize> = HashMap::new();
-    for (i, provider) in tools.iter().enumerate() {
-        for def in provider.tools() {
-            tool_index.insert(def.name, i);
-        }
-    }
 
     let stream_options = StreamOptions {
         model: Some(config.model.clone()),
@@ -242,13 +229,26 @@ pub async fn run(
 
         // ─── Dispatch tool calls ────────────────────────────────────
         let results =
-            dispatch_tools(tools, &tool_index, tool_calls, events, cancel.clone(), &config.cwd).await;
+            dispatch_tools(bus, tool_calls, events, cancel.clone(), &config.cwd).await;
 
         // Push tool results to conversation and update intent
         for result in &results {
             conversation.push_tool_result(result.clone());
         }
         conversation.intent.update_from_tools(tool_calls, &results);
+
+        // ─── Emit tool events to bus features ───────────────────────
+        for (call, result) in tool_calls.iter().zip(results.iter()) {
+            bus.emit(&omegon_traits::BusEvent::ToolEnd {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                result: omegon_traits::ToolResult {
+                    content: result.content.clone(),
+                    details: serde_json::Value::Null,
+                },
+                is_error: result.is_error,
+            });
+        }
 
         // ─── Wire context signals ───────────────────────────────────
         for call in tool_calls {
@@ -559,19 +559,15 @@ async fn consume_llm_stream(
     })
 }
 
-/// Dispatch tool calls to their providers.
+/// Dispatch tool calls via the EventBus.
 ///
 /// **Auto-batching**: when the LLM returns multiple edit/write calls in one turn,
 /// the loop snapshots target files before execution. If any mutation fails, all
 /// previously applied mutations are rolled back. This makes the existing `edit`
 /// tool secretly atomic across multi-file changes — the agent doesn't need to
 /// learn the `change` tool to get atomic behavior.
-///
-/// Currently sequential. True parallel dispatch requires `Arc<dyn ToolProvider>`
-/// which we'll add when the trait bound is relaxed in Phase 1.
 async fn dispatch_tools(
-    tools: &[Box<dyn ToolProvider>],
-    tool_index: &HashMap<String, usize>,
+    bus: &crate::bus::EventBus,
     tool_calls: &[ToolCall],
     events: &broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
@@ -627,28 +623,15 @@ async fn dispatch_tools(
             args: call.arguments.clone(),
         });
 
-        let (result, is_error) = match tool_index.get(&call.name) {
-            Some(&provider_idx) => {
-                match tools[provider_idx]
-                    .execute(&call.name, &call.id, call.arguments.clone(), cancel.clone())
-                    .await
-                {
-                    Ok(result) => (result, false),
-                    Err(e) => (
-                        omegon_traits::ToolResult {
-                            content: vec![ContentBlock::Text {
-                                text: e.to_string(),
-                            }],
-                            details: Value::Null,
-                        },
-                        true,
-                    ),
-                }
-            }
-            None => (
+        let (result, is_error) = match bus
+            .execute_tool(&call.name, &call.id, call.arguments.clone(), cancel.clone())
+            .await
+        {
+            Ok(result) => (result, false),
+            Err(e) => (
                 omegon_traits::ToolResult {
                     content: vec![ContentBlock::Text {
-                        text: format!("Tool '{}' not found", call.name),
+                        text: e.to_string(),
                     }],
                     details: Value::Null,
                 },
@@ -963,6 +946,7 @@ fn hash_value(v: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omegon_traits::ToolProvider;
 
     #[test]
     fn transient_error_detection() {
@@ -1149,9 +1133,11 @@ mod tests {
         std::fs::File::create(&file_b).unwrap().write_all(b"foo bar baz").unwrap();
 
         let provider = FileEditProvider { dir: dir.path().to_path_buf() };
-        let tools: Vec<Box<dyn ToolProvider>> = vec![Box::new(provider)];
-        let mut tool_index: HashMap<String, usize> = HashMap::new();
-        tool_index.insert("edit".into(), 0);
+        let mut bus = crate::bus::EventBus::new();
+        bus.register(Box::new(crate::features::legacy_bridge::LegacyToolFeature::new(
+            "test-edit", Box::new(provider),
+        )));
+        bus.finalize();
 
         let (events_tx, _rx) = broadcast::channel(64);
         let cancel = CancellationToken::new();
@@ -1178,7 +1164,7 @@ mod tests {
             },
         ];
 
-        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel, dir.path()).await;
+        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path()).await;
 
         // The second edit should have failed
         assert!(results[1].is_error, "second edit should fail");
@@ -1224,9 +1210,11 @@ mod tests {
             }
         }
 
-        let tools: Vec<Box<dyn ToolProvider>> = vec![Box::new(PassProvider)];
-        let mut tool_index: HashMap<String, usize> = HashMap::new();
-        tool_index.insert("edit".into(), 0);
+        let mut bus = crate::bus::EventBus::new();
+        bus.register(Box::new(crate::features::legacy_bridge::LegacyToolFeature::new(
+            "test-pass", Box::new(PassProvider),
+        )));
+        bus.finalize();
 
         let (events_tx, _rx) = broadcast::channel(64);
         let cancel = CancellationToken::new();
@@ -1237,7 +1225,7 @@ mod tests {
             arguments: serde_json::json!({"path": "/tmp/fake.rs", "oldText": "a", "newText": "b"}),
         }];
 
-        let results = dispatch_tools(&tools, &tool_index, &calls, &events_tx, cancel, dir.path()).await;
+        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path()).await;
         assert!(!results[0].is_error);
         let text = results[0].content[0].as_text().unwrap();
         assert!(!text.contains("rollback"), "single edit should have no batch overhead");
