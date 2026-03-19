@@ -32,6 +32,8 @@ pub struct LoopConfig {
     pub cwd: std::path::PathBuf,
     /// Extended context window (1M for Anthropic).
     pub extended_context: bool,
+    /// Thinking level — shared settings handle for live reads.
+    pub settings: Option<crate::settings::SharedSettings>,
 }
 
 impl Default for LoopConfig {
@@ -44,6 +46,7 @@ impl Default for LoopConfig {
             model: "anthropic:claude-sonnet-4-6".into(),
             cwd: std::env::current_dir().unwrap_or_default(),
             extended_context: false,
+            settings: None,
         }
     }
 }
@@ -62,9 +65,9 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let tool_defs = bus.tool_definitions();
 
-    let stream_options = StreamOptions {
+    let base_stream_options = StreamOptions {
         model: Some(config.model.clone()),
-        reasoning: None, // TODO: configurable
+        reasoning: None,
         extended_context: config.extended_context,
     };
 
@@ -122,7 +125,7 @@ pub async fn run(
                     "Context utilization high — requesting LLM compaction"
                 );
                 // Use the bridge to summarize the evictable messages
-                match compact_via_llm(bridge, &payload, &stream_options).await {
+                match compact_via_llm(bridge, &payload, &base_stream_options).await {
                     Ok(summary) => {
                         conversation.apply_compaction(summary);
                     }
@@ -175,6 +178,25 @@ pub async fn run(
         );
 
         // ─── Stream LLM response with retry ─────────────────────────
+        // Re-read thinking level each turn (can change mid-session via /thinking)
+        let stream_options = {
+            let mut opts = base_stream_options.clone();
+            opts.reasoning = config.settings.as_ref().and_then(|s| {
+                let guard = s.lock().ok()?;
+                match guard.thinking {
+                    crate::settings::ThinkingLevel::Off => None,
+                    crate::settings::ThinkingLevel::Low => Some("low".to_string()),
+                    crate::settings::ThinkingLevel::Medium => Some("medium".to_string()),
+                    crate::settings::ThinkingLevel::High => Some("high".to_string()),
+                }
+            });
+            // Also re-read model (can change via /sonnet, /opus, etc.)
+            opts.model = config.settings.as_ref().and_then(|s| {
+                s.lock().ok().map(|g| g.model.clone())
+            }).or_else(|| Some(config.model.clone()));
+            opts
+        };
+
         let assistant_msg = tokio::select! {
             result = stream_with_retry(
                 bridge,

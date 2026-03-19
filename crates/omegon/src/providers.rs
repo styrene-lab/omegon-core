@@ -329,10 +329,16 @@ impl LlmBridge for AnthropicClient {
         if !wire_tools.is_empty() {
             body["tools"] = Value::Array(wire_tools);
         }
-        if options.reasoning.is_some() {
+        if let Some(ref level) = options.reasoning {
+            let budget = match level.as_str() {
+                "low" => 5_000,
+                "medium" => 10_000,
+                "high" => 50_000,
+                _ => 10_000,
+            };
             body["thinking"] = json!({
                 "type": "enabled",
-                "budget_tokens": 10000,
+                "budget_tokens": budget,
             });
         }
 

@@ -189,15 +189,28 @@ fn render_assistant_text(
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Thinking block
+    // Thinking block — collapsible, distinct visual treatment
     if !thinking.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "◌ thinking…",
-            Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC),
-        )));
-        for line in thinking.lines().take(20) {
+        let think_lines: Vec<&str> = thinking.lines().collect();
+        let show = think_lines.len().min(8);
+        lines.push(Line::from(vec![
+            Span::styled("◌ ", Style::default().fg(t.accent_muted())),
+            Span::styled("thinking", Style::default().fg(t.accent_muted()).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                format!(" ({} lines)", think_lines.len()),
+                Style::default().fg(t.dim()),
+            ),
+        ]));
+        for line in think_lines.iter().take(show) {
             lines.push(Line::from(Span::styled(
-                line.to_string(), t.style_dim(),
+                format!("  {line}"),
+                Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC),
+            )));
+        }
+        if think_lines.len() > show {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more lines", think_lines.len() - show),
+                Style::default().fg(t.border()),
             )));
         }
         lines.push(Line::from(""));
@@ -516,21 +529,23 @@ fn is_table_separator(line: &str) -> bool {
 /// Render a markdown table line with cell highlighting.
 fn render_table_line<'a>(line: &str, is_header: bool, t: &dyn Theme) -> Line<'a> {
     let trimmed = line.trim();
-    let row_bg = t.surface_bg();
+    let row_bg = if is_header { t.card_bg() } else { t.surface_bg() };
 
     // Separator row: |---|---| → render as a thin rule
     if is_table_separator(trimmed) {
+        let sep_bg = t.surface_bg();
+        let sep_fg = t.border();
         let cells: Vec<&str> = trimmed.split('|').filter(|s| !s.is_empty()).collect();
         let mut spans: Vec<Span<'a>> = Vec::new();
-        spans.push(Span::styled("├", Style::default().fg(t.border()).bg(row_bg)));
+        spans.push(Span::styled("├", Style::default().fg(sep_fg).bg(sep_bg)));
         for (i, cell) in cells.iter().enumerate() {
             let w = cell.len().max(1);
-            spans.push(Span::styled("─".repeat(w), Style::default().fg(t.border()).bg(row_bg)));
+            spans.push(Span::styled("─".repeat(w), Style::default().fg(sep_fg).bg(sep_bg)));
             if i < cells.len() - 1 {
-                spans.push(Span::styled("┼", Style::default().fg(t.border()).bg(row_bg)));
+                spans.push(Span::styled("┼", Style::default().fg(sep_fg).bg(sep_bg)));
             }
         }
-        spans.push(Span::styled("┤", Style::default().fg(t.border()).bg(row_bg)));
+        spans.push(Span::styled("┤", Style::default().fg(sep_fg).bg(sep_bg)));
         return Line::from(spans);
     }
 
@@ -540,19 +555,19 @@ fn render_table_line<'a>(line: &str, is_header: bool, t: &dyn Theme) -> Line<'a>
         .filter(|s| !s.is_empty())
         .collect();
 
-    let cell_style = if is_header {
-        Style::default().fg(t.accent_bright()).bg(row_bg).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(t.fg()).bg(row_bg)
-    };
+    let pipe = Style::default().fg(t.border()).bg(row_bg);
 
-    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
+    spans.push(Span::styled("│", pipe));
     for (i, cell) in cells.iter().enumerate() {
         let cell_text = cell.trim();
         if is_header {
-            spans.push(Span::styled(format!(" {cell_text} "), cell_style));
+            // Header cells: bright accent, bold, slightly different background
+            spans.push(Span::styled(
+                format!(" {cell_text} "),
+                Style::default().fg(t.accent_bright()).bg(row_bg).add_modifier(Modifier::BOLD),
+            ));
         } else {
-            // Content cells get inline highlighting (bold, code, etc.)
+            // Content cells: inline highlighting (bold, code, etc.)
             let cell_spans = super::widgets::highlight_inline(cell_text, t);
             spans.push(Span::styled(" ", Style::default().bg(row_bg)));
             for mut s in cell_spans {
@@ -562,10 +577,10 @@ fn render_table_line<'a>(line: &str, is_header: bool, t: &dyn Theme) -> Line<'a>
             spans.push(Span::styled(" ", Style::default().bg(row_bg)));
         }
         if i < cells.len() - 1 {
-            spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
+            spans.push(Span::styled("│", pipe));
         }
     }
-    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
+    spans.push(Span::styled("│", pipe));
 
     Line::from(spans)
 }
