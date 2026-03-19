@@ -328,6 +328,8 @@ pub enum AgentEvent {
     DecompositionStarted { children: Vec<String> },
     DecompositionChildCompleted { label: String, success: bool },
     DecompositionCompleted { merged: bool },
+    /// System notification — displayed in TUI but not sent to the LLM.
+    SystemNotification { message: String },
 }
 
 /// Session configuration for legacy SessionHook.

@@ -502,9 +502,8 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 let result = agent.bus.dispatch_command(&name, &args);
                 match result {
                     omegon_traits::CommandResult::Display(msg) => {
-                        // Relay back to TUI as a system message
-                        // (The TUI receives this as an AgentEvent via the broadcast channel.)
-                        agent.conversation.push_user(format!("[System: {msg}]"));
+                        // Send back to TUI as a system notification (not into LLM conversation)
+                        let _ = events_tx.send(AgentEvent::SystemNotification { message: msg });
                     }
                     omegon_traits::CommandResult::Handled => {
                         tracing::debug!(cmd = %name, "bus command handled silently");
@@ -517,7 +516,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 for request in agent.bus.drain_requests() {
                     match request {
                         omegon_traits::BusRequest::Notify { message, .. } => {
-                            tracing::info!("Bus: {message}");
+                            let _ = events_tx.send(AgentEvent::SystemNotification { message });
                         }
                         omegon_traits::BusRequest::InjectSystemMessage { content } => {
                             agent.conversation.push_user(format!("[System: {content}]"));

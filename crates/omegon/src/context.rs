@@ -51,6 +51,13 @@ impl ContextManager {
         self.context_window = tokens;
     }
 
+    /// Context budget in tokens available for injections this turn.
+    /// Reserve ~80% of the context window for conversation, 20% for system prompt.
+    /// System prompt budget = context_window * 0.2 minus the base prompt size.
+    pub fn context_budget(&self) -> usize {
+        (self.context_window / 5).saturating_sub(self.base_prompt.len() / 4)
+    }
+
     /// Build the system prompt for this turn.
     /// Called once per LLM request, runs in <1ms.
     pub fn build_system_prompt(
@@ -65,11 +72,7 @@ impl ContextManager {
         let recent_files_vec: Vec<PathBuf> =
             self.recent_files.iter().cloned().collect();
 
-        // Compute remaining budget for context injection.
-        // Reserve ~80% of the context window for conversation, 20% for system prompt.
-        // System prompt budget = context_window * 0.2 minus the base prompt size.
-        let system_budget = (self.context_window / 5)
-            .saturating_sub(self.base_prompt.len() / 4);
+        let system_budget = self.context_budget();
 
         let signals = ContextSignals {
             user_prompt,
@@ -184,16 +187,12 @@ impl ContextManager {
 
     /// Inject the IntentDocument as a high-priority context block.
     /// Called externally when intent has meaningful content.
-    /// Build context signals for external consumers (e.g. EventBus features).
-    /// The returned vecs are temporary — signals borrows from them.
-    pub fn build_signals_data(&self, _user_prompt: &str, _conversation: &ConversationState)
-        -> (Vec<String>, Vec<PathBuf>, usize)
-    {
+    /// Build context signals data for external consumers (e.g. EventBus).
+    /// Returns the components needed to construct a `ContextSignals` struct.
+    pub fn signals_data(&self) -> (Vec<String>, Vec<PathBuf>, usize) {
         let recent_tools_vec: Vec<String> = self.recent_tools.iter().cloned().collect();
         let recent_files_vec: Vec<PathBuf> = self.recent_files.iter().cloned().collect();
-        let system_budget = (self.context_window / 5)
-            .saturating_sub(self.base_prompt.len() / 4);
-        (recent_tools_vec, recent_files_vec, system_budget)
+        (recent_tools_vec, recent_files_vec, self.context_budget())
     }
 
     /// The current lifecycle phase.

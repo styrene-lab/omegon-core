@@ -144,8 +144,7 @@ pub async fn run(
         // ─── Collect context from bus features ──────────────────────
         {
             let user_prompt = conversation.last_user_prompt();
-            let (tools_vec, files_vec, budget) =
-                context.build_signals_data(user_prompt, conversation);
+            let (tools_vec, files_vec, budget) = context.signals_data();
             let signals = omegon_traits::ContextSignals {
                 user_prompt,
                 recent_tools: &tools_vec,
@@ -225,6 +224,15 @@ pub async fn run(
             bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
             let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
+        }
+
+        // ─── Emit ToolStart bus events before dispatch ──────────────
+        for call in tool_calls {
+            bus.emit(&omegon_traits::BusEvent::ToolStart {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                args: call.arguments.clone(),
+            });
         }
 
         // ─── Dispatch tool calls ────────────────────────────────────

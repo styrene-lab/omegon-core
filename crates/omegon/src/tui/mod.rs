@@ -785,6 +785,9 @@ impl App {
                 let status = if merged { "merged" } else { "completed (no merge)" };
                 self.conversation.push_lifecycle("⚡", &format!("Cleave {status}"));
             }
+            AgentEvent::SystemNotification { message } => {
+                self.conversation.push_system(&message);
+            }
             _ => {}
         }
     }
