@@ -22,5 +22,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "rust_target": "x86_64-apple-darwin"
+  "rust_target": "x86_64-apple-darwin",
+  "author": "cwilson <cwilson@styrene.io>"
 }

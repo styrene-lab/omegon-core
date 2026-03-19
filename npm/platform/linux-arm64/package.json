@@ -22,5 +22,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "rust_target": "aarch64-unknown-linux-gnu"
+  "rust_target": "aarch64-unknown-linux-gnu",
+  "author": "cwilson <cwilson@styrene.io>"
 }
