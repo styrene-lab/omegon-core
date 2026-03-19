@@ -6,6 +6,7 @@
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, BorderType, Padding, Paragraph, Wrap};
+use tui_syntax_highlight::Highlighter as SyntaxHighlighter;
 
 use super::theme::Theme;
 
@@ -307,19 +308,39 @@ fn render_tool_card(
             )));
         }
 
-        let result_style = if is_error {
-            Style::default().fg(t.error()).bg(t.surface_bg())
-        } else {
-            Style::default().fg(t.muted()).bg(t.surface_bg())
-        };
-
         let result_lines: Vec<&str> = result.lines().collect();
         let show = result_lines.len().min(12);
-        for line in &result_lines[..show] {
-            lines.push(Line::from(Span::styled(
-                line.to_string(), result_style,
-            )));
+        let display_text = result_lines[..show].join("\n");
+
+        // Try syntax highlighting based on file extension from args
+        let highlighted = if !is_error {
+            try_highlight(&display_text, detail_args, name, t)
+        } else {
+            None
+        };
+
+        if let Some(highlighted_lines) = highlighted {
+            for line in highlighted_lines {
+                // Apply surface_bg to each span
+                let spans: Vec<Span<'_>> = line.spans.into_iter().map(|mut s| {
+                    s.style = s.style.bg(t.surface_bg());
+                    s
+                }).collect();
+                lines.push(Line::from(spans));
+            }
+        } else {
+            let result_style = if is_error {
+                Style::default().fg(t.error()).bg(t.surface_bg())
+            } else {
+                Style::default().fg(t.muted()).bg(t.surface_bg())
+            };
+            for line in &result_lines[..show] {
+                lines.push(Line::from(Span::styled(
+                    line.to_string(), result_style,
+                )));
+            }
         }
+
         if result_lines.len() > show {
             lines.push(Line::from(Span::styled(
                 format!("  … {} lines total", result_lines.len()),
@@ -331,6 +352,64 @@ fn render_tool_card(
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(card_inner, buf);
+}
+
+/// Attempt syntax highlighting for tool result text.
+/// Returns None if no syntax can be detected.
+fn try_highlight<'a>(
+    text: &str,
+    detail_args: Option<&str>,
+    tool_name: &str,
+    _t: &dyn Theme,
+) -> Option<Vec<Line<'a>>> {
+    // Determine syntax from file extension or tool type
+    let syntax_name = if tool_name == "read" || tool_name == "edit" || tool_name == "write" {
+        // detail_args is the file path — extract extension
+        detail_args.and_then(|path| {
+            let ext = path.rsplit('.').next()?;
+            match ext {
+                "rs" => Some("Rust"),
+                "ts" | "tsx" => Some("TypeScript"),
+                "js" | "jsx" => Some("JavaScript"),
+                "json" => Some("JSON"),
+                "toml" => Some("TOML"),
+                "yaml" | "yml" => Some("YAML"),
+                "py" => Some("Python"),
+                "go" => Some("Go"),
+                "sh" | "bash" | "zsh" => Some("Bourne Again Shell (bash)"),
+                "md" | "markdown" => Some("Markdown"),
+                "html" | "htm" => Some("HTML"),
+                "css" => Some("CSS"),
+                "sql" => Some("SQL"),
+                "xml" => Some("XML"),
+                "c" | "h" => Some("C"),
+                "cpp" | "cc" | "cxx" | "hpp" => Some("C++"),
+                "java" => Some("Java"),
+                "rb" => Some("Ruby"),
+                "swift" => Some("Swift"),
+                "kt" | "kts" => Some("Kotlin"),
+                "dockerfile" | "Dockerfile" => Some("Dockerfile"),
+                _ => None,
+            }
+        })
+    } else if tool_name == "bash" {
+        Some("Bourne Again Shell (bash)")
+    } else {
+        None
+    }?;
+
+    let ss = syntect::parsing::SyntaxSet::load_defaults_newlines();
+    let ts = syntect::highlighting::ThemeSet::load_defaults();
+    let theme = ts.themes.get("base16-ocean.dark")?;
+    let syntax = ss.find_syntax_by_name(syntax_name)?;
+    let highlighter = SyntaxHighlighter::new(theme.clone());
+    let text_lines: Vec<&str> = text.lines().collect();
+    let highlighted = highlighter.highlight_lines(text_lines, syntax, &ss).ok()?;
+    Some(highlighted.lines.into_iter().map(|line| {
+        Line::from(line.spans.into_iter().map(|span| {
+            Span::styled(span.content.to_string(), span.style)
+        }).collect::<Vec<_>>())
+    }).collect())
 }
 
 fn render_system(text: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme) {

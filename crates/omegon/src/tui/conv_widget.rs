@@ -147,35 +147,28 @@ impl<'a> StatefulWidget for ConversationWidget<'a> {
             total_height - viewport_height - state.scroll_offset
         };
 
-        // Walk segments to find which ones are visible
-        let mut y_cursor: u16 = 0; // absolute y position from the top of all content
+        // Walk segments to find which ones are visible.
+        // Only render segments whose top edge is within the viewport.
+        // Segments partially scrolled above the viewport are skipped entirely
+        // to avoid overlap/clipping artifacts.
+        let mut y_cursor: u16 = 0;
         for (i, segment) in self.segments.iter().enumerate() {
             let seg_height = state.heights[i];
             let seg_top = y_cursor;
-            let seg_bottom = y_cursor + seg_height;
-            y_cursor = seg_bottom;
+            y_cursor += seg_height;
 
             // Skip segments entirely above the viewport
-            if seg_bottom <= top_offset {
+            if seg_top < top_offset {
                 continue;
             }
-            // Stop once we're past the viewport
+            // Stop once we're past the viewport bottom
             if seg_top >= top_offset + viewport_height {
                 break;
             }
 
-            // This segment is at least partially visible.
-            // Compute where it renders in the viewport.
-            let render_y = if seg_top >= top_offset {
-                area.y + (seg_top - top_offset)
-            } else {
-                // Segment starts above the viewport — it's partially clipped.
-                // We still render it, but the top is cut off by ratatui's
-                // buffer bounds (rendering outside area is a no-op).
-                area.y.saturating_sub(top_offset - seg_top)
-            };
-
-            let available_height = (area.bottom()).saturating_sub(render_y);
+            // Segment starts within the viewport — render it.
+            let render_y = area.y + (seg_top - top_offset);
+            let available_height = area.bottom().saturating_sub(render_y);
             if available_height == 0 { continue; }
 
             let seg_area = Rect {
