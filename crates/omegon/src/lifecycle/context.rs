@@ -61,6 +61,11 @@ impl LifecycleContextProvider {
         self.nodes.get(id)
     }
 
+    /// Get all design nodes.
+    pub fn all_nodes(&self) -> &HashMap<String, DesignNode> {
+        &self.nodes
+    }
+
     /// Get all active changes.
     pub fn changes(&self) -> &[ChangeInfo] {
         &self.changes

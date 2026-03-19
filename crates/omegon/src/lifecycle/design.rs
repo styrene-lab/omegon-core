@@ -1,7 +1,7 @@
-//! Design-tree read-only parser — frontmatter, sections, tree scanning.
+//! Design-tree parser and writer — frontmatter, sections, tree scanning, mutations.
 //!
 //! Parses markdown documents in docs/ with YAML frontmatter into DesignNode
-//! and DocumentSections structs. No mutation support (Phase 1b).
+//! and DocumentSections structs. Mutation functions write back to the same format.
 
 use std::collections::HashMap;
 use std::fs;
@@ -413,6 +413,276 @@ pub fn build_context_injection(node: &DesignNode, sections: &DocumentSections) -
     }
 
     lines.join("\n")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mutation functions — write design documents
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Serialize a DesignNode back to YAML frontmatter + markdown body.
+fn serialize_frontmatter(node: &DesignNode) -> String {
+    let mut lines = vec![
+        "---".to_string(),
+        format!("id: {}", node.id),
+        format!("title: \"{}\"", node.title.replace('"', "\\\"" )),
+        format!("status: {}", node.status.as_str()),
+    ];
+
+    if let Some(ref parent) = node.parent {
+        lines.push(format!("parent: {parent}"));
+    }
+
+    if !node.tags.is_empty() {
+        lines.push(format!("tags: [{}]", node.tags.join(", ")));
+    } else {
+        lines.push("tags: []".into());
+    }
+
+    if !node.open_questions.is_empty() {
+        lines.push("open_questions:".into());
+        for q in &node.open_questions {
+            lines.push(format!("  - \"{}\"", q.replace('"', "\\\"")));
+        }
+    } else {
+        lines.push("open_questions: []".into());
+    }
+
+    if !node.dependencies.is_empty() {
+        lines.push("dependencies:".into());
+        for d in &node.dependencies {
+            lines.push(format!("  - {d}"));
+        }
+    } else {
+        lines.push("dependencies: []".into());
+    }
+
+    if !node.related.is_empty() {
+        lines.push("related:".into());
+        for r in &node.related {
+            lines.push(format!("  - {r}"));
+        }
+    } else {
+        lines.push("related: []".into());
+    }
+
+    if !node.branches.is_empty() {
+        lines.push("branches:".into());
+        for b in &node.branches {
+            lines.push(format!("  - {b}"));
+        }
+    }
+
+    if let Some(ref change) = node.openspec_change {
+        lines.push(format!("openspec_change: {change}"));
+    }
+
+    if let Some(ref issue_type) = node.issue_type {
+        let s = match issue_type {
+            IssueType::Epic => "epic",
+            IssueType::Feature => "feature",
+            IssueType::Task => "task",
+            IssueType::Bug => "bug",
+            IssueType::Chore => "chore",
+        };
+        lines.push(format!("issue_type: {s}"));
+    }
+
+    if let Some(priority) = node.priority {
+        lines.push(format!("priority: {priority}"));
+    }
+
+    lines.push("---".into());
+    lines.join("\n")
+}
+
+/// Serialize a full design document (frontmatter + sections).
+fn serialize_document(node: &DesignNode, sections: &DocumentSections) -> String {
+    let mut parts = vec![serialize_frontmatter(node)];
+
+    parts.push(format!("\n# {}\n", node.title));
+
+    // Overview
+    if !sections.overview.is_empty() {
+        parts.push("## Overview\n".into());
+        parts.push(sections.overview.clone());
+        parts.push(String::new());
+    }
+
+    // Research
+    if !sections.research.is_empty() {
+        parts.push("## Research\n".into());
+        for entry in &sections.research {
+            parts.push(format!("### {}\n", entry.heading));
+            parts.push(entry.content.clone());
+            parts.push(String::new());
+        }
+    }
+
+    // Decisions
+    if !sections.decisions.is_empty() {
+        parts.push("## Decisions\n".into());
+        for dec in &sections.decisions {
+            parts.push(format!("### {}\n", dec.title));
+            parts.push(format!("**Status:** {}\n", dec.status));
+            parts.push(format!("**Rationale:** {}\n", dec.rationale));
+        }
+    }
+
+    // Open Questions
+    if !sections.open_questions.is_empty() {
+        parts.push("## Open Questions\n".into());
+        for q in &sections.open_questions {
+            parts.push(format!("- {q}"));
+        }
+        parts.push(String::new());
+    }
+
+    // Implementation Notes
+    if !sections.impl_file_scope.is_empty() || !sections.impl_constraints.is_empty() {
+        parts.push("## Implementation Notes\n".into());
+
+        if !sections.impl_file_scope.is_empty() {
+            parts.push("### File Scope\n".into());
+            for fs in &sections.impl_file_scope {
+                let action = fs.action.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
+                parts.push(format!("- `{}` — {}{}", fs.path, fs.description, action));
+            }
+            parts.push(String::new());
+        }
+
+        if !sections.impl_constraints.is_empty() {
+            parts.push("### Constraints\n".into());
+            for c in &sections.impl_constraints {
+                parts.push(format!("- {c}"));
+            }
+            parts.push(String::new());
+        }
+    }
+
+    parts.join("\n")
+}
+
+/// Create a new design node document.
+pub fn create_node(
+    docs_dir: &Path,
+    id: &str,
+    title: &str,
+    parent: Option<&str>,
+    status: Option<&str>,
+    tags: &[String],
+    overview: &str,
+) -> anyhow::Result<DesignNode> {
+    let _ = fs::create_dir_all(docs_dir);
+    let file_path = docs_dir.join(format!("{id}.md"));
+
+    if file_path.exists() {
+        anyhow::bail!("Design node '{id}' already exists at {}", file_path.display());
+    }
+
+    let status = status
+        .and_then(NodeStatus::parse)
+        .unwrap_or(NodeStatus::Seed);
+
+    let node = DesignNode {
+        id: id.to_string(),
+        title: title.to_string(),
+        status,
+        parent: parent.map(String::from),
+        tags: tags.to_vec(),
+        dependencies: vec![],
+        related: vec![],
+        open_questions: vec![],
+        branches: vec![],
+        openspec_change: None,
+        issue_type: None,
+        priority: None,
+        file_path: file_path.clone(),
+    };
+
+    let sections = DocumentSections {
+        overview: overview.to_string(),
+        ..Default::default()
+    };
+
+    let content = serialize_document(&node, &sections);
+    fs::write(&file_path, content)?;
+    Ok(node)
+}
+
+/// Update a design node's frontmatter by rewriting the document.
+/// The `mutate` closure receives the mutable node for changes.
+pub fn update_node(
+    node: &mut DesignNode,
+    mutate: impl FnOnce(&mut DesignNode),
+) -> anyhow::Result<()> {
+    // Read existing content to preserve the body
+    let content = fs::read_to_string(&node.file_path)?;
+    let body = extract_body(&content);
+    let sections = parse_sections(body);
+
+    // Apply the mutation
+    mutate(node);
+
+    // Rewrite
+    let new_content = serialize_document(node, &sections);
+    fs::write(&node.file_path, &new_content)?;
+    Ok(())
+}
+
+/// Append a research entry to a design document.
+pub fn add_research(node: &DesignNode, heading: &str, content_text: &str) -> anyhow::Result<()> {
+    let content = fs::read_to_string(&node.file_path)?;
+    let body = extract_body(&content);
+    let mut sections = parse_sections(body);
+
+    sections.research.push(ResearchEntry {
+        heading: heading.to_string(),
+        content: content_text.to_string(),
+    });
+
+    let new_content = serialize_document(node, &sections);
+    fs::write(&node.file_path, &new_content)?;
+    Ok(())
+}
+
+/// Add a decision to a design document.
+pub fn add_decision(
+    node: &DesignNode,
+    title: &str,
+    status: &str,
+    rationale: &str,
+) -> anyhow::Result<()> {
+    let content = fs::read_to_string(&node.file_path)?;
+    let body = extract_body(&content);
+    let mut sections = parse_sections(body);
+
+    sections.decisions.push(DesignDecision {
+        title: title.to_string(),
+        status: status.to_string(),
+        rationale: rationale.to_string(),
+    });
+
+    let new_content = serialize_document(node, &sections);
+    fs::write(&node.file_path, &new_content)?;
+    Ok(())
+}
+
+/// Add implementation notes to a design document.
+pub fn add_impl_notes(
+    node: &DesignNode,
+    file_scope: &[FileScope],
+    constraints: &[String],
+) -> anyhow::Result<()> {
+    let content = fs::read_to_string(&node.file_path)?;
+    let body = extract_body(&content);
+    let mut sections = parse_sections(body);
+
+    sections.impl_file_scope.extend(file_scope.iter().cloned());
+    sections.impl_constraints.extend(constraints.iter().cloned());
+
+    let new_content = serialize_document(node, &sections);
+    fs::write(&node.file_path, &new_content)?;
+    Ok(())
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -367,6 +367,97 @@ pub fn count_scenarios(change: &ChangeInfo) -> usize {
         .sum()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Mutation functions — create and modify OpenSpec changes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Scaffold a new OpenSpec change directory with a proposal.
+pub fn propose_change(
+    repo_path: &Path,
+    name: &str,
+    title: &str,
+    intent: &str,
+) -> anyhow::Result<ChangeInfo> {
+    let openspec_dir = repo_path.join("openspec");
+    let changes_dir = openspec_dir.join("changes");
+    let change_dir = changes_dir.join(name);
+
+    if change_dir.exists() {
+        anyhow::bail!("Change '{name}' already exists");
+    }
+
+    fs::create_dir_all(&change_dir)?;
+
+    // Write proposal.md
+    let proposal = format!(
+        "# {title}\n\n## Intent\n\n{intent}\n\n## Scope\n\n_TBD_\n\n## Constraints\n\n_None identified yet._\n"
+    );
+    fs::write(change_dir.join("proposal.md"), &proposal)?;
+
+    Ok(ChangeInfo {
+        name: name.to_string(),
+        path: change_dir,
+        stage: ChangeStage::Proposed,
+        has_proposal: true,
+        has_design: false,
+        has_specs: false,
+        has_tasks: false,
+        total_tasks: 0,
+        done_tasks: 0,
+        specs: vec![],
+    })
+}
+
+/// Add a spec file to an existing change.
+pub fn add_spec(
+    repo_path: &Path,
+    change_name: &str,
+    domain: &str,
+    spec_content: &str,
+) -> anyhow::Result<PathBuf> {
+    let change_dir = repo_path
+        .join("openspec/changes")
+        .join(change_name);
+
+    if !change_dir.exists() {
+        anyhow::bail!("Change '{change_name}' does not exist");
+    }
+
+    let specs_dir = change_dir.join("specs");
+    fs::create_dir_all(&specs_dir)?;
+
+    // domain can be "auth" or "auth/tokens" — create subdirs as needed
+    let spec_path = if domain.contains('/') {
+        let parts: Vec<&str> = domain.rsplitn(2, '/').collect();
+        let subdir = specs_dir.join(parts[1]);
+        fs::create_dir_all(&subdir)?;
+        subdir.join(format!("{}.md", parts[0]))
+    } else {
+        specs_dir.join(format!("{domain}.md"))
+    };
+
+    fs::write(&spec_path, spec_content)?;
+    Ok(spec_path)
+}
+
+/// Archive a change by moving it to openspec/archive/.
+pub fn archive_change(repo_path: &Path, change_name: &str) -> anyhow::Result<()> {
+    let change_dir = repo_path
+        .join("openspec/changes")
+        .join(change_name);
+
+    if !change_dir.exists() {
+        anyhow::bail!("Change '{change_name}' does not exist");
+    }
+
+    let archive_dir = repo_path.join("openspec/archive");
+    fs::create_dir_all(&archive_dir)?;
+    let dest = archive_dir.join(change_name);
+
+    fs::rename(&change_dir, &dest)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

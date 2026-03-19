@@ -297,9 +297,22 @@ impl App {
 
         let area = frame.area();
 
-        // Full-width vertical layout: conversation | editor | hint | footer
-        // The input box sits between conversation and footer — the footer
-        // is at the actual foot of the terminal.
+        // ── Horizontal split: main area | dashboard panel ───────────
+        // Dashboard appears as a right-side panel when terminal is wide enough.
+        let show_dashboard = area.width >= 120
+            && (self.dashboard.focused_node.is_some() || !self.dashboard.active_changes.is_empty());
+
+        let (main_area, dash_area) = if show_dashboard {
+            let h = Layout::horizontal([
+                Constraint::Min(60),
+                Constraint::Length(36),
+            ]).split(area);
+            (h[0], h[1])
+        } else {
+            (area, Rect::ZERO)
+        };
+
+        // ── Vertical layout in the main area ────────────────────────
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -308,15 +321,18 @@ impl App {
                 Constraint::Length(1), // [2] hint line
                 Constraint::Length(5), // [3] footer cards (bordered, at the foot)
             ])
-            .split(area);
+            .split(main_area);
 
         // Conversation view — segment-based widget.
-        // Split borrow: extract segments slice + state separately to satisfy
-        // the borrow checker (immutable segments + mutable state).
         let t = &self.theme;
         let (segments, conv_state) = self.conversation.segments_and_state();
         let conv_widget = conv_widget::ConversationWidget::new(segments, t.as_ref());
         frame.render_stateful_widget(conv_widget, chunks[0], conv_state);
+
+        // Dashboard panel (right side)
+        if show_dashboard && dash_area.width > 0 {
+            self.dashboard.render_themed(dash_area, frame, t.as_ref());
+        }
 
         // Footer — sync from settings + session state (renders at the foot)
         {

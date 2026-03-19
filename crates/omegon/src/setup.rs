@@ -41,7 +41,8 @@ pub(crate) struct LifecycleSnapshot {
 }
 
 impl LifecycleSnapshot {
-    fn from_provider(lp: &lifecycle::context::LifecycleContextProvider) -> Self {
+    fn from_lifecycle_feature(lf: &features::lifecycle::LifecycleFeature) -> Self {
+        let lp = lf.provider();
         let focused_node = lp.focused_node_id().and_then(|id| {
             lp.get_node(id).map(|n| {
                 let sections = lifecycle::design::read_node_sections(n);
@@ -166,13 +167,10 @@ impl AgentSetup {
             }
         }
 
-        // ─── Lifecycle context ──────────────────────────────────────────
-        let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
-        let lifecycle_snapshot = LifecycleSnapshot::from_provider(&lifecycle_provider);
-        bus.register(Box::new(features::legacy_bridge::LegacyContextFeature::new(
-            "lifecycle",
-            Box::new(lifecycle_provider),
-        )));
+        // ─── Lifecycle (design-tree + openspec) ──────────────────────────
+        let lifecycle_feature = features::lifecycle::LifecycleFeature::new(&cwd);
+        let lifecycle_snapshot = LifecycleSnapshot::from_lifecycle_feature(&lifecycle_feature);
+        bus.register(Box::new(lifecycle_feature));
 
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));
