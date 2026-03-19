@@ -148,17 +148,17 @@ impl<'a> StatefulWidget for ConversationWidget<'a> {
         };
 
         // Walk segments to find which ones are visible.
-        // Only render segments whose top edge is within the viewport.
-        // Segments partially scrolled above the viewport are skipped entirely
-        // to avoid overlap/clipping artifacts.
+        // Segments partially above the viewport are rendered into a temp buffer
+        // and the visible portion is copied into the main buffer (proper clipping).
         let mut y_cursor: u16 = 0;
         for (i, segment) in self.segments.iter().enumerate() {
             let seg_height = state.heights[i];
             let seg_top = y_cursor;
-            y_cursor += seg_height;
+            let seg_bottom = y_cursor + seg_height;
+            y_cursor = seg_bottom;
 
             // Skip segments entirely above the viewport
-            if seg_top < top_offset {
+            if seg_bottom <= top_offset {
                 continue;
             }
             // Stop once we're past the viewport bottom
@@ -166,19 +166,44 @@ impl<'a> StatefulWidget for ConversationWidget<'a> {
                 break;
             }
 
-            // Segment starts within the viewport — render it.
-            let render_y = area.y + (seg_top - top_offset);
-            let available_height = area.bottom().saturating_sub(render_y);
-            if available_height == 0 { continue; }
+            if seg_top >= top_offset {
+                // Segment starts within the viewport — render directly
+                let render_y = area.y + (seg_top - top_offset);
+                let available_height = area.bottom().saturating_sub(render_y);
+                if available_height == 0 { continue; }
 
-            let seg_area = Rect {
-                x: area.x,
-                y: render_y,
-                width: area.width,
-                height: seg_height.min(available_height),
-            };
+                let seg_area = Rect {
+                    x: area.x,
+                    y: render_y,
+                    width: area.width,
+                    height: seg_height.min(available_height),
+                };
+                segment.render(seg_area, buf, self.theme);
+            } else {
+                // Segment starts ABOVE the viewport — partially visible.
+                // Render into a temp buffer at full size, then copy the
+                // visible portion into the main buffer.
+                let clip_rows = top_offset - seg_top; // rows clipped from the top
+                let visible_rows = seg_height.saturating_sub(clip_rows).min(viewport_height);
+                if visible_rows == 0 { continue; }
 
-            segment.render(seg_area, buf, self.theme);
+                let temp_area = Rect::new(0, 0, area.width, seg_height);
+                let mut temp_buf = Buffer::empty(temp_area);
+                segment.render(temp_area, &mut temp_buf, self.theme);
+
+                // Copy the visible portion from temp_buf to main buf
+                for row in 0..visible_rows {
+                    let src_y = clip_rows + row;
+                    let dst_y = area.y + row;
+                    if dst_y >= area.bottom() { break; }
+                    for x in 0..area.width {
+                        if src_y < seg_height && x < area.width {
+                            *buf.cell_mut((area.x + x, dst_y)).unwrap() =
+                                temp_buf[(x, src_y)].clone();
+                        }
+                    }
+                }
+            }
         }
     }
 }

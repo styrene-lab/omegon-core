@@ -370,7 +370,7 @@ fn try_highlight<'a>(
             match ext {
                 "rs" => Some("Rust"),
                 "ts" | "tsx" => Some("TypeScript"),
-                "js" | "jsx" => Some("JavaScript"),
+                "js" | "jsx" | "mjs" | "cjs" => Some("JavaScript"),
                 "json" => Some("JSON"),
                 "toml" => Some("TOML"),
                 "yaml" | "yml" => Some("YAML"),
