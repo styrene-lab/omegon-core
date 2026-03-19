@@ -113,7 +113,7 @@ impl Default for Settings {
             compaction_threshold: 0.75,
             context_window: 200_000,
             context_mode: ContextMode::Standard,
-            tool_detail: ToolDetail::Compact,
+            tool_detail: ToolDetail::Detailed,
         }
     }
 }

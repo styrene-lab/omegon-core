@@ -72,7 +72,7 @@ impl ConversationView {
             scroll: 0,
             streaming: false,
             user_scrolled: false,
-            tool_detail: crate::settings::ToolDetail::Compact,
+            tool_detail: crate::settings::ToolDetail::Detailed,
         }
     }
 
