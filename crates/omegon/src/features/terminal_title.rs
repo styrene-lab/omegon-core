@@ -42,6 +42,10 @@ impl TerminalTitle {
     }
 
     fn update_title(&self) {
+        // Only set title when stderr is a real terminal (not piped/headless)
+        if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            return;
+        }
         let status = if self.tool_active {
             let chain = self.tool_chain.join(" → ");
             format!("⚙ {chain}")
