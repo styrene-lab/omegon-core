@@ -91,25 +91,25 @@ impl AgentSetup {
 
         // ─── Core tools (bash, read, write, edit, change, speculate) ────
         let core_tools = tools::CoreTools::new(cwd.clone());
-        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(features::adapter::ToolAdapter::new(
             "core-tools",
             Box::new(core_tools),
         )));
 
         // ─── Feature tool providers ─────────────────────────────────────
-        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(features::adapter::ToolAdapter::new(
             "web-search",
             Box::new(tools::web_search::WebSearchProvider::new()),
         )));
-        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(features::adapter::ToolAdapter::new(
             "local-inference",
             Box::new(tools::local_inference::LocalInferenceProvider::new()),
         )));
-        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(features::adapter::ToolAdapter::new(
             "view",
             Box::new(tools::view::ViewProvider::new(cwd.clone())),
         )));
-        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(features::adapter::ToolAdapter::new(
             "render",
             Box::new(tools::render::RenderProvider::new()),
         )));
@@ -151,7 +151,7 @@ impl AgentSetup {
                     omegon_memory::MarkdownRenderer,
                     mind.clone(),
                 );
-                bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+                bus.register(Box::new(features::adapter::ToolAdapter::new(
                     "memory",
                     Box::new(provider),
                 )));
@@ -165,7 +165,7 @@ impl AgentSetup {
                     mind,
                 );
                 bus.register(Box::new(
-                    features::legacy_bridge::LegacyContextFeature::new(
+                    features::adapter::ContextAdapter::new(
                         "memory-context",
                         Box::new(ctx_provider),
                     ),

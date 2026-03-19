@@ -1164,7 +1164,7 @@ mod tests {
 
         let provider = FileEditProvider { dir: dir.path().to_path_buf() };
         let mut bus = crate::bus::EventBus::new();
-        bus.register(Box::new(crate::features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(crate::features::adapter::ToolAdapter::new(
             "test-edit", Box::new(provider),
         )));
         bus.finalize();
@@ -1241,7 +1241,7 @@ mod tests {
         }
 
         let mut bus = crate::bus::EventBus::new();
-        bus.register(Box::new(crate::features::legacy_bridge::LegacyToolFeature::new(
+        bus.register(Box::new(crate::features::adapter::ToolAdapter::new(
             "test-pass", Box::new(PassProvider),
         )));
         bus.finalize();

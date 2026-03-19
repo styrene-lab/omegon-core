@@ -21,7 +21,7 @@
 
 pub mod auto_compact;
 pub mod cleave;
-pub mod legacy_bridge;
+pub mod adapter;
 pub mod lifecycle;
 pub mod model_budget;
 pub mod session_log;

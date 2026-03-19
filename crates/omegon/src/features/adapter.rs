@@ -1,8 +1,8 @@
-//! Legacy bridge — wraps existing ToolProvider + ContextProvider implementations
-//! as Feature trait objects, allowing gradual migration.
+//! Feature adapters — wraps ToolProvider / ContextProvider implementations
+//! as Feature trait objects for EventBus registration.
 //!
-//! This adapter lets `omegon-memory` (and any other crate implementing the old
-//! traits) participate in the EventBus without being rewritten immediately.
+//! These adapters let any crate implementing ToolProvider or ContextProvider
+//! (e.g., omegon-memory) participate in the bus without implementing Feature directly.
 
 use async_trait::async_trait;
 use omegon_traits::{
@@ -11,13 +11,13 @@ use omegon_traits::{
 };
 use serde_json::Value;
 
-/// Wraps a legacy ToolProvider as a Feature.
-pub struct LegacyToolFeature {
+/// Wraps a ToolProvider as a Feature.
+pub struct ToolAdapter {
     name: String,
     provider: Box<dyn omegon_traits::ToolProvider>,
 }
 
-impl LegacyToolFeature {
+impl ToolAdapter {
     pub fn new(name: impl Into<String>, provider: Box<dyn omegon_traits::ToolProvider>) -> Self {
         Self {
             name: name.into(),
@@ -27,7 +27,7 @@ impl LegacyToolFeature {
 }
 
 #[async_trait]
-impl Feature for LegacyToolFeature {
+impl Feature for ToolAdapter {
     fn name(&self) -> &str {
         &self.name
     }
@@ -47,13 +47,13 @@ impl Feature for LegacyToolFeature {
     }
 }
 
-/// Wraps a legacy ContextProvider as a Feature.
-pub struct LegacyContextFeature {
+/// Wraps a ContextProvider as a Feature.
+pub struct ContextAdapter {
     name: String,
     provider: Box<dyn omegon_traits::ContextProvider>,
 }
 
-impl LegacyContextFeature {
+impl ContextAdapter {
     pub fn new(name: impl Into<String>, provider: Box<dyn omegon_traits::ContextProvider>) -> Self {
         Self {
             name: name.into(),
@@ -63,7 +63,7 @@ impl LegacyContextFeature {
 }
 
 #[async_trait]
-impl Feature for LegacyContextFeature {
+impl Feature for ContextAdapter {
     fn name(&self) -> &str {
         &self.name
     }
@@ -74,16 +74,13 @@ impl Feature for LegacyContextFeature {
 }
 
 /// Wraps a type that implements BOTH ToolProvider + ContextProvider as a single Feature.
-/// This is the common case for omegon-memory's MemoryProvider.
-pub struct LegacyToolContextFeature {
+pub struct ToolContextAdapter {
     name: String,
-    // Store as two trait objects from the same underlying allocation.
-    // The caller constructs this with two Box<dyn> from the same concrete type.
     tool_provider: Box<dyn omegon_traits::ToolProvider>,
     context_provider: Option<Box<dyn omegon_traits::ContextProvider>>,
 }
 
-impl LegacyToolContextFeature {
+impl ToolContextAdapter {
     pub fn new(
         name: impl Into<String>,
         tool_provider: Box<dyn omegon_traits::ToolProvider>,
@@ -98,7 +95,7 @@ impl LegacyToolContextFeature {
 }
 
 #[async_trait]
-impl Feature for LegacyToolContextFeature {
+impl Feature for ToolContextAdapter {
     fn name(&self) -> &str {
         &self.name
     }
@@ -152,16 +149,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tool_wraps_as_feature() {
-        let feature = LegacyToolFeature::new("test", Box::new(DummyTool));
+    fn tool_adapter_wraps_provider() {
+        let feature = ToolAdapter::new("test", Box::new(DummyTool));
         assert_eq!(feature.name(), "test");
         assert_eq!(feature.tools().len(), 1);
         assert_eq!(feature.tools()[0].name, "dummy");
     }
 
     #[tokio::test]
-    async fn legacy_tool_executes() {
-        let feature = LegacyToolFeature::new("test", Box::new(DummyTool));
+    async fn tool_adapter_executes() {
+        let feature = ToolAdapter::new("test", Box::new(DummyTool));
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = feature.execute("dummy", "tc1", json!({}), cancel).await.unwrap();
         assert_eq!(result.content[0].as_text().unwrap(), "ok");
