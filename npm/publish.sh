@@ -20,13 +20,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO="styrene-lab/omegon-core"
 
-# Version from arg or Cargo.toml
-VERSION="${1:-}"
+# Parse arguments — supports: publish.sh [VERSION] [--dry-run] in any order
+VERSION=""
 DRY_RUN=""
-if [ "${2:-}" = "--dry-run" ] || [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN="--dry-run"
-  [ "${1:-}" = "--dry-run" ] && VERSION=""
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN="--dry-run" ;;
+    *)         VERSION="$arg" ;;
+  esac
+done
 
 if [ -z "$VERSION" ]; then
   VERSION=$(grep -m1 'version = ' "$REPO_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
@@ -41,6 +43,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 PLATFORMS=(darwin-arm64 darwin-x64 linux-arm64 linux-x64)
+
+DOWNLOADED=0
 
 echo "Downloading release assets..."
 for platform in "${PLATFORMS[@]}"; do
@@ -58,8 +62,15 @@ for platform in "${PLATFORMS[@]}"; do
   chmod +x "$platform_dir/omegon"
   rm -f "$TMP/omegon"
   echo "  ✓ ${platform}"
+  DOWNLOADED=$((DOWNLOADED + 1))
 done
 echo ""
+
+if [ "$DOWNLOADED" -eq 0 ]; then
+  echo "✗ No platform binaries downloaded. Is release ${TAG} published?"
+  echo "  Check: gh release view ${TAG} -R ${REPO}"
+  exit 1
+fi
 
 # ── Update versions ─────────────────────────────────────────────────────
 echo "Setting version ${VERSION} across all packages..."

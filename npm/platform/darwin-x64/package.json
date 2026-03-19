@@ -1,6 +1,6 @@
 {
   "name": "@styrene-lab/omegon-darwin-x64",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Omegon native binary for darwin-x64",
   "license": "MIT",
   "repository": {

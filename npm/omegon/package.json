@@ -1,6 +1,6 @@
 {
   "name": "omegon",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Rust-native AI coding agent \u2014 lifecycle engine, memory, tool execution",
   "license": "MIT",
   "repository": {
@@ -12,13 +12,14 @@
     "omegon": "bin/omegon"
   },
   "files": [
-    "bin/omegon"
+    "bin/omegon",
+    "README.md"
   ],
   "optionalDependencies": {
-    "@styrene-lab/omegon-darwin-arm64": "0.13.0",
-    "@styrene-lab/omegon-darwin-x64": "0.13.0",
-    "@styrene-lab/omegon-linux-arm64": "0.13.0",
-    "@styrene-lab/omegon-linux-x64": "0.13.0"
+    "@styrene-lab/omegon-darwin-arm64": "0.13.1",
+    "@styrene-lab/omegon-darwin-x64": "0.13.1",
+    "@styrene-lab/omegon-linux-arm64": "0.13.1",
+    "@styrene-lab/omegon-linux-x64": "0.13.1"
   },
   "publishConfig": {
     "access": "public"

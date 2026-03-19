@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * Thin wrapper that finds and executes the platform-specific Omegon binary.
+ * Thin wrapper that finds and spawns the platform-specific Omegon binary.
  *
  * The actual binary comes from one of the @styrene-lab/omegon-{platform}
  * optional dependencies. This script resolves the correct one for the
- * current platform/arch and exec()s it, replacing the Node process entirely.
+ * current platform/arch and spawns it with inherited stdio, then exits
+ * with the same code.
  */
 
-const { execFileSync } = require("child_process");
+const { spawn } = require("child_process");
 const { existsSync } = require("fs");
 const { join, dirname } = require("path");
 
@@ -60,13 +61,24 @@ if (!binaryPath || !existsSync(binaryPath)) {
   process.exit(1);
 }
 
-// Pass through all arguments, replacing this process
-try {
-  execFileSync(binaryPath, process.argv.slice(2), {
-    stdio: "inherit",
-    env: process.env,
-  });
-} catch (e) {
-  // execFileSync throws on non-zero exit — forward the exit code
-  process.exit(e.status ?? 1);
-}
+// Spawn the binary with inherited stdio and forward signals.
+// The Node wrapper stays alive only to relay the exit code.
+const child = spawn(binaryPath, process.argv.slice(2), {
+  stdio: "inherit",
+  env: process.env,
+});
+
+// Forward signals to the child
+const forwardSignal = (sig) => child.kill(sig);
+process.on("SIGINT", forwardSignal);
+process.on("SIGTERM", forwardSignal);
+
+child.on("exit", (code, signal) => {
+  process.removeListener("SIGINT", forwardSignal);
+  process.removeListener("SIGTERM", forwardSignal);
+  if (signal) {
+    process.kill(process.pid, signal);
+  } else {
+    process.exit(code ?? 1);
+  }
+});
