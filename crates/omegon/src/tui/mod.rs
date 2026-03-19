@@ -335,15 +335,18 @@ impl App {
         {
             let ctx_mode = self.footer_data.context_mode;
             let hint_spans = vec![
-                Span::styled("/dash ", Style::default().fg(t.dim())),
-                Span::styled("to expand", Style::default().fg(t.dim())),
+                Span::styled("Tab ", Style::default().fg(t.dim())),
+                Span::styled("expand card", Style::default().fg(t.dim())),
                 Span::styled("  ·  ", Style::default().fg(t.border_dim())),
-                Span::styled(format!("{} context {}", ctx_mode.icon(), ctx_mode.as_str()), Style::default().fg(t.dim())),
+                Span::styled(format!("{} {}", ctx_mode.icon(), ctx_mode.as_str()), Style::default().fg(t.dim())),
                 Span::styled("  ·  ", Style::default().fg(t.border_dim())),
                 Span::styled(
                     format!("{} {}", self.settings().thinking.icon(), self.settings().thinking.as_str()),
                     Style::default().fg(t.dim()),
                 ),
+                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
+                Span::styled("Shift+click ", Style::default().fg(t.dim())),
+                Span::styled("select text", Style::default().fg(t.dim())),
             ];
             let hint = Paragraph::new(Line::from(hint_spans))
                 .style(Style::default().bg(t.card_bg()));
@@ -1191,12 +1194,23 @@ pub async fn run_tui(
                         app.editor.move_word_forward();
                     }
 
-                    // Tab completion
+                    // Tab: command completion if typing, or toggle tool card expansion
                     (KeyCode::Tab, _) if !app.agent_active => {
-                        let matches = app.matching_commands();
-                        if matches.len() == 1 {
-                            let cmd = format!("/{}", matches[0].0);
-                            app.editor.set_text(&cmd);
+                        let text = app.editor.render_text().to_string();
+                        if text.starts_with('/') {
+                            // Command completion
+                            let matches = app.matching_commands();
+                            if matches.len() == 1 {
+                                let cmd = format!("/{}", matches[0].0);
+                                app.editor.set_text(&cmd);
+                            }
+                        } else if text.is_empty() {
+                            // Toggle nearest tool card expansion
+                            let t = &app.theme;
+                            let viewport_h = terminal.size().map(|s| s.height).unwrap_or(24);
+                            if let Some(idx) = app.conversation.focused_tool_card(viewport_h, t.as_ref()) {
+                                app.conversation.toggle_expand(idx);
+                            }
                         }
                     }
 

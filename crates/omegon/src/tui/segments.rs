@@ -37,6 +37,8 @@ pub enum Segment {
         detail_result: Option<String>,
         is_error: bool,
         complete: bool,
+        /// When true, show full result instead of truncated preview.
+        expanded: bool,
     },
 
     /// System notification (slash command response, info message).
@@ -62,10 +64,10 @@ impl Segment {
                 render_assistant_text(text, thinking, *complete, area, buf, t);
             }
             Self::ToolCard {
-                name, detail_args, detail_result, is_error, complete, ..
+                name, detail_args, detail_result, is_error, complete, expanded, ..
             } => {
                 render_tool_card(name, detail_args.as_deref(), detail_result.as_deref(),
-                    *is_error, *complete, area, buf, t);
+                    *is_error, *complete, *expanded, area, buf, t);
             }
             Self::SystemNotification { text } => render_system(text, area, buf, t),
             Self::LifecycleEvent { icon, text } => render_lifecycle(icon, text, area, buf, t),
@@ -107,16 +109,17 @@ impl Segment {
                 h.max(1) + 1 // +1 spacing after
             }
 
-            Self::ToolCard { name, detail_args, detail_result, .. } => {
+            Self::ToolCard { name, detail_args, detail_result, expanded, .. } => {
                 let mut h: u16 = 2; // top border + bottom border
                 let inner_w = w.saturating_sub(6); // borders + padding
+                let max_lines: usize = if *expanded { 200 } else { 12 };
 
                 // Args
                 if let Some(args) = detail_args {
                     let lines = if *name == "bash" {
                         args.lines().count().min(4)
                     } else {
-                        1 // single line for path-based tools
+                        1
                     };
                     h += lines as u16;
                 }
@@ -124,17 +127,16 @@ impl Segment {
                 if detail_args.is_some() && detail_result.is_some() {
                     h += 1;
                 }
-                // Result (capped at 12 + truncation notice)
+                // Result
                 if let Some(result) = detail_result {
                     let total = result.lines().count();
-                    let show = total.min(12);
-                    // Account for wrapping in result lines
+                    let show = total.min(max_lines);
                     for line in result.lines().take(show) {
                         h += wrapped_line_count(line, inner_w) as u16;
                     }
-                    if total > 12 { h += 1; } // "… N lines" notice
+                    if total > show { h += 1; } // truncation notice
                 }
-                h.max(3) + 1 // +1 spacing after card
+                h.max(3) + 1
             }
 
             Self::SystemNotification { text } => {
@@ -229,7 +231,7 @@ fn render_assistant_text(
 
 fn render_tool_card(
     name: &str, detail_args: Option<&str>, detail_result: Option<&str>,
-    is_error: bool, complete: bool,
+    is_error: bool, complete: bool, expanded: bool,
     area: Rect, buf: &mut Buffer, t: &dyn Theme,
 ) {
     let (icon, status_color) = if complete {
@@ -318,7 +320,8 @@ fn render_tool_card(
         }
 
         let result_lines: Vec<&str> = result.lines().collect();
-        let show = result_lines.len().min(12);
+        let max_lines = if expanded { 200 } else { 12 };
+        let show = result_lines.len().min(max_lines);
         let display_text = result_lines[..show].join("\n");
 
         // Try syntax highlighting based on file extension from args
@@ -351,9 +354,14 @@ fn render_tool_card(
         }
 
         if result_lines.len() > show {
+            let hint = if expanded {
+                format!("  ── {} lines ── Tab to collapse", result_lines.len())
+            } else {
+                format!("  ── {} more lines ── Tab to expand", result_lines.len() - show)
+            };
             lines.push(Line::from(Span::styled(
-                format!("  … {} lines total", result_lines.len()),
-                Style::default().fg(t.dim()).bg(t.surface_bg()),
+                hint,
+                Style::default().fg(t.accent_muted()).bg(t.surface_bg()),
             )));
         }
     }
@@ -556,7 +564,7 @@ mod tests {
             detail_args: Some("ls -la".into()),
             result_summary: Some("total 42".into()),
             detail_result: Some("total 42\ndrwxr-xr-x  5 user staff".into()),
-            is_error: false, complete: true,
+            is_error: false, complete: true, expanded: false,
         };
         let (area, mut buf) = make_buf(60, 10);
         seg.render(area, &mut buf, &Alpharius);
@@ -573,7 +581,7 @@ mod tests {
             id: "1".into(), name: "write".into(),
             args_summary: None, detail_args: Some("/tmp/test".into()),
             result_summary: None, detail_result: Some("permission denied".into()),
-            is_error: true, complete: true,
+            is_error: true, complete: true, expanded: false,
         };
         let (area, mut buf) = make_buf(60, 8);
         seg.render(area, &mut buf, &Alpharius);
@@ -608,7 +616,7 @@ mod tests {
             id: "1".into(), name: "bash".into(),
             args_summary: None, detail_args: Some("echo hello".into()),
             result_summary: None, detail_result: Some("hello".into()),
-            is_error: false, complete: true,
+            is_error: false, complete: true, expanded: false,
         };
         let h = tool.height(80, &t);
         assert!(h >= 4, "tool card height should be >= 4, got {h}");

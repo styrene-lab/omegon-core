@@ -301,7 +301,7 @@ mod tests {
                 id: "1".into(), name: "bash".into(),
                 args_summary: None, detail_args: Some("echo hi".into()),
                 result_summary: None, detail_result: Some("hi".into()),
-                is_error: false, complete: true,
+                is_error: false, complete: true, expanded: false,
             },
         ];
         let widget = ConversationWidget::new(&segments, &Alpharius);

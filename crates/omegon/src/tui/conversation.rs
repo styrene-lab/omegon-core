@@ -107,6 +107,7 @@ impl ConversationView {
             detail_result: None,
             is_error: false,
             complete: false,
+            expanded: false,
         });
         self.conv_state.invalidate();
         self.conv_state.auto_scroll_to_bottom();
@@ -137,14 +138,9 @@ impl ConversationView {
                     else if line.len() > 100 { Some(format!("{}…", &line[..99])) }
                     else { Some(line.to_string()) }
                 });
-                *dr = result_text.map(|text| {
-                    let lines: Vec<&str> = text.lines().take(12).collect();
-                    let mut result = lines.join("\n");
-                    if text.lines().count() > 12 {
-                        result.push_str(&format!("\n  … {} lines total", text.lines().count()));
-                    }
-                    result
-                });
+                // Store the full result — truncation happens at render time
+                // based on the card's expanded/collapsed state.
+                *dr = result_text.map(|text| text.to_string());
                 break;
             }
         }
@@ -169,6 +165,34 @@ impl ConversationView {
 
     pub fn scroll_down(&mut self, amount: u16) {
         self.conv_state.scroll_down(amount);
+    }
+
+    /// Toggle expansion state of a tool card at the given segment index.
+    pub fn toggle_expand(&mut self, segment_idx: usize) {
+        if let Some(Segment::ToolCard { expanded, .. }) = self.segments.get_mut(segment_idx) {
+            *expanded = !*expanded;
+            self.conv_state.invalidate();
+        }
+    }
+
+    /// Find the nearest tool card segment at or above the current scroll position.
+    /// Returns the segment index if found.
+    pub fn focused_tool_card(&self, _viewport_height: u16, theme: &dyn super::theme::Theme) -> Option<usize> {
+        // Find the first visible tool card
+        let width = 80; // approximate — will be corrected by actual render
+        let mut y: u16 = 0;
+        let offset = self.conv_state.scroll_offset;
+
+        for (i, seg) in self.segments.iter().enumerate() {
+            let h = seg.height(width, theme);
+            let seg_top = y;
+            y += h;
+
+            if matches!(seg, Segment::ToolCard { .. }) && seg_top >= offset {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// Clear all segments (for /clear command).
