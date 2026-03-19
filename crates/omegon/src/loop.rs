@@ -86,7 +86,7 @@ pub async fn run(
             tracing::warn!("Hard turn limit reached ({} turns). Stopping.", config.max_turns);
             let _ = events.send(AgentEvent::TurnStart { turn });
             bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
-        let _ = events.send(AgentEvent::TurnEnd { turn });
+            let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
         }
 
@@ -189,7 +189,7 @@ pub async fn run(
             _ = cancel.cancelled() => {
                 tracing::info!("Agent loop cancelled during LLM streaming");
                 bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
-        let _ = events.send(AgentEvent::TurnEnd { turn });
+                let _ = events.send(AgentEvent::TurnEnd { turn });
                 break;
             }
         };
@@ -219,11 +219,11 @@ pub async fn run(
                         .to_string(),
                 );
                 bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
-        let _ = events.send(AgentEvent::TurnEnd { turn });
+                let _ = events.send(AgentEvent::TurnEnd { turn });
                 continue; // give it one more turn to commit
             }
             bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
-        let _ = events.send(AgentEvent::TurnEnd { turn });
+            let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
         }
 
