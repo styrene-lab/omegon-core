@@ -21,3 +21,5 @@
 
 pub mod auto_compact;
 pub mod legacy_bridge;
+pub mod terminal_title;
+pub mod version_check;

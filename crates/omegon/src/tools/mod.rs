@@ -6,6 +6,7 @@
 
 pub mod bash;
 pub mod change;
+pub mod chronos;
 pub mod edit;
 pub mod local_inference;
 pub mod read;
@@ -276,6 +277,42 @@ impl ToolProvider for CoreTools {
                     "properties": {}
                 }),
             },
+            ToolDefinition {
+                name: "chronos".into(),
+                label: "chronos".into(),
+                description: "Get authoritative date and time context from the system clock. \
+                    Use before any date calculations, weekly/monthly reporting, relative date \
+                    references, quarter boundaries, or epoch timestamps. Eliminates AI date \
+                    calculation errors.\n\nSubcommands:\n  week (default) — Current/previous \
+                    week boundaries (Mon-Fri)\n  month — Current/previous month boundaries\n  \
+                    quarter — Calendar quarter, fiscal year (Oct-Sep)\n  relative — Resolve \
+                    expression like '3 days ago', 'next Monday'\n  iso — ISO 8601 week number, \
+                    year, day-of-year\n  epoch — Unix timestamp (seconds and milliseconds)\n  \
+                    tz — Timezone abbreviation and UTC offset\n  range — Calendar and business \
+                    days between two dates\n  all — All of the above combined".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "subcommand": {
+                            "type": "string",
+                            "enum": ["week", "month", "quarter", "relative", "iso", "epoch", "tz", "range", "all"],
+                            "description": "Subcommand (default: week)"
+                        },
+                        "expression": {
+                            "type": "string",
+                            "description": "For 'relative': date expression (e.g. '3 days ago', 'next Monday')"
+                        },
+                        "from_date": {
+                            "type": "string",
+                            "description": "For 'range': start date YYYY-MM-DD"
+                        },
+                        "to_date": {
+                            "type": "string",
+                            "description": "For 'range': end date YYYY-MM-DD"
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -360,6 +397,19 @@ impl ToolProvider for CoreTools {
             }
             "speculate_rollback" => {
                 speculate::rollback(&self.cwd).await
+            }
+            "chronos" => {
+                let sub = args["subcommand"].as_str().unwrap_or("week");
+                let expr = args["expression"].as_str();
+                let from = args["from_date"].as_str();
+                let to = args["to_date"].as_str();
+                match chronos::execute(sub, expr, from, to) {
+                    Ok(text) => Ok(ToolResult {
+                        content: vec![omegon_traits::ContentBlock::Text { text }],
+                        details: json!({ "subcommand": sub }),
+                    }),
+                    Err(e) => anyhow::bail!("{e}"),
+                }
             }
             _ => anyhow::bail!("Unknown core tool: {tool_name}"),
         }

@@ -176,6 +176,12 @@ impl AgentSetup {
 
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));
+        bus.register(Box::new(features::terminal_title::TerminalTitle::new(
+            &cwd.to_string_lossy(),
+        )));
+        bus.register(Box::new(features::version_check::VersionCheck::new(
+            env!("CARGO_PKG_VERSION"),
+        )));
 
         // ─── Finalize bus (caches tool/command definitions) ─────────────
         bus.finalize();

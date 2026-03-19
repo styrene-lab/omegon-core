@@ -453,6 +453,7 @@ impl App {
         ("context",  "toggle context window (200k/1M)",       &["200k", "1m"]),
         ("sessions", "list saved sessions",                  &[]),
         ("memory",   "memory stats",                        &[]),
+        ("chronos",  "date/time context",                      &["week", "month", "quarter", "relative", "iso", "epoch", "tz", "range", "all"]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
         ("splash",   "replay splash animation",              &[]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
@@ -607,6 +608,14 @@ impl App {
                 let cwd = std::path::Path::new(&self.footer_data.cwd);
                 let report = crate::migrate::run(source, cwd);
                 SlashResult::Display(report.summary())
+            }
+
+            "chronos" => {
+                let sub = if args.is_empty() { "week" } else { args };
+                match crate::tools::chronos::execute(sub, None, None, None) {
+                    Ok(text) => SlashResult::Display(text),
+                    Err(e) => SlashResult::Display(format!("❌ {e}")),
+                }
             }
 
             "splash" => {

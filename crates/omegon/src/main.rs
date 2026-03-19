@@ -453,6 +453,18 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         }
     });
 
+    // ─── Emit session start to bus features ────────────────────────────
+    agent.bus.emit(&omegon_traits::BusEvent::SessionStart {
+        cwd: agent.cwd.clone(),
+        session_id: "interactive".into(),
+    });
+    // Drain any requests from session_start handlers
+    for request in agent.bus.drain_requests() {
+        if let omegon_traits::BusRequest::Notify { message, .. } = request {
+            let _ = events_tx.send(AgentEvent::SystemNotification { message });
+        }
+    }
+
     // ─── Interactive agent loop ─────────────────────────────────────────
     loop {
         let cmd = match command_rx.recv().await {

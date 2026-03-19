@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn reverse_search_backspace() {
-        let history = vec!["cargo test".to_string()];
+        let _history = vec!["cargo test".to_string()];
         let mut e = Editor::new();
         e.start_reverse_search();
         e.insert('t');
