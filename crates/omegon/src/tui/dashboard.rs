@@ -167,8 +167,8 @@ impl DashboardState {
     pub fn render_themed(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
         let block = Block::default()
             .borders(Borders::LEFT)
-            .border_style(t.style_border())
-            .title(Span::styled(" Ω Dashboard ", t.style_accent_bold()));
+            .border_style(Style::default().fg(t.border_dim()))
+            .title(Span::styled(" Ω Dashboard ", Style::default().fg(t.accent()).add_modifier(Modifier::BOLD)));
 
         let inner_w = area.width.saturating_sub(3) as usize; // left border + padding
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -177,8 +177,8 @@ impl DashboardState {
         if self.status_counts.total > 0 {
             let c = &self.status_counts;
             lines.push(Line::from(vec![
-                Span::styled(format!("{}", c.total), Style::default().fg(t.accent()).add_modifier(Modifier::BOLD)),
-                Span::styled(" nodes", t.style_muted()),
+                Span::styled(format!("{}", c.total), Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
+                Span::styled(" nodes", Style::default().fg(t.dim())),
             ]));
             let mut badge_parts: Vec<Span<'static>> = Vec::new();
             if c.implementing > 0 {
@@ -279,7 +279,7 @@ impl DashboardState {
                 let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
                 lines.push(Line::from(vec![
                     Span::styled("  ⚙ ", Style::default().fg(t.warning())),
-                    Span::styled(label.to_string(), t.style_muted()),
+                    Span::styled(label.to_string(), Style::default().fg(t.fg())),
                 ]));
             }
             if self.implementing_nodes.len() > 5 {
@@ -298,7 +298,7 @@ impl DashboardState {
                 let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
                 lines.push(Line::from(vec![
                     Span::styled("  ● ", Style::default().fg(t.success())),
-                    Span::styled(label.to_string(), t.style_muted()),
+                    Span::styled(label.to_string(), Style::default().fg(t.accent_muted())),
                 ]));
             }
             if self.actionable_nodes.len() > 5 {
@@ -368,15 +368,19 @@ impl DashboardState {
 
         // ─── Session Stats ──────────────────────────────────────
         lines.push(widgets::section_divider("session", inner_w, t));
-        lines.push(Line::from(Span::styled(
-            format!("  {} turns, {} tool calls", self.turns, self.tool_calls),
-            t.style_muted(),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("{}", self.turns), Style::default().fg(t.fg())),
+            Span::styled(" turns · ", Style::default().fg(t.dim())),
+            Span::styled(format!("{}", self.tool_calls), Style::default().fg(t.fg())),
+            Span::styled(" tool calls", Style::default().fg(t.dim())),
+        ]));
         if self.compactions > 0 {
-            lines.push(Line::from(Span::styled(
-                format!("  {} compactions", self.compactions),
-                t.style_muted(),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("{}", self.compactions), Style::default().fg(t.fg())),
+                Span::styled(" compactions", Style::default().fg(t.dim())),
+            ]));
         }
 
         let widget = Paragraph::new(lines)

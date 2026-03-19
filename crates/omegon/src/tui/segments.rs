@@ -205,9 +205,11 @@ fn render_assistant_text(
 
     // Assistant text with markdown structural highlighting
     let mut in_code_fence = false;
+    let mut table_state = TableState::None;
     for line in text.lines() {
         if line.starts_with("```") {
             in_code_fence = !in_code_fence;
+            table_state = TableState::None;
             lines.push(Line::from(Span::styled(
                 line.to_string(),
                 Style::default().fg(t.dim()).bg(t.surface_bg()),
@@ -218,8 +220,17 @@ fn render_assistant_text(
                 Style::default().fg(t.accent_muted()).bg(t.surface_bg()),
             )));
         } else if is_table_line(line) {
-            lines.push(render_table_line(line, t));
+            // Track table context: header → separator → body
+            let is_header = match table_state {
+                TableState::None => { table_state = TableState::Header; true }
+                TableState::Header if is_table_separator(line) => {
+                    table_state = TableState::Body; false
+                }
+                _ => { table_state = TableState::Body; false }
+            };
+            lines.push(render_table_line(line, is_header, t));
         } else {
+            table_state = TableState::None;
             lines.push(super::widgets::highlight_line(line, t));
         }
     }
@@ -432,6 +443,10 @@ fn try_highlight<'a>(
     }).collect())
 }
 
+/// Table parsing state — tracks whether we're in header, separator, or body rows.
+#[derive(Clone, Copy, PartialEq)]
+enum TableState { None, Header, Body }
+
 /// Detect markdown table lines: `| cell | cell |` or `|---|---|`
 fn is_table_line(line: &str) -> bool {
     let trimmed = line.trim();
@@ -446,15 +461,24 @@ fn is_table_separator(line: &str) -> bool {
 }
 
 /// Render a markdown table line with cell highlighting.
-fn render_table_line<'a>(line: &str, t: &dyn Theme) -> Line<'a> {
+fn render_table_line<'a>(line: &str, is_header: bool, t: &dyn Theme) -> Line<'a> {
     let trimmed = line.trim();
+    let row_bg = t.surface_bg();
 
-    // Separator row: |---|---|
+    // Separator row: |---|---| → render as a thin rule
     if is_table_separator(trimmed) {
-        return Line::from(Span::styled(
-            trimmed.to_string(),
-            Style::default().fg(t.border()).bg(t.surface_bg()),
-        ));
+        let cells: Vec<&str> = trimmed.split('|').filter(|s| !s.is_empty()).collect();
+        let mut spans: Vec<Span<'a>> = Vec::new();
+        spans.push(Span::styled("├", Style::default().fg(t.border()).bg(row_bg)));
+        for (i, cell) in cells.iter().enumerate() {
+            let w = cell.len().max(1);
+            spans.push(Span::styled("─".repeat(w), Style::default().fg(t.border()).bg(row_bg)));
+            if i < cells.len() - 1 {
+                spans.push(Span::styled("┼", Style::default().fg(t.border()).bg(row_bg)));
+            }
+        }
+        spans.push(Span::styled("┤", Style::default().fg(t.border()).bg(row_bg)));
+        return Line::from(spans);
     }
 
     // Content row: | cell | cell |
@@ -463,22 +487,32 @@ fn render_table_line<'a>(line: &str, t: &dyn Theme) -> Line<'a> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(t.surface_bg())));
+    let cell_style = if is_header {
+        Style::default().fg(t.accent_bright()).bg(row_bg).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.fg()).bg(row_bg)
+    };
+
+    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
     for (i, cell) in cells.iter().enumerate() {
         let cell_text = cell.trim();
-        // First row cells (header) get bold accent, content rows get fg
-        // We can't distinguish header from content without multi-line context,
-        // so just use accent_muted for all cells with inline highlighting
-        let cell_spans = super::widgets::highlight_inline(cell_text, t);
-        for mut s in cell_spans {
-            s.style = s.style.bg(t.surface_bg());
-            spans.push(s);
+        if is_header {
+            spans.push(Span::styled(format!(" {cell_text} "), cell_style));
+        } else {
+            // Content cells get inline highlighting (bold, code, etc.)
+            let cell_spans = super::widgets::highlight_inline(cell_text, t);
+            spans.push(Span::styled(" ", Style::default().bg(row_bg)));
+            for mut s in cell_spans {
+                s.style = s.style.bg(row_bg);
+                spans.push(s);
+            }
+            spans.push(Span::styled(" ", Style::default().bg(row_bg)));
         }
         if i < cells.len() - 1 {
-            spans.push(Span::styled(" │ ", Style::default().fg(t.border()).bg(t.surface_bg())));
+            spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
         }
     }
-    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(t.surface_bg())));
+    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(row_bg)));
 
     Line::from(spans)
 }
@@ -688,10 +722,19 @@ mod tests {
 
     #[test]
     fn table_line_renders() {
-        let line = render_table_line("| Name | Value |", &Alpharius);
+        let line = render_table_line("| Name | Value |", true, &Alpharius);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("Name"), "should contain cell text: {text}");
+        assert!(text.contains("Name"), "header should contain cell text: {text}");
         assert!(text.contains("│"), "should contain box drawing separator: {text}");
+
+        let body = render_table_line("| foo | bar |", false, &Alpharius);
+        let body_text: String = body.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(body_text.contains("foo"), "body should contain cell text: {body_text}");
+
+        let sep = render_table_line("|---|---|", false, &Alpharius);
+        let sep_text: String = sep.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(sep_text.contains("─"), "separator should use rule chars: {sep_text}");
+        assert!(sep_text.contains("┼"), "separator should have cross: {sep_text}");
     }
 
     #[test]

@@ -123,9 +123,9 @@ pub fn section_divider<'a>(label: &str, width: usize, t: &dyn Theme) -> Line<'a>
     let label_str = format!("{label} ");
     let suffix_len = width.saturating_sub(prefix.len() + label_str.len());
     Line::from(vec![
-        Span::styled(prefix.to_string(), Style::default().fg(t.dim())),
-        Span::styled(label_str, Style::default().fg(t.muted())),
-        Span::styled("─".repeat(suffix_len), Style::default().fg(t.dim())),
+        Span::styled(prefix.to_string(), Style::default().fg(t.border())),
+        Span::styled(label_str, Style::default().fg(t.accent_muted())),
+        Span::styled("─".repeat(suffix_len), Style::default().fg(t.border_dim())),
     ])
 }
 
