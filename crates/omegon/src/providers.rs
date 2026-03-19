@@ -257,7 +257,18 @@ impl AnthropicClient {
     fn build_messages(messages: &[LlmMessage]) -> Vec<Value> {
         messages.iter().map(|m| match m {
             LlmMessage::User { content } => json!({"role": "user", "content": content}),
-            LlmMessage::Assistant { text, thinking, tool_calls, .. } => {
+            LlmMessage::Assistant { text, thinking, tool_calls, raw } => {
+                // Prefer raw content blocks if available — they preserve provider-specific
+                // fields like thinking signatures that are required for round-tripping.
+                if let Some(raw_val) = raw {
+                    if let Some(raw_content) = raw_val.get("content").and_then(|c| c.as_array()) {
+                        if !raw_content.is_empty() {
+                            return json!({"role": "assistant", "content": raw_content});
+                        }
+                    }
+                }
+                // Fallback: reconstruct from parsed fields (no signatures — works for
+                // providers that don't need them, or for decayed/compacted messages)
                 let mut content = Vec::new();
                 for t in thinking {
                     content.push(json!({"type": "thinking", "thinking": t}));
@@ -424,6 +435,11 @@ async fn parse_anthropic_stream(
     let mut block_type: Option<String> = None;
     let mut full_text = String::new();
     let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+    // Accumulate complete content blocks for round-tripping (preserves signatures, etc.)
+    let mut content_blocks: Vec<Value> = Vec::new();
+    let mut current_block_text = String::new(); // per-block text accumulator
+    let mut current_thinking_text = String::new();
+    let mut current_thinking_signature: Option<String> = None;
 
     tracing::debug!("parsing Anthropic SSE stream");
     let mut event_count = 0u32;
@@ -447,8 +463,15 @@ async fn parse_anthropic_stream(
                 let bt = event["content_block"]["type"].as_str().unwrap_or("");
                 block_type = Some(bt.to_string());
                 match bt {
-                    "text" => { let _ = tx.try_send(LlmEvent::TextStart); }
-                    "thinking" => { let _ = tx.try_send(LlmEvent::ThinkingStart); }
+                    "text" => {
+                        current_block_text.clear();
+                        let _ = tx.try_send(LlmEvent::TextStart);
+                    }
+                    "thinking" => {
+                        current_thinking_text.clear();
+                        current_thinking_signature = None;
+                        let _ = tx.try_send(LlmEvent::ThinkingStart);
+                    }
                     "tool_use" => {
                         let id = event["content_block"]["id"].as_str().unwrap_or("").to_string();
                         let raw_name = event["content_block"]["name"].as_str().unwrap_or("");
@@ -467,11 +490,20 @@ async fn parse_anthropic_stream(
                     "text_delta" => {
                         let t = event["delta"]["text"].as_str().unwrap_or("");
                         full_text.push_str(t);
+                        current_block_text.push_str(t);
                         let _ = tx.try_send(LlmEvent::TextDelta { delta: t.to_string() });
                     }
                     "thinking_delta" => {
                         let t = event["delta"]["thinking"].as_str().unwrap_or("");
+                        current_thinking_text.push_str(t);
                         let _ = tx.try_send(LlmEvent::ThinkingDelta { delta: t.to_string() });
+                    }
+                    "signature_delta" => {
+                        let sig = event["delta"]["signature"].as_str().unwrap_or("");
+                        match &mut current_thinking_signature {
+                            Some(s) => s.push_str(sig),
+                            None => current_thinking_signature = Some(sig.to_string()),
+                        }
                     }
                     "input_json_delta" => {
                         let p = event["delta"]["partial_json"].as_str().unwrap_or("");
@@ -485,10 +517,29 @@ async fn parse_anthropic_stream(
 
             "content_block_stop" => {
                 match block_type.as_deref() {
-                    Some("text") => { let _ = tx.try_send(LlmEvent::TextEnd); }
-                    Some("thinking") => { let _ = tx.try_send(LlmEvent::ThinkingEnd); }
+                    Some("text") => {
+                        content_blocks.push(json!({"type": "text", "text": current_block_text.clone()}));
+                        let _ = tx.try_send(LlmEvent::TextEnd);
+                    }
+                    Some("thinking") => {
+                        let mut block = json!({
+                            "type": "thinking",
+                            "thinking": current_thinking_text.clone(),
+                        });
+                        if let Some(ref sig) = current_thinking_signature {
+                            block["signature"] = json!(sig);
+                        }
+                        content_blocks.push(block);
+                        let _ = tx.try_send(LlmEvent::ThinkingEnd);
+                    }
                     Some("tool_use") => {
                         if let Some(tc) = tool_calls.last() {
+                            content_blocks.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": serde_json::from_str::<Value>(&tc.args_json).unwrap_or_default(),
+                            }));
                             let _ = tx.try_send(LlmEvent::ToolCallEnd { tool_call: crate::bridge::WireToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: serde_json::from_str(&tc.args_json).unwrap_or_default() } });
                         }
                     }
@@ -507,6 +558,20 @@ async fn parse_anthropic_stream(
                 tracing::trace!(event_type = etype, "citation event");
             }
             "signature" | "signature_delta" => {
+                // Signature events can arrive as top-level SSE events (outside content_block_delta).
+                // Accumulate into current_thinking_signature for the most recent thinking block.
+                if let Some(sig) = event.get("signature").and_then(|s| s.as_str()) {
+                    match &mut current_thinking_signature {
+                        Some(s) => s.push_str(sig),
+                        None => current_thinking_signature = Some(sig.to_string()),
+                    }
+                    // Patch the last thinking block in content_blocks if it exists
+                    if let Some(last) = content_blocks.last_mut() {
+                        if last.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+                            last["signature"] = json!(current_thinking_signature.as_deref().unwrap_or(""));
+                        }
+                    }
+                }
                 tracing::trace!(event_type = etype, "signature event");
             }
             "server_tool_use" => {
@@ -522,7 +587,11 @@ async fn parse_anthropic_stream(
                 );
                 let tc_vals: Vec<Value> = tool_calls.iter().map(|tc| tc.to_value()).collect();
                 let _ = tx.try_send(LlmEvent::Done {
-                    message: json!({"text": full_text, "tool_calls": tc_vals}),
+                    message: json!({
+                        "text": full_text,
+                        "tool_calls": tc_vals,
+                        "content": content_blocks,
+                    }),
                 });
                 return false; // stop
             }
