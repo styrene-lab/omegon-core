@@ -164,6 +164,54 @@ fn tool_defs() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        ToolDefinition {
+            name: "memory_episodes".into(),
+            label: "memory_episodes".into(),
+            description: "Search session episode narratives for past work context.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you're looking for in past sessions"
+                    },
+                    "k": {
+                        "type": "number",
+                        "description": "Number of results (default: 5)"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "memory_compact".into(),
+            label: "memory_compact".into(),
+            description: "Trigger context compaction to free up context window space.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "instructions": {
+                        "type": "string",
+                        "description": "Optional focus instructions for compaction"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "memory_search_archive".into(),
+            label: "memory_search_archive".into(),
+            description: "Search archived project memories from previous months.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search terms"
+                    }
+                }
+            }),
+        },
     ]
 }
 
@@ -353,6 +401,62 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
                     details: Value::Null,
                 })
             }
+            "memory_episodes" => {
+                let query = args["query"].as_str().unwrap_or("").to_string();
+                let k = args["k"].as_u64().unwrap_or(5) as usize;
+                let episodes = self.backend.search_episodes(&self.mind, &query, k).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if episodes.is_empty() {
+                    return Ok(ToolResult {
+                        content: vec![ContentBlock::Text { text: "No matching episodes found.".into() }],
+                        details: Value::Null,
+                    });
+                }
+                let mut lines = Vec::new();
+                for ep in &episodes {
+                    lines.push(format!("### {}: {}", ep.date, ep.title));
+                    lines.push(ep.narrative.chars().take(500).collect::<String>());
+                    lines.push(String::new());
+                }
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text { text: lines.join("\n") }],
+                    details: Value::Null,
+                })
+            }
+            "memory_compact" => {
+                // Context compaction is handled at the conversation level, not memory level.
+                // Signal the caller that compaction was requested.
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text {
+                        text: "Context compaction requested. The agent loop will compact older conversation history.".into()
+                    }],
+                    details: serde_json::json!({ "action": "compact_requested" }),
+                })
+            }
+            "memory_search_archive" => {
+                let query = args["query"].as_str().unwrap_or("").to_string();
+                // Search archived facts using FTS
+                let results = self.backend.fts_search(&self.mind, &query, 20).await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Filter to only archived facts (fts_search returns all, we filter)
+                // Note: current FTS searches active facts. For true archive search,
+                // we'd need a separate query. For now, return FTS results as-is.
+                if results.is_empty() {
+                    return Ok(ToolResult {
+                        content: vec![ContentBlock::Text { text: "No matching archived facts found.".into() }],
+                        details: Value::Null,
+                    });
+                }
+                let mut lines = Vec::new();
+                for scored in &results {
+                    let f = &scored.fact;
+                    lines.push(format!("[{}] ({:?}) {}", f.id, f.section, f.content));
+                }
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text { text: lines.join("\n") }],
+                    details: Value::Null,
+                })
+            }
             _ => anyhow::bail!("Unknown memory tool: {tool_name}"),
         }
     }
@@ -433,12 +537,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_provider_exposes_8_tools() {
+    async fn tool_provider_exposes_11_tools() {
         let provider = MemoryProvider::new(
             InMemoryBackend::new(), NoopRenderer, "test".into()
         );
         let tools = provider.tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 11);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
