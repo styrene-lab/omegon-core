@@ -80,12 +80,15 @@ impl ConversationView {
 
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(Message::User(text.to_string()));
-        self.auto_scroll_to_bottom();
+        // User-initiated — always force scroll to show what they just typed,
+        // regardless of user_scrolled state.
+        self.force_scroll_to_bottom();
     }
 
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(Message::System(text.to_string()));
-        self.auto_scroll_to_bottom();
+        // System messages (slash command responses) are user-initiated.
+        self.force_scroll_to_bottom();
     }
 
     pub fn push_lifecycle(&mut self, icon: &str, text: &str) {
@@ -125,6 +128,7 @@ impl ConversationView {
         if let Some(Message::Assistant { thinking, .. }) = self.messages.last_mut() {
             thinking.push_str(delta);
         }
+        self.auto_scroll_to_bottom();
     }
 
     pub fn push_tool_start(&mut self, id: &str, name: &str, args_summary: Option<&str>, detail_args: Option<&str>) {
@@ -191,6 +195,9 @@ impl ConversationView {
             *complete = true;
         }
         self.streaming = false;
+        // Agent turn is over — reset scroll state so the next turn auto-follows.
+        self.user_scrolled = false;
+        self.scroll = 0;
     }
 
     // ─── Scroll ─────────────────────────────────────────────────
@@ -213,10 +220,18 @@ impl ConversationView {
     }
 
     /// Auto-scroll to bottom — only if the user hasn't manually scrolled away.
+    /// Used for agent-generated content (streaming, tool events).
     fn auto_scroll_to_bottom(&mut self) {
         if !self.user_scrolled {
             self.scroll = 0;
         }
+    }
+
+    /// Force scroll to bottom and reset user_scrolled state.
+    /// Used for user-initiated actions (submitting prompts, system messages).
+    fn force_scroll_to_bottom(&mut self) {
+        self.scroll = 0;
+        self.user_scrolled = false;
     }
 
     // ─── Rendering ──────────────────────────────────────────────
@@ -512,6 +527,78 @@ mod tests {
         cv.scroll_down(3);
         assert_eq!(cv.scroll_offset(), 2);
         cv.scroll_down(10);
+        assert_eq!(cv.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_up_sets_user_scrolled() {
+        let mut cv = ConversationView::new();
+        assert!(!cv.user_scrolled);
+        cv.scroll_up(3);
+        assert!(cv.user_scrolled);
+        assert_eq!(cv.scroll_offset(), 3);
+    }
+
+    #[test]
+    fn scroll_down_to_zero_clears_user_scrolled() {
+        let mut cv = ConversationView::new();
+        cv.scroll_up(5);
+        assert!(cv.user_scrolled);
+        cv.scroll_down(5);
+        assert_eq!(cv.scroll_offset(), 0);
+        assert!(!cv.user_scrolled, "scrolling back to bottom should clear user_scrolled");
+    }
+
+    #[test]
+    fn auto_scroll_respects_user_scrolled() {
+        let mut cv = ConversationView::new();
+        // User scrolls up
+        cv.scroll_up(10);
+        assert!(cv.user_scrolled);
+        assert_eq!(cv.scroll_offset(), 10);
+
+        // Agent streams content — should NOT yank scroll to bottom
+        cv.append_streaming("new content");
+        assert_eq!(cv.scroll_offset(), 10, "auto_scroll should not override user scroll");
+
+        // Tool events should also not yank
+        cv.push_tool_start("t1", "read", Some("file.rs"), None);
+        assert_eq!(cv.scroll_offset(), 10);
+    }
+
+    #[test]
+    fn push_user_forces_scroll_to_bottom() {
+        let mut cv = ConversationView::new();
+        cv.scroll_up(10);
+        assert!(cv.user_scrolled);
+
+        // User types a new prompt — MUST scroll to show it
+        cv.push_user("next question");
+        assert_eq!(cv.scroll_offset(), 0, "push_user must force scroll to bottom");
+        assert!(!cv.user_scrolled, "push_user must clear user_scrolled");
+    }
+
+    #[test]
+    fn push_system_forces_scroll_to_bottom() {
+        let mut cv = ConversationView::new();
+        cv.scroll_up(10);
+
+        // System message (slash command response) — user-initiated
+        cv.push_system("Command output");
+        assert_eq!(cv.scroll_offset(), 0);
+        assert!(!cv.user_scrolled);
+    }
+
+    #[test]
+    fn finalize_message_resets_user_scrolled() {
+        let mut cv = ConversationView::new();
+        cv.append_streaming("response");
+        cv.scroll_up(10);
+        assert!(cv.user_scrolled);
+
+        // Agent turn ends — reset for next turn
+        cv.finalize_message();
+        assert!(!cv.user_scrolled, "finalize should reset for next turn");
         assert_eq!(cv.scroll_offset(), 0);
     }
 }

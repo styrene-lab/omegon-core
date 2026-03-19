@@ -432,9 +432,8 @@ impl App {
             sel.render(area, frame, t.as_ref());
         }
 
-        // ── Post-render effects (tachyonfx) ─────────────────────────
-        self.effects.set_areas(chunks[0], chunks[1]);
-        self.effects.process(frame.buffer_mut(), area);
+        // ── Post-render effects (tachyonfx) — each zone processed separately ──
+        self.effects.process(frame.buffer_mut(), chunks[0], chunks[1], chunks[3]);
     }
 
     /// Command registry: (name, description, subcommands).
@@ -688,7 +687,7 @@ impl App {
                 let est_tokens = (turn as usize) * 2000 + (self.tool_calls as usize) * 500;
                 let ctx_window = self.footer_data.context_window;
                 if ctx_window > 0 {
-                    self.footer_data.memory_tokens_est = est_tokens;
+                    self.footer_data.estimated_tokens = est_tokens;
                     self.footer_data.context_percent =
                         (est_tokens as f32 / ctx_window as f32 * 100.0).min(100.0);
                 }
@@ -721,14 +720,15 @@ impl App {
 
                 // Dynamic footer: memory tools update fact count
                 if let Some(ref name) = self.last_tool_name {
+                    let is_memory_mutation = matches!(name.as_str(),
+                        "memory_store" | "memory_supersede" | "memory_archive");
                     if name == "memory_store" || name == "memory_supersede" {
                         self.footer_data.total_facts += 1;
-                        let t = &self.theme;
-                        self.effects.ping_footer(t.as_ref());
                     } else if name == "memory_archive" {
                         self.footer_data.total_facts = self.footer_data.total_facts.saturating_sub(1);
-                        let t = &self.theme;
-                        self.effects.ping_footer(t.as_ref());
+                    }
+                    if is_memory_mutation {
+                        self.effects.ping_footer(self.theme.as_ref());
                     }
                 }
                 self.last_tool_name = None;
@@ -884,7 +884,9 @@ pub async fn run_tui(
 
                 splash.tick();
 
-                // Mark items done after a few frames (simulates fast loading)
+                // Cosmetic loading animation — the binary loads in ~50ms so
+                // real subsystem tracking would be invisible. These frame
+                // thresholds create a visual cascade for branding purposes.
                 if splash.frame >= 8 {
                     splash.set_load_state("providers", splash::LoadState::Done);
                 }
@@ -895,6 +897,11 @@ pub async fn run_tui(
                     splash.set_load_state("tools", splash::LoadState::Done);
                 }
 
+                // Drain agent events to prevent broadcast buffer overflow.
+                // Events are silently discarded — the splash is a branding moment,
+                // not functional UI.
+                while events_rx.try_recv().is_ok() {}
+
                 // Safety timeout
                 if splash_start.elapsed() > safety_timeout {
                     splash.force_done();
@@ -902,7 +909,7 @@ pub async fn run_tui(
                 }
 
                 // Auto-dismiss after hold period
-                if splash.ready_to_dismiss() && splash.hold_count > splash::HOLD_FRAMES_PUB + 30 {
+                if splash.ready_to_dismiss() && splash.hold_count > splash::HOLD_FRAMES + 30 {
                     break;
                 }
             }
@@ -928,12 +935,16 @@ pub async fn run_tui(
                         terminal.draw(|f| splash.draw(f, t.as_ref()))?;
                     }
                     let interval = splash::SplashScreen::frame_interval();
-                    if event::poll(interval)? && matches!(event::read()?, Event::Key(_)) {
-                        break;
+                    if event::poll(interval)? {
+                        let ev = event::read()?;
+                        // Any key or mouse click dismisses the replay
+                        if matches!(ev, Event::Key(_) | Event::Mouse(_)) {
+                            break;
+                        }
                     }
                     splash.tick();
                     // Auto-end after full animation + hold
-                    if splash.frame > splash::TOTAL_FRAMES_PUB + splash::HOLD_FRAMES_PUB + 20 {
+                    if splash.frame > splash::TOTAL_FRAMES + splash::HOLD_FRAMES + 20 {
                         break;
                     }
                 }

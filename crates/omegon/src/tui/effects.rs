@@ -1,10 +1,11 @@
 //! TUI effects — tachyonfx-powered visual polish.
 //!
-//! Manages animated effects that run as post-processing passes on the ratatui buffer.
-//! Effects auto-expire after their duration — no manual cleanup needed.
+//! Each TUI zone (conversation, footer, editor) has its own `EffectManager`
+//! so effects are processed against the correct screen area. Effects run as
+//! post-processing passes on the ratatui buffer after widgets are rendered.
 //!
 //! Integration: `App::draw()` renders widgets normally, then calls
-//! `effects.process(delta, buf, area)` to apply active effects.
+//! `effects.process(buf, conversation_area, footer_area)`.
 
 use std::time::Instant;
 
@@ -13,60 +14,70 @@ use tachyonfx::{fx, EffectManager, EffectTimer, Interpolation, Motion};
 
 use super::theme::Theme;
 
-/// Named effect slots for unique effects (only one per slot at a time).
+/// Effect slot keys — unique effects replace any existing effect with the same key.
+/// `Default` is required by `EffectManager<K>`. The default variant (`Startup`)
+/// has no semantic significance.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EffectSlot {
+pub enum ConvSlot {
     #[default]
-    /// Sweep-in on the footer zone.
-    FooterReveal,
-    /// Fade-in on the conversation zone.
-    ConversationFade,
-    /// Spinner verb hsl shift.
-    SpinnerGlow,
-    /// Brief flash on a footer value change.
-    FooterPing,
+    Startup,
 }
 
-/// Manages active effects and tracks frame timing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FooterSlot {
+    #[default]
+    Reveal,
+    Ping,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EditorSlot {
+    #[default]
+    SpinnerGlow,
+}
+
+/// Manages per-zone effects and tracks frame timing.
 pub struct Effects {
-    manager: EffectManager<EffectSlot>,
+    conversation: EffectManager<ConvSlot>,
+    footer: EffectManager<FooterSlot>,
+    editor: EffectManager<EditorSlot>,
     last_frame: Instant,
-    /// Areas updated each draw — effects process against these.
-    footer_area: Option<Rect>,
-    conversation_area: Option<Rect>,
 }
 
 impl Effects {
     pub fn new() -> Self {
         Self {
-            manager: EffectManager::default(),
+            conversation: EffectManager::default(),
+            footer: EffectManager::default(),
+            editor: EffectManager::default(),
             last_frame: Instant::now(),
-            footer_area: None,
-            conversation_area: None,
         }
     }
 
-    /// Record the areas for this frame (call before process).
-    pub fn set_areas(&mut self, conversation: Rect, footer: Rect) {
-        self.conversation_area = Some(conversation);
-        self.footer_area = Some(footer);
-    }
-
-    /// Process all active effects on the buffer. Call after rendering widgets.
-    pub fn process(&mut self, buf: &mut Buffer, area: Rect) {
+    /// Process all active effects on the buffer, each against its target area.
+    /// Call after rendering widgets.
+    pub fn process(
+        &mut self,
+        buf: &mut Buffer,
+        conversation_area: Rect,
+        footer_area: Rect,
+        editor_area: Rect,
+    ) {
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame);
         self.last_frame = now;
 
         let duration = tachyonfx::Duration::from_millis(delta.as_millis() as u32);
-        self.manager.process_effects(duration, buf, area);
+        self.conversation.process_effects(duration, buf, conversation_area);
+        self.footer.process_effects(duration, buf, footer_area);
+        self.editor.process_effects(duration, buf, editor_area);
     }
 
     /// Queue the initial startup reveal effects.
     pub fn queue_startup(&mut self, t: &dyn Theme) {
         // Footer sweeps in from bottom
-        let footer_sweep = self.manager.unique(
-            EffectSlot::FooterReveal,
+        let footer_sweep = self.footer.unique(
+            FooterSlot::Reveal,
             fx::sweep_in(
                 Motion::DownToUp,
                 3,   // gradient length
@@ -75,52 +86,54 @@ impl Effects {
                 EffectTimer::from_ms(400, Interpolation::CubicOut),
             ),
         );
-        self.manager.add_effect(footer_sweep);
+        self.footer.add_effect(footer_sweep);
 
         // Conversation fades in from void
-        let conv_fade = self.manager.unique(
-            EffectSlot::ConversationFade,
+        let conv_fade = self.conversation.unique(
+            ConvSlot::Startup,
             fx::fade_from(
                 t.bg(),
                 t.bg(),
                 EffectTimer::from_ms(600, Interpolation::CubicOut),
             ),
         );
-        self.manager.add_effect(conv_fade);
+        self.conversation.add_effect(conv_fade);
     }
 
     /// Flash effect when a footer value changes (fact count, context %, etc.).
     pub fn ping_footer(&mut self, t: &dyn Theme) {
-        let ping = self.manager.unique(
-            EffectSlot::FooterPing,
+        let ping = self.footer.unique(
+            FooterSlot::Ping,
             fx::fade_from_fg(
                 t.accent_bright(),
                 EffectTimer::from_ms(300, Interpolation::CubicOut),
             ),
         );
-        self.manager.add_effect(ping);
+        self.footer.add_effect(ping);
     }
 
-    /// HSL cycling glow on the spinner/working area.
+    /// HSL cycling glow on the editor/spinner area.
     pub fn start_spinner_glow(&mut self) {
-        let glow = self.manager.unique(
-            EffectSlot::SpinnerGlow,
+        let glow = self.editor.unique(
+            EditorSlot::SpinnerGlow,
             fx::ping_pong(fx::hsl_shift_fg(
                 [30.0, 0.0, 0.15],
                 EffectTimer::from_ms(2000, Interpolation::SineInOut),
             )),
         );
-        self.manager.add_effect(glow);
+        self.editor.add_effect(glow);
     }
 
     /// Stop the spinner glow.
     pub fn stop_spinner_glow(&mut self) {
-        self.manager.cancel_unique_effect(EffectSlot::SpinnerGlow);
+        self.editor.cancel_unique_effect(EditorSlot::SpinnerGlow);
     }
 
     /// True if any effects are active (drives render timing).
     pub fn has_active(&self) -> bool {
-        self.manager.is_running()
+        self.conversation.is_running()
+            || self.footer.is_running()
+            || self.editor.is_running()
     }
 }
 
@@ -164,6 +177,17 @@ mod tests {
         assert!(fx.has_active());
         fx.stop_spinner_glow();
         // Effect still active until processed — cancel marks it for removal
-        // on next process cycle
+        // on next process_effects cycle
+    }
+
+    #[test]
+    fn effects_are_zone_isolated() {
+        let mut fx = Effects::new();
+        let t = Alpharius;
+        fx.ping_footer(&t);
+        // Only footer should be active
+        assert!(fx.footer.is_running());
+        assert!(!fx.conversation.is_running());
+        assert!(!fx.editor.is_running());
     }
 }

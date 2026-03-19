@@ -12,12 +12,10 @@ use super::theme::Theme;
 // ─── Animation parameters ───────────────────────────────────────────────────
 
 const FRAME_INTERVAL_MS: u64 = 45; // ~22 fps
-const TOTAL_FRAMES: u32 = 38; // ~1.7s to full resolution
-/// Public accessor for auto-dismiss logic.
-pub const TOTAL_FRAMES_PUB: u32 = TOTAL_FRAMES;
-const HOLD_FRAMES: u32 = 8; // hold clean logo before auto-dismiss
-/// Public accessor for auto-dismiss logic.
-pub const HOLD_FRAMES_PUB: u32 = HOLD_FRAMES;
+/// Total convergence frames (~1.7s at 45ms per frame).
+pub const TOTAL_FRAMES: u32 = 38;
+/// Hold frames after convergence before accepting dismissal.
+pub const HOLD_FRAMES: u32 = 8;
 
 /// CRT noise glyphs.
 const NOISE_CHARS: &[char] = &[

@@ -23,6 +23,8 @@ pub struct FooterData {
     pub injected_facts: usize,
     pub working_memory: usize,
     pub memory_tokens_est: usize,
+    /// Estimated total context tokens (rough heuristic from turn + tool counts).
+    pub estimated_tokens: usize,
     pub tool_calls: u32,
     pub turn: u32,
     pub compactions: u32,
