@@ -224,13 +224,17 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
 
                 let mut lines = Vec::new();
                 for (i, sf) in results.iter().enumerate() {
+                    let section = serde_json::to_string(&sf.fact.section).unwrap_or_default();
+                    let section = section.trim_matches('"');
+                    // Truncate very long facts in recall results
+                    let content = if sf.fact.content.len() > 200 {
+                        format!("{}…", &sf.fact.content[..197])
+                    } else {
+                        sf.fact.content.clone()
+                    };
                     lines.push(format!(
-                        "{}. [{}] ({}, {:.0}% match) {}",
-                        i + 1,
-                        sf.fact.id,
-                        serde_json::to_string(&sf.fact.section).unwrap_or_default().trim_matches('"'),
-                        sf.similarity * 100.0,
-                        sf.fact.content,
+                        "{}. [{}] ({}, {:.0}%) {}",
+                        i + 1, sf.fact.id, section, sf.similarity * 100.0, content,
                     ));
                 }
                 Ok(ToolResult {
@@ -242,20 +246,46 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
                 let facts = self.backend.list_facts(&self.mind, FactFilter::default())
                     .await.map_err(|e| anyhow::anyhow!("{e}"))?;
 
-                let mut lines = Vec::new();
+                if facts.is_empty() {
+                    return Ok(ToolResult {
+                        content: vec![ContentBlock::Text { text: "No facts in memory.".into() }],
+                        details: serde_json::json!({ "count": 0 }),
+                    });
+                }
+
+                // Group by section, show counts + sample facts (capped to avoid overwhelming the model)
+                let mut sections: std::collections::BTreeMap<String, Vec<&Fact>> = std::collections::BTreeMap::new();
                 for fact in &facts {
                     let section = serde_json::to_string(&fact.section).unwrap_or_default();
-                    lines.push(format!("[{}] {} — {}", fact.id, section.trim_matches('"'), fact.content));
+                    let section = section.trim_matches('"').to_string();
+                    sections.entry(section).or_default().push(fact);
                 }
-                Ok(ToolResult {
-                    content: vec![ContentBlock::Text {
-                        text: if lines.is_empty() {
-                            "No facts in memory.".into()
+
+                let mut lines = Vec::new();
+                lines.push(format!("{} facts across {} sections:\n", facts.len(), sections.len()));
+
+                let max_per_section = 8;
+                for (section, section_facts) in &sections {
+                    lines.push(format!("## {} ({} facts)", section, section_facts.len()));
+                    for fact in section_facts.iter().take(max_per_section) {
+                        // Truncate long facts to keep output manageable
+                        let content = if fact.content.len() > 120 {
+                            format!("{}…", &fact.content[..117])
                         } else {
-                            format!("{} facts:\n{}", facts.len(), lines.join("\n"))
-                        }
-                    }],
-                    details: serde_json::json!({ "count": facts.len() }),
+                            fact.content.clone()
+                        };
+                        lines.push(format!("  [{}] {}", fact.id, content));
+                    }
+                    if section_facts.len() > max_per_section {
+                        lines.push(format!("  … +{} more (use memory_recall for targeted search)",
+                            section_facts.len() - max_per_section));
+                    }
+                    lines.push(String::new());
+                }
+
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text { text: lines.join("\n") }],
+                    details: serde_json::json!({ "count": facts.len(), "sections": sections.len() }),
                 })
             }
             "memory_archive" => {

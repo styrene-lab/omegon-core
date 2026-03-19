@@ -1,4 +1,4 @@
-# Scribe — Recro engagement tracking plugin for Omegon
+# Scribe — Engagement tracking plugin for Omegon
 #
 # Activates when a .scribe marker file is found in the project tree,
 # indicating this repo is tracked by the Scribe engagement system.
@@ -9,7 +9,7 @@
 [plugin]
 name = "scribe"
 version = "0.1.0"
-description = "Recro engagement tracking — partnership context, work logging, session capture"
+description = "Engagement & partnership tracking — context injection, work logging, session capture"
 
 [activation]
 marker_files = [".scribe"]
