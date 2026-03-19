@@ -520,6 +520,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
 
                 if let Err(e) = r#loop::run(
                     bridge.as_ref(),
+                    &mut agent.bus,
                     &agent.tools,
                     &mut agent.context_manager,
                     &mut agent.conversation,
@@ -676,6 +677,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     let result = r#loop::run(
         bridge.as_ref(),
+        &mut agent.bus,
         &agent.tools,
         &mut agent.context_manager,
         &mut agent.conversation,

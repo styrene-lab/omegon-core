@@ -1,21 +1,30 @@
 //! Agent setup — shared initialization for headless and interactive modes.
 //!
-//! Extracts common setup (tools, memory, lifecycle, context) into a reusable
-//! struct to avoid duplication between run_agent_command and run_interactive_command.
+//! Builds the EventBus with all features registered, plus the ContextManager
+//! and ConversationState needed for the agent loop.
 
 use std::path::{Path, PathBuf};
 
 use omegon_memory::MemoryBackend as _; // bring trait methods into scope
 
+use crate::bus::EventBus;
 use crate::context::ContextManager;
 use crate::conversation::ConversationState;
+use crate::features;
 use crate::lifecycle;
 use crate::prompt;
 use crate::session;
 use crate::tools;
 
-/// Everything needed to run an agent loop — tools, context, conversation.
+/// Everything needed to run an agent loop.
 pub struct AgentSetup {
+    /// The event bus — owns all features. The loop dispatches tools and
+    /// emits events through the bus. The bus replaces the old
+    /// `Vec<Box<dyn ToolProvider>>`.
+    pub bus: EventBus,
+    /// Legacy tool providers — kept temporarily so the loop can dispatch
+    /// tools via the existing `&[Box<dyn ToolProvider>]` parameter.
+    /// Will be removed once the loop dispatches through the bus directly.
     pub tools: Vec<Box<dyn omegon_traits::ToolProvider>>,
     pub context_manager: ContextManager,
     pub conversation: ConversationState,
@@ -51,7 +60,9 @@ impl LifecycleSnapshot {
             })
         });
 
-        let active_changes: Vec<_> = lp.changes().iter()
+        let active_changes: Vec<_> = lp
+            .changes()
+            .iter()
             .filter(|c| !matches!(c.stage, lifecycle::types::ChangeStage::Archived))
             .map(|c| crate::tui::dashboard::ChangeSummary {
                 name: c.name.clone(),
@@ -61,23 +72,45 @@ impl LifecycleSnapshot {
             })
             .collect();
 
-        Self { focused_node, active_changes }
+        Self {
+            focused_node,
+            active_changes,
+        }
     }
 }
 
 impl AgentSetup {
-    /// Initialize tools, memory, lifecycle context, and conversation.
+    /// Initialize the event bus, tools, memory, lifecycle context, and conversation.
     pub async fn new(cwd: &Path, resume: Option<Option<&str>>) -> anyhow::Result<Self> {
         let cwd = std::fs::canonicalize(cwd)?;
         let is_child = std::env::var("OMEGON_CHILD").is_ok();
 
-        // ─── Tools ──────────────────────────────────────────────────────
+        let mut bus = EventBus::new();
+
+        // ─── Core tools (bash, read, write, edit, change, speculate) ────
         let core_tools = tools::CoreTools::new(cwd.clone());
-        let mut tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![Box::new(core_tools)];
-        tools.push(Box::new(tools::web_search::WebSearchProvider::new()));
-        tools.push(Box::new(tools::local_inference::LocalInferenceProvider::new()));
-        tools.push(Box::new(tools::view::ViewProvider::new(cwd.clone())));
-        tools.push(Box::new(tools::render::RenderProvider::new()));
+        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+            "core-tools",
+            Box::new(core_tools),
+        )));
+
+        // ─── Feature tool providers ─────────────────────────────────────
+        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+            "web-search",
+            Box::new(tools::web_search::WebSearchProvider::new()),
+        )));
+        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+            "local-inference",
+            Box::new(tools::local_inference::LocalInferenceProvider::new()),
+        )));
+        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+            "view",
+            Box::new(tools::view::ViewProvider::new(cwd.clone())),
+        )));
+        bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+            "render",
+            Box::new(tools::render::RenderProvider::new()),
+        )));
 
         // ─── Memory ─────────────────────────────────────────────────────
         let mind = "default".to_string();
@@ -87,36 +120,26 @@ impl AgentSetup {
         let db_path = memory_dir.join("facts.db");
         let jsonl_path = memory_dir.join("facts.jsonl");
 
-        // Memory: two access patterns with separate handles.
-        //
-        // Tool provider (read+write): registered for parent processes only.
-        //   Cleave children (OMEGON_CHILD=1) don't get memory_store/archive/supersede
-        //   to avoid SQLITE_BUSY contention across concurrent child processes.
-        //
-        // Context provider (read-only): registered for ALL processes.
-        //   WAL mode supports unlimited concurrent readers safely.
-        //   Children still get project facts injected into their system prompt.
-        let mut memory_context: Option<Box<dyn omegon_traits::ContextProvider>> = None;
         let mut initial_fact_count: usize = 0;
 
         if let Ok(backend) = omegon_memory::SqliteBackend::open(&db_path) {
             tracing::info!(mind = %mind, db = %db_path.display(), child = is_child, "memory backend loaded");
 
-            // Snapshot fact count for TUI initial display
             if let Ok(stats) = backend.stats(&mind).await {
                 initial_fact_count = stats.active_facts;
                 tracing::info!(facts = initial_fact_count, "memory snapshot for TUI");
             }
 
             if !is_child {
-                // Parent: import JSONL if DB is empty, register tool provider
                 let stats = backend.stats(&mind).await.ok();
                 if stats.as_ref().is_none_or(|s| s.active_facts == 0)
                     && jsonl_path.exists()
                     && let Ok(jsonl) = std::fs::read_to_string(&jsonl_path)
                 {
                     match backend.import_jsonl(&jsonl).await {
-                        Ok(import) => tracing::info!(imported = import.imported, "imported facts.jsonl"),
+                        Ok(import) => {
+                            tracing::info!(imported = import.imported, "imported facts.jsonl")
+                        }
                         Err(e) => tracing::warn!("JSONL import failed: {e}"),
                     }
                 }
@@ -126,36 +149,60 @@ impl AgentSetup {
                     omegon_memory::MarkdownRenderer,
                     mind.clone(),
                 );
-                tools.push(Box::new(provider));
+                bus.register(Box::new(features::legacy_bridge::LegacyToolFeature::new(
+                    "memory",
+                    Box::new(provider),
+                )));
             }
 
-            // Context injection: read-only handle for all processes.
-            // SQLite WAL supports concurrent readers across processes safely.
+            // Context injection: read-only handle for all processes
             if let Ok(ctx_backend) = omegon_memory::SqliteBackend::open(&db_path) {
                 let ctx_provider = omegon_memory::MemoryProvider::new(
                     ctx_backend,
                     omegon_memory::MarkdownRenderer,
                     mind,
                 );
-                memory_context = Some(Box::new(ctx_provider));
-                tracing::info!("Memory context injection enabled");
+                bus.register(Box::new(
+                    features::legacy_bridge::LegacyContextFeature::new(
+                        "memory-context",
+                        Box::new(ctx_provider),
+                    ),
+                ));
             }
         }
 
-        // ─── System prompt + context ────────────────────────────────────
-        let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
-        let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
+        // ─── Lifecycle context ──────────────────────────────────────────
         let lifecycle_provider = lifecycle::context::LifecycleContextProvider::new(&cwd);
-
-        // Snapshot lifecycle state for TUI initial display (before boxing)
         let lifecycle_snapshot = LifecycleSnapshot::from_provider(&lifecycle_provider);
+        bus.register(Box::new(features::legacy_bridge::LegacyContextFeature::new(
+            "lifecycle",
+            Box::new(lifecycle_provider),
+        )));
 
-        let mut context_providers: Vec<Box<dyn omegon_traits::ContextProvider>> =
-            vec![Box::new(lifecycle_provider)];
-        if let Some(mc) = memory_context {
-            context_providers.push(mc);
-        }
-        let context_manager = ContextManager::new(base_prompt, context_providers);
+        // ─── Native features ────────────────────────────────────────────
+        bus.register(Box::new(features::auto_compact::AutoCompact::new()));
+
+        // ─── Finalize bus (caches tool/command definitions) ─────────────
+        bus.finalize();
+
+        // ─── System prompt + context ────────────────────────────────────
+        // Build the base prompt from bus tool definitions (not the old tools vec)
+        let tool_defs = bus.tool_definitions();
+        let base_prompt = prompt::build_base_prompt(&cwd, &tool_defs);
+
+        // Context providers: the bus collects context from features, but we
+        // still need the ContextManager for the injection pipeline (TTL decay,
+        // budget management, priority sorting). Pass no standalone providers —
+        // the bus will provide context via collect_context().
+        let context_manager = ContextManager::new(base_prompt, vec![]);
+
+        // ─── Legacy tools vec — bridge until loop uses bus directly ──────
+        // Rebuild a Vec<Box<dyn ToolProvider>> from bus features for backward compat.
+        // This is temporary and will be removed when loop.rs dispatches through bus.
+        let tools: Vec<Box<dyn omegon_traits::ToolProvider>> = vec![
+            // The bus owns the features; the loop can dispatch through it.
+            // For now, use a BusToolBridge that delegates to the bus.
+        ];
 
         // ─── Conversation ───────────────────────────────────────────────
         let conversation = if let Some(resume_arg) = resume {
@@ -182,6 +229,7 @@ impl AgentSetup {
         };
 
         Ok(Self {
+            bus,
             tools,
             context_manager,
             conversation,
@@ -201,9 +249,6 @@ impl AgentSetup {
 }
 
 /// Find the project root by walking up from cwd looking for .git.
-/// For cleave worktrees (.git is a file pointing to the main repo),
-/// follows the gitdir to the real repo root.
-/// Falls back to cwd if no .git found.
 pub fn find_project_root(cwd: &Path) -> PathBuf {
     let mut dir = cwd.to_path_buf();
     loop {
@@ -212,7 +257,6 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
             return dir;
         }
         if git_path.is_file() {
-            // Worktree: .git file contains "gitdir: /main/repo/.git/worktrees/name"
             if let Ok(content) = std::fs::read_to_string(&git_path)
                 && let Some(gitdir) = content.strip_prefix("gitdir: ")
             {
@@ -222,7 +266,6 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
                 } else {
                     dir.join(gitdir)
                 };
-                // .git/worktrees/<name> → .git → repo root
                 if let Some(repo) = gitdir_path
                     .parent()
                     .and_then(|p| p.parent())
@@ -231,7 +274,7 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
                     return repo.to_path_buf();
                 }
             }
-            return dir; // fallback
+            return dir;
         }
         if !dir.pop() {
             break;

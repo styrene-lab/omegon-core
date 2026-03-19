@@ -49,8 +49,15 @@ impl Default for LoopConfig {
 }
 
 /// Run the agent loop to completion.
+///
+/// The `bus` owns all features and dispatches tool calls. The `tools` parameter
+/// is the legacy provider list — kept temporarily for the auto-batch rollback
+/// logic which needs direct provider access. Once auto-batch moves to the bus,
+/// this parameter will be removed.
+#[allow(clippy::too_many_arguments)] // Will shrink when tools param is removed
 pub async fn run(
     bridge: &dyn LlmBridge,
+    bus: &mut crate::bus::EventBus,
     tools: &[Box<dyn ToolProvider>],
     context: &mut ContextManager,
     conversation: &mut ConversationState,
@@ -58,9 +65,9 @@ pub async fn run(
     cancel: CancellationToken,
     config: &LoopConfig,
 ) -> anyhow::Result<()> {
-    let tool_defs: Vec<_> = tools.iter().flat_map(|p| p.tools()).collect();
+    let tool_defs = bus.tool_definitions();
 
-    // Pre-build tool name → provider index lookup
+    // Pre-build tool name → provider index lookup (legacy — for auto-batch)
     let mut tool_index: HashMap<String, usize> = HashMap::new();
     for (i, provider) in tools.iter().enumerate() {
         for def in provider.tools() {
@@ -91,7 +98,8 @@ pub async fn run(
         if config.max_turns > 0 && turn > config.max_turns {
             tracing::warn!("Hard turn limit reached ({} turns). Stopping.", config.max_turns);
             let _ = events.send(AgentEvent::TurnStart { turn });
-            let _ = events.send(AgentEvent::TurnEnd { turn });
+            bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
+        let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
         }
 
@@ -106,6 +114,7 @@ pub async fn run(
         }
 
         let _ = events.send(AgentEvent::TurnStart { turn });
+        bus.emit(&omegon_traits::BusEvent::TurnStart { turn });
 
         // ─── Stuck detection ────────────────────────────────────────
         if let Some(warning) = stuck_detector.check() {
@@ -145,6 +154,26 @@ pub async fn run(
             context.inject_intent(intent_block);
         }
 
+        // ─── Collect context from bus features ──────────────────────
+        {
+            let user_prompt = conversation.last_user_prompt();
+            let (tools_vec, files_vec, budget) =
+                context.build_signals_data(user_prompt, conversation);
+            let signals = omegon_traits::ContextSignals {
+                user_prompt,
+                recent_tools: &tools_vec,
+                recent_files: &files_vec,
+                lifecycle_phase: context.phase(),
+                turn_number: turn,
+                context_budget_tokens: budget,
+            };
+            let bus_injections = bus.collect_context(&signals);
+            if !bus_injections.is_empty() {
+                tracing::debug!(count = bus_injections.len(), "bus context injections");
+                context.inject_external(bus_injections);
+            }
+        }
+
         // ─── Build LLM-facing context ───────────────────────────────
         let system_prompt =
             context.build_system_prompt(conversation.last_user_prompt(), conversation);
@@ -172,7 +201,8 @@ pub async fn run(
             ) => result?,
             _ = cancel.cancelled() => {
                 tracing::info!("Agent loop cancelled during LLM streaming");
-                let _ = events.send(AgentEvent::TurnEnd { turn });
+                bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
+        let _ = events.send(AgentEvent::TurnEnd { turn });
                 break;
             }
         };
@@ -201,10 +231,12 @@ pub async fn run(
                      Please commit your work now with a descriptive message, then summarize what you did.]"
                         .to_string(),
                 );
-                let _ = events.send(AgentEvent::TurnEnd { turn });
+                bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
+        let _ = events.send(AgentEvent::TurnEnd { turn });
                 continue; // give it one more turn to commit
             }
-            let _ = events.send(AgentEvent::TurnEnd { turn });
+            bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
+        let _ = events.send(AgentEvent::TurnEnd { turn });
             break;
         }
 
@@ -237,6 +269,24 @@ pub async fn run(
             stuck_detector.record(call, is_error);
         }
 
+        bus.emit(&omegon_traits::BusEvent::TurnEnd { turn });
+
+        // ─── Handle bus requests from features ──────────────────────
+        for request in bus.drain_requests() {
+            match request {
+                omegon_traits::BusRequest::Notify { message, level } => {
+                    tracing::info!(level = ?level, "Bus: {message}");
+                }
+                omegon_traits::BusRequest::InjectSystemMessage { content } => {
+                    conversation.push_user(format!("[System: {content}]"));
+                }
+                omegon_traits::BusRequest::RequestCompaction => {
+                    tracing::info!("Bus: compaction requested by feature");
+                    // Compaction will be checked at the top of the next turn
+                }
+            }
+        }
+
         let _ = events.send(AgentEvent::TurnEnd { turn });
     }
 
@@ -248,7 +298,24 @@ pub async fn run(
         "Agent loop complete"
     );
 
+    bus.emit(&omegon_traits::BusEvent::AgentEnd);
     let _ = events.send(AgentEvent::AgentEnd);
+
+    // Process any pending bus requests (e.g. auto-compact notifications)
+    for request in bus.drain_requests() {
+        match request {
+            omegon_traits::BusRequest::Notify { message, level } => {
+                tracing::info!(level = ?level, "Bus notification: {message}");
+            }
+            omegon_traits::BusRequest::InjectSystemMessage { content } => {
+                conversation.push_user(format!("[System: {content}]"));
+            }
+            omegon_traits::BusRequest::RequestCompaction => {
+                tracing::info!("Bus requested compaction (post-loop — ignored)");
+            }
+        }
+    }
+
     Ok(())
 }
 

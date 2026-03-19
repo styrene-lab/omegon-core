@@ -184,6 +184,37 @@ impl ContextManager {
 
     /// Inject the IntentDocument as a high-priority context block.
     /// Called externally when intent has meaningful content.
+    /// Build context signals for external consumers (e.g. EventBus features).
+    /// The returned vecs are temporary — signals borrows from them.
+    pub fn build_signals_data(&self, _user_prompt: &str, _conversation: &ConversationState)
+        -> (Vec<String>, Vec<PathBuf>, usize)
+    {
+        let recent_tools_vec: Vec<String> = self.recent_tools.iter().cloned().collect();
+        let recent_files_vec: Vec<PathBuf> = self.recent_files.iter().cloned().collect();
+        let system_budget = (self.context_window / 5)
+            .saturating_sub(self.base_prompt.len() / 4);
+        (recent_tools_vec, recent_files_vec, system_budget)
+    }
+
+    /// The current lifecycle phase.
+    pub fn phase(&self) -> &LifecyclePhase {
+        &self.phase
+    }
+
+    /// Inject context from external sources (e.g. EventBus features).
+    /// Called by the loop after collecting context from bus.collect_context().
+    pub fn inject_external(&mut self, injections: Vec<ContextInjection>) {
+        for injection in injections {
+            // Deduplicate by source — replace existing injection from same source
+            self.active_injections
+                .retain(|a| a.injection.source != injection.source);
+            self.active_injections.push(ActiveInjection {
+                remaining_turns: injection.ttl_turns,
+                injection,
+            });
+        }
+    }
+
     pub fn inject_intent(&mut self, intent_block: String) {
         // Remove previous intent injection
         self.active_injections
