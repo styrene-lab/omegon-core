@@ -1,107 +1,71 @@
-//! Conversation view — scrollable message display with streaming support.
+//! Conversation state — manages the segment list and push/mutation methods.
 //!
-//! Messages are grouped into **turns** for visual coherence:
-//! - User message → turn boundary
-//! - Assistant text + tool calls → single visual unit with left gutter
-//! - System/lifecycle messages → ungrouped, inline
-//!
-//! Tool calls render as cards with args summary + result preview.
-//! Assistant text gets structural markdown highlighting.
-//! Code fences render with distinct background styling.
+//! This module holds the data model. Rendering is handled by
+//! `conv_widget::ConversationWidget`.
 
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use super::segments::Segment;
+use super::conv_widget::ConvState;
 
-use super::theme::Theme;
-use super::widgets;
-
-// ─── Message model ──────────────────────────────────────────────────
-
-/// A message in the conversation view.
-#[derive(Debug, Clone)]
-pub(crate) enum Message {
-    User(String),
-    /// System/info message (from slash commands, etc.)
-    System(String),
-    /// Assistant text (possibly still streaming).
-    Assistant {
-        text: String,
-        thinking: String,
-        complete: bool,
-    },
-    /// Tool call with args summary and result.
-    Tool {
-        id: String,
-        name: String,
-        args_summary: Option<String>,
-        is_error: bool,
-        complete: bool,
-        result_summary: Option<String>,
-        /// Full args for detailed view (e.g. complete bash command).
-        detail_args: Option<String>,
-        /// First lines of result for detailed view.
-        detail_result: Option<String>,
-    },
-    /// Lifecycle event (phase change, decomposition, etc.)
-    Lifecycle {
-        icon: String,
-        text: String,
-    },
-}
-
-// ─── Conversation state ─────────────────────────────────────────────
-
+/// Conversation view state — segment list + scroll.
 pub struct ConversationView {
-    messages: Vec<Message>,
-    /// Scroll offset from the bottom (0 = at bottom, showing latest).
-    scroll: u16,
+    segments: Vec<Segment>,
     /// Whether we're currently receiving streaming text.
     streaming: bool,
-    /// True when the user has manually scrolled away from the bottom.
-    /// Prevents auto-scroll on new content so the user can read history
-    /// while the agent is working.
-    user_scrolled: bool,
-    /// Tool display mode — compact (single line) or detailed (bordered cards).
-    pub tool_detail: crate::settings::ToolDetail,
+    /// Scroll + height cache state — shared with the widget.
+    pub conv_state: ConvState,
 }
 
 impl ConversationView {
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
-            scroll: 0,
+            segments: Vec::new(),
             streaming: false,
-            user_scrolled: false,
-            tool_detail: crate::settings::ToolDetail::Detailed,
+            conv_state: ConvState::new(),
         }
+    }
+
+    /// Access segments for rendering.
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    /// Split borrow — immutable segments + mutable state.
+    /// Needed because ConversationWidget borrows segments immutably
+    /// while render_stateful_widget needs mutable state.
+    pub fn segments_and_state(&mut self) -> (&[Segment], &mut ConvState) {
+        (&self.segments, &mut self.conv_state)
     }
 
     // ─── Push methods ───────────────────────────────────────────
 
     pub fn push_user(&mut self, text: &str) {
-        self.messages.push(Message::User(text.to_string()));
-        // User-initiated — always force scroll to show what they just typed,
-        // regardless of user_scrolled state.
-        self.force_scroll_to_bottom();
+        // Turn separator before user messages (except first)
+        if !self.segments.is_empty() {
+            self.segments.push(Segment::TurnSeparator);
+        }
+        self.segments.push(Segment::UserPrompt { text: text.to_string() });
+        self.conv_state.invalidate();
+        self.conv_state.force_scroll_to_bottom();
     }
 
     pub fn push_system(&mut self, text: &str) {
-        self.messages.push(Message::System(text.to_string()));
-        // System messages (slash command responses) are user-initiated.
-        self.force_scroll_to_bottom();
+        self.segments.push(Segment::SystemNotification { text: text.to_string() });
+        self.conv_state.invalidate();
+        self.conv_state.force_scroll_to_bottom();
     }
 
     pub fn push_lifecycle(&mut self, icon: &str, text: &str) {
-        self.messages.push(Message::Lifecycle {
+        self.segments.push(Segment::LifecycleEvent {
             icon: icon.to_string(),
             text: text.to_string(),
         });
-        self.auto_scroll_to_bottom();
+        self.conv_state.invalidate();
+        self.conv_state.auto_scroll_to_bottom();
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
         if !self.streaming {
-            self.messages.push(Message::Assistant {
+            self.segments.push(Segment::AssistantText {
                 text: String::new(),
                 thinking: String::new(),
                 complete: false,
@@ -109,15 +73,16 @@ impl ConversationView {
             self.streaming = true;
         }
 
-        if let Some(Message::Assistant { text, .. }) = self.messages.last_mut() {
+        if let Some(Segment::AssistantText { text, .. }) = self.segments.last_mut() {
             text.push_str(delta);
         }
-        self.auto_scroll_to_bottom();
+        self.conv_state.invalidate();
+        self.conv_state.auto_scroll_to_bottom();
     }
 
     pub fn append_thinking(&mut self, delta: &str) {
         if !self.streaming {
-            self.messages.push(Message::Assistant {
+            self.segments.push(Segment::AssistantText {
                 text: String::new(),
                 thinking: String::new(),
                 complete: false,
@@ -125,279 +90,131 @@ impl ConversationView {
             self.streaming = true;
         }
 
-        if let Some(Message::Assistant { thinking, .. }) = self.messages.last_mut() {
+        if let Some(Segment::AssistantText { thinking, .. }) = self.segments.last_mut() {
             thinking.push_str(delta);
         }
-        self.auto_scroll_to_bottom();
+        self.conv_state.invalidate();
+        self.conv_state.auto_scroll_to_bottom();
     }
 
     pub fn push_tool_start(&mut self, id: &str, name: &str, args_summary: Option<&str>, detail_args: Option<&str>) {
-        self.messages.push(Message::Tool {
+        self.segments.push(Segment::ToolCard {
             id: id.to_string(),
             name: name.to_string(),
             args_summary: args_summary.map(|s| s.to_string()),
+            detail_args: detail_args.map(|s| s.to_string()),
+            result_summary: None,
+            detail_result: None,
             is_error: false,
             complete: false,
-            result_summary: None,
-            detail_args: detail_args.map(|s| s.to_string()),
-            detail_result: None,
         });
-        self.auto_scroll_to_bottom();
+        self.conv_state.invalidate();
+        self.conv_state.auto_scroll_to_bottom();
     }
 
     pub fn push_tool_end(&mut self, id: &str, is_error: bool, result_text: Option<&str>) {
-        for msg in self.messages.iter_mut().rev() {
-            if let Message::Tool {
+        for seg in self.segments.iter_mut().rev() {
+            if let Segment::ToolCard {
                 id: tool_id,
                 complete: c,
                 is_error: e,
                 result_summary: r,
                 detail_result: dr,
                 ..
-            } = msg
+            } = seg
                 && tool_id == id && !*c
             {
                 *c = true;
                 *e = is_error;
-                // Compact summary: first meaningful line
                 *r = result_text.and_then(|text| {
                     let line = text.lines()
                         .find(|l| {
                             let t = l.trim();
-                            !t.is_empty()
-                                && !t.starts_with("```")
-                                && !t.starts_with("---")
+                            !t.is_empty() && !t.starts_with("```") && !t.starts_with("---")
                         })
                         .unwrap_or("").trim();
                     if line.is_empty() { None }
-                    else if line.len() > 100 {
-                        Some(format!("{}…", &line[..99]))
-                    } else {
-                        Some(line.to_string())
-                    }
+                    else if line.len() > 100 { Some(format!("{}…", &line[..99])) }
+                    else { Some(line.to_string()) }
                 });
-                // Detailed result: first 8 lines
                 *dr = result_text.map(|text| {
-                    let lines: Vec<&str> = text.lines().take(8).collect();
+                    let lines: Vec<&str> = text.lines().take(12).collect();
                     let mut result = lines.join("\n");
-                    if text.lines().count() > 8 {
-                        result.push_str("\n  …");
+                    if text.lines().count() > 12 {
+                        result.push_str(&format!("\n  … {} lines total", text.lines().count()));
                     }
                     result
                 });
                 break;
             }
         }
+        self.conv_state.invalidate();
     }
 
     pub fn finalize_message(&mut self) {
-        if let Some(Message::Assistant { complete, .. }) = self.messages.last_mut() {
+        if let Some(Segment::AssistantText { complete, .. }) = self.segments.last_mut() {
             *complete = true;
         }
         self.streaming = false;
-        // Agent turn is over — reset scroll state so the next turn auto-follows.
-        self.user_scrolled = false;
-        self.scroll = 0;
+        self.conv_state.invalidate();
+        self.conv_state.user_scrolled = false;
+        self.conv_state.scroll_offset = 0;
     }
 
     // ─── Scroll ─────────────────────────────────────────────────
 
     pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll = self.scroll.saturating_add(amount);
-        self.user_scrolled = self.scroll > 0;
+        self.conv_state.scroll_up(amount);
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll = self.scroll.saturating_sub(amount);
-        // If we've scrolled back to the bottom, re-enable auto-scroll
-        if self.scroll == 0 {
-            self.user_scrolled = false;
-        }
+        self.conv_state.scroll_down(amount);
     }
 
-    pub fn scroll_offset(&self) -> u16 {
-        self.scroll
-    }
-
-    /// Auto-scroll to bottom — only if the user hasn't manually scrolled away.
-    /// Used for agent-generated content (streaming, tool events).
-    fn auto_scroll_to_bottom(&mut self) {
-        if !self.user_scrolled {
-            self.scroll = 0;
-        }
-    }
-
-    /// Force scroll to bottom and reset user_scrolled state.
-    /// Used for user-initiated actions (submitting prompts, system messages).
-    fn force_scroll_to_bottom(&mut self) {
-        self.scroll = 0;
-        self.user_scrolled = false;
-    }
-
-    // ─── Rendering ──────────────────────────────────────────────
-
-    /// Render conversation to ratatui Lines (test fallback).
-    pub fn render_text(&self) -> Vec<Line<'static>> {
-        self.render_themed(&super::theme::Alpharius)
-    }
-
-    /// Render conversation to ratatui Lines with theme colors.
-    #[allow(unused_assignments)] // in_code_fence reset is read by next iteration
-    pub fn render_themed(&self, t: &dyn Theme) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut in_code_fence = false;
-
-        for msg in &self.messages {
-            match msg {
-                Message::User(text) => {
-                    // Thin separator before user messages (except first)
-                    if !lines.is_empty() {
-                        lines.push(Line::from(""));
-                    }
-                    lines.push(Line::from(vec![
-                        Span::styled("▸ ", t.style_accent_bold()),
-                        Span::styled(text.clone(), t.style_user_input()),
-                    ]));
-                    lines.push(Line::from(""));
-                }
-
-                Message::System(text) => {
-                    for (i, line) in text.lines().enumerate() {
-                        let style = if i == 0 && line.starts_with('Ω') {
-                            // Welcome header — bold accent
-                            t.style_accent_bold()
-                        } else if line.starts_with("  ▸") || line.starts_with("  /") || line.starts_with("  Ctrl") {
-                            // Structured info lines — dim
-                            Style::default().fg(t.muted())
-                        } else {
-                            Style::default().fg(t.accent_muted())
-                        };
-                        lines.push(Line::from(Span::styled(line.to_string(), style)));
-                    }
-                    lines.push(Line::from(""));
-                }
-
-                Message::Assistant { text, thinking, complete } => {
-                    // Thinking block (dimmed, with header)
-                    if !thinking.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "◌ thinking…",
-                            Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC),
-                        )));
-                        for line in thinking.lines() {
-                            lines.push(Line::from(Span::styled(
-                                line.to_string(),
-                                t.style_dim(),
-                            )));
-                        }
-                        lines.push(Line::from("")); // gap before response
-                    }
-
-                    // Assistant text with structural highlighting
-                    in_code_fence = false;
-                    for line in text.lines() {
-                        if line.starts_with("```") {
-                            if in_code_fence {
-                                // Closing fence
-                                in_code_fence = false;
-                                lines.push(Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(t.dim()).bg(t.surface_bg()),
-                                )));
-                            } else {
-                                // Opening fence
-                                in_code_fence = true;
-                                lines.push(Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(t.dim()).bg(t.surface_bg()),
-                                )));
-                            }
-                        } else if in_code_fence {
-                            // Code block content
-                            lines.push(Line::from(Span::styled(
-                                line.to_string(),
-                                Style::default().fg(t.accent_muted()).bg(t.surface_bg()),
-                            )));
-                        } else {
-                            // Regular text with markdown highlighting
-                            lines.push(widgets::highlight_line(line, t));
-                        }
-                    }
-
-                    if !*complete && text.is_empty() && thinking.is_empty() {
-                        lines.push(Line::from(Span::styled("...", t.style_dim())));
-                    }
-                    lines.push(Line::from(""));
-                }
-
-                Message::Tool {
-                    name,
-                    args_summary,
-                    is_error,
-                    complete,
-                    result_summary,
-                    detail_args,
-                    detail_result,
-                    ..
-                } => {
-                    match self.tool_detail {
-                        crate::settings::ToolDetail::Detailed => {
-                            // Bordered card with full args + result
-                            lines.extend(widgets::tool_card_detailed(
-                                name,
-                                *is_error,
-                                *complete,
-                                detail_args.as_deref().or(args_summary.as_deref()),
-                                detail_result.as_deref().or(result_summary.as_deref()),
-                                t,
-                            ));
-                        }
-                        crate::settings::ToolDetail::Compact => {
-                            lines.push(widgets::tool_card(
-                                name,
-                                *is_error,
-                                *complete,
-                                args_summary.as_deref(),
-                                result_summary.as_deref(),
-                                t,
-                            ));
-                        }
-                    }
-                }
-
-                Message::Lifecycle { icon, text } => {
-                    lines.push(widgets::lifecycle_event(icon, text, t));
-                }
-            }
-        }
-
-        lines
+    /// Clear all segments (for /clear command).
+    pub fn clear(&mut self) {
+        self.segments.clear();
+        self.conv_state = ConvState::new();
+        self.streaming = false;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme::Alpharius;
+    use ratatui::prelude::*;
 
     #[test]
-    fn user_message_renders() {
+    fn user_message_creates_segments() {
         let mut cv = ConversationView::new();
         cv.push_user("hello");
-        let lines = cv.render_text();
-        assert!(!lines.is_empty());
-        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("▸"));
-        assert!(text.contains("hello"));
+        // First user message: just the prompt (no separator)
+        assert_eq!(cv.segments.len(), 1);
+        assert!(matches!(&cv.segments[0], Segment::UserPrompt { text } if text == "hello"));
     }
 
     #[test]
-    fn streaming_appends_to_same_message() {
+    fn second_user_message_adds_separator() {
+        let mut cv = ConversationView::new();
+        cv.push_user("first");
+        cv.push_user("second");
+        // separator + prompt
+        assert_eq!(cv.segments.len(), 3);
+        assert!(matches!(&cv.segments[1], Segment::TurnSeparator));
+    }
+
+    #[test]
+    fn streaming_creates_assistant_segment() {
         let mut cv = ConversationView::new();
         cv.append_streaming("Hello ");
         cv.append_streaming("world");
-        assert_eq!(cv.messages.len(), 1);
-        if let Message::Assistant { text, .. } = &cv.messages[0] {
+        assert_eq!(cv.segments.len(), 1);
+        if let Segment::AssistantText { text, complete, .. } = &cv.segments[0] {
             assert_eq!(text, "Hello world");
+            assert!(!complete);
+        } else {
+            panic!("expected AssistantText");
         }
     }
 
@@ -406,7 +223,7 @@ mod tests {
         let mut cv = ConversationView::new();
         cv.append_streaming("Done");
         cv.finalize_message();
-        if let Message::Assistant { complete, .. } = &cv.messages[0] {
+        if let Segment::AssistantText { complete, .. } = &cv.segments[0] {
             assert!(complete);
         }
     }
@@ -414,191 +231,66 @@ mod tests {
     #[test]
     fn tool_lifecycle() {
         let mut cv = ConversationView::new();
-        cv.push_tool_start("tc1", "read", Some("src/main.rs"), None);
-        cv.push_tool_end("tc1", false, Some("245 lines"));
-        if let Message::Tool {
-            complete, is_error, args_summary, result_summary, ..
-        } = &cv.messages[0]
-        {
+        cv.push_tool_start("tc1", "read", Some("src/main.rs"), Some("src/main.rs"));
+        cv.push_tool_end("tc1", false, Some("fn main() {}\n// 245 lines"));
+        if let Segment::ToolCard { complete, is_error, detail_result, .. } = &cv.segments[0] {
             assert!(complete);
             assert!(!is_error);
-            assert_eq!(args_summary.as_deref(), Some("src/main.rs"));
-            assert!(result_summary.is_some());
+            assert!(detail_result.is_some());
         }
-    }
-
-    #[test]
-    fn tool_card_renders_with_bar() {
-        let mut cv = ConversationView::new();
-        cv.push_tool_start("t1", "edit", Some("lib.rs"), None);
-        cv.push_tool_end("t1", false, Some("Applied edit"));
-        let lines = cv.render_text();
-        assert!(!lines.is_empty(), "should render tool card");
-        let all: String = lines.iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(all.contains("╭") || all.contains("▎"), "should have card border: {all}");
-        assert!(all.contains("✓"), "should have checkmark: {all}");
-        assert!(all.contains("edit"), "should have tool name: {all}");
-        assert!(all.contains("lib.rs"), "should have args: {all}");
-    }
-
-    #[test]
-    fn tool_card_detailed_view() {
-        let mut cv = ConversationView::new();
-        cv.tool_detail = crate::settings::ToolDetail::Detailed;
-        cv.push_tool_start("t1", "bash", Some("ls -la"), Some("ls -la /Users/cwilson/workspace"));
-        cv.push_tool_end("t1", false, Some("total 42\ndrwxr-xr-x  5 user  staff  160 Mar 18 10:00 .\ndrwxr-xr-x  3 user  staff   96 Mar 18 09:00 .."));
-        let lines = cv.render_text();
-        // Should have bordered card with header, command, separator, output, footer
-        assert!(lines.len() >= 5, "detailed card should have multiple lines, got {}", lines.len());
-        let all_text: String = lines.iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.to_string())
-            .collect::<Vec<_>>().join(" ");
-        assert!(all_text.contains("bash"), "should show tool name");
-        assert!(all_text.contains("ls -la"), "should show full command");
-        assert!(all_text.contains("total 42"), "should show output");
-    }
-
-    #[test]
-    fn thinking_block_renders() {
-        let mut cv = ConversationView::new();
-        cv.append_thinking("Let me think...");
-        cv.append_streaming("Here's my answer.");
-        cv.finalize_message();
-        let lines = cv.render_text();
-        let all_text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.to_string()).collect();
-        assert!(all_text.contains("thinking"));
-        assert!(all_text.contains("Let me think"));
-        assert!(all_text.contains("Here's my answer"));
-    }
-
-    #[test]
-    fn lifecycle_event_renders() {
-        let mut cv = ConversationView::new();
-        cv.push_lifecycle("⚡", "Cleave: 3 children dispatched");
-        let lines = cv.render_text();
-        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("⚡"));
-        assert!(text.contains("Cleave"));
-    }
-
-    #[test]
-    fn code_fence_highlighting() {
-        let mut cv = ConversationView::new();
-        cv.append_streaming("Here's some code:\n```rust\nfn main() {}\n```\nDone.");
-        cv.finalize_message();
-        let lines = cv.render_text();
-        // The code line should have surface_bg
-        let code_line = lines.iter().find(|l| {
-            l.spans.iter().any(|s| s.content.contains("fn main"))
-        });
-        assert!(code_line.is_some(), "should find the code line");
-        let code_span = code_line.unwrap().spans.iter()
-            .find(|s| s.content.contains("fn main")).unwrap();
-        let t = super::super::theme::Alpharius;
-        assert_eq!(code_span.style.bg, Some(t.surface_bg()), "code should have surface_bg");
-    }
-
-    #[test]
-    fn markdown_headers_highlighted() {
-        let mut cv = ConversationView::new();
-        cv.append_streaming("# Big Header\n## Sub Header\nPlain text");
-        cv.finalize_message();
-        let lines = cv.render_text();
-        // First content line should be the header
-        let header_line = lines.iter().find(|l| {
-            l.spans.iter().any(|s| s.content.contains("Big Header"))
-        });
-        assert!(header_line.is_some());
-        let span = header_line.unwrap().spans.iter()
-            .find(|s| s.content.contains("Big Header")).unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn scroll_operations() {
-        let mut cv = ConversationView::new();
-        assert_eq!(cv.scroll_offset(), 0);
-        cv.scroll_up(5);
-        assert_eq!(cv.scroll_offset(), 5);
-        cv.scroll_down(3);
-        assert_eq!(cv.scroll_offset(), 2);
-        cv.scroll_down(10);
-        assert_eq!(cv.scroll_offset(), 0);
     }
 
     #[test]
     fn scroll_up_sets_user_scrolled() {
         let mut cv = ConversationView::new();
-        assert!(!cv.user_scrolled);
         cv.scroll_up(3);
-        assert!(cv.user_scrolled);
-        assert_eq!(cv.scroll_offset(), 3);
-    }
-
-    #[test]
-    fn scroll_down_to_zero_clears_user_scrolled() {
-        let mut cv = ConversationView::new();
-        cv.scroll_up(5);
-        assert!(cv.user_scrolled);
-        cv.scroll_down(5);
-        assert_eq!(cv.scroll_offset(), 0);
-        assert!(!cv.user_scrolled, "scrolling back to bottom should clear user_scrolled");
-    }
-
-    #[test]
-    fn auto_scroll_respects_user_scrolled() {
-        let mut cv = ConversationView::new();
-        // User scrolls up
-        cv.scroll_up(10);
-        assert!(cv.user_scrolled);
-        assert_eq!(cv.scroll_offset(), 10);
-
-        // Agent streams content — should NOT yank scroll to bottom
-        cv.append_streaming("new content");
-        assert_eq!(cv.scroll_offset(), 10, "auto_scroll should not override user scroll");
-
-        // Tool events should also not yank
-        cv.push_tool_start("t1", "read", Some("file.rs"), None);
-        assert_eq!(cv.scroll_offset(), 10);
+        assert!(cv.conv_state.user_scrolled);
     }
 
     #[test]
     fn push_user_forces_scroll_to_bottom() {
         let mut cv = ConversationView::new();
         cv.scroll_up(10);
-        assert!(cv.user_scrolled);
-
-        // User types a new prompt — MUST scroll to show it
-        cv.push_user("next question");
-        assert_eq!(cv.scroll_offset(), 0, "push_user must force scroll to bottom");
-        assert!(!cv.user_scrolled, "push_user must clear user_scrolled");
+        cv.push_user("new prompt");
+        assert_eq!(cv.conv_state.scroll_offset, 0);
+        assert!(!cv.conv_state.user_scrolled);
     }
 
     #[test]
-    fn push_system_forces_scroll_to_bottom() {
+    fn finalize_resets_scroll() {
         let mut cv = ConversationView::new();
+        cv.append_streaming("text");
         cv.scroll_up(10);
-
-        // System message (slash command response) — user-initiated
-        cv.push_system("Command output");
-        assert_eq!(cv.scroll_offset(), 0);
-        assert!(!cv.user_scrolled);
-    }
-
-    #[test]
-    fn finalize_message_resets_user_scrolled() {
-        let mut cv = ConversationView::new();
-        cv.append_streaming("response");
-        cv.scroll_up(10);
-        assert!(cv.user_scrolled);
-
-        // Agent turn ends — reset for next turn
         cv.finalize_message();
-        assert!(!cv.user_scrolled, "finalize should reset for next turn");
-        assert_eq!(cv.scroll_offset(), 0);
+        assert!(!cv.conv_state.user_scrolled);
+        assert_eq!(cv.conv_state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn segments_render_via_widget() {
+        let mut cv = ConversationView::new();
+        cv.push_user("hello");
+        cv.append_streaming("response");
+        cv.finalize_message();
+        cv.push_tool_start("t1", "bash", Some("echo hi"), Some("echo hi"));
+        cv.push_tool_end("t1", false, Some("hi"));
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let (segments, state) = cv.segments_and_state();
+        let widget = super::super::conv_widget::ConversationWidget::new(segments, &Alpharius);
+        widget.render(area, &mut buf, state);
+
+        // Verify segments were rendered
+        let mut found_hello = false;
+        let mut found_bash = false;
+        for y in 0..40 {
+            let mut row = String::new();
+            for x in 0..80 { row.push_str(buf[(x, y)].symbol()); }
+            if row.contains("hello") { found_hello = true; }
+            if row.contains("bash") { found_bash = true; }
+        }
+        assert!(found_hello, "should render user prompt");
+        assert!(found_bash, "should render tool card");
     }
 }

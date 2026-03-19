@@ -11,10 +11,12 @@
 //!   - AgentEvent broadcast → TUI receives streaming updates
 
 pub mod conversation;
+pub mod conv_widget;
 pub mod dashboard;
 pub mod editor;
 pub mod effects;
 pub mod footer;
+pub mod segments;
 pub mod selector;
 pub mod spinner;
 pub mod splash;
@@ -31,7 +33,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -308,17 +310,13 @@ impl App {
             ])
             .split(area);
 
-        // Conversation view — left margin for breathing room
+        // Conversation view — segment-based widget.
+        // Split borrow: extract segments slice + state separately to satisfy
+        // the borrow checker (immutable segments + mutable state).
         let t = &self.theme;
-        let conv_block = Block::default()
-            .borders(Borders::NONE)
-            .padding(ratatui::widgets::Padding::horizontal(1));
-        let conv_text = self.conversation.render_themed(t.as_ref());
-        let conv_widget = Paragraph::new(conv_text)
-            .block(conv_block)
-            .wrap(Wrap { trim: false })
-            .scroll((self.conversation.scroll_offset(), 0));
-        frame.render_widget(conv_widget, chunks[0]);
+        let (segments, conv_state) = self.conversation.segments_and_state();
+        let conv_widget = conv_widget::ConversationWidget::new(segments, t.as_ref());
+        frame.render_stateful_widget(conv_widget, chunks[0], conv_state);
 
         // Footer — sync from settings + session state (renders at the foot)
         {
@@ -539,11 +537,9 @@ impl App {
                         crate::settings::ToolDetail::Detailed => crate::settings::ToolDetail::Compact,
                     };
                     self.update_settings(|s| s.tool_detail = next);
-                    self.conversation.tool_detail = next;
                     SlashResult::Display(format!("Tool display → {}", next.as_str()))
                 } else if let Some(mode) = crate::settings::ToolDetail::parse(args) {
                     self.update_settings(|s| s.tool_detail = mode);
-                    self.conversation.tool_detail = mode;
                     SlashResult::Display(format!("Tool display → {}", mode.as_str()))
                 } else {
                     SlashResult::Display(format!("Unknown mode: {args}. Options: compact, detailed"))

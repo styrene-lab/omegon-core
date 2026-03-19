@@ -1,0 +1,297 @@
+//! ConversationWidget — segment-based scrollable conversation view.
+//!
+//! Implements `StatefulWidget` with:
+//! - Segment height caching (invalidated on resize/mutation)
+//! - Visible-only rendering (only segments in the viewport are drawn)
+//! - Scroll state with segment-awareness
+
+use ratatui::prelude::*;
+
+use super::segments::Segment;
+use super::theme::Theme;
+
+/// Scroll state for the conversation widget.
+pub struct ConvState {
+    /// Pixel (row) offset from the bottom. 0 = showing latest content.
+    pub scroll_offset: u16,
+    /// True when the user has manually scrolled away from the bottom.
+    pub user_scrolled: bool,
+    /// Cached heights for each segment at the last known width.
+    heights: Vec<u16>,
+    /// Terminal width when heights were last computed.
+    cached_width: u16,
+    /// Number of segments when heights were last computed.
+    cached_count: usize,
+}
+
+impl ConvState {
+    pub fn new() -> Self {
+        Self {
+            scroll_offset: 0,
+            user_scrolled: false,
+            heights: Vec::new(),
+            cached_width: 0,
+            cached_count: 0,
+        }
+    }
+
+    pub fn scroll_up(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        self.user_scrolled = self.scroll_offset > 0;
+    }
+
+    pub fn scroll_down(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        if self.scroll_offset == 0 {
+            self.user_scrolled = false;
+        }
+    }
+
+    pub fn auto_scroll_to_bottom(&mut self) {
+        if !self.user_scrolled {
+            self.scroll_offset = 0;
+        }
+    }
+
+    pub fn force_scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.user_scrolled = false;
+    }
+
+    /// Invalidate height cache — call when segments change.
+    pub fn invalidate(&mut self) {
+        self.cached_count = 0;
+    }
+
+    /// Ensure heights are computed for all segments at the given width.
+    fn ensure_heights(&mut self, segments: &[Segment], width: u16, t: &dyn Theme) {
+        // Full recompute if width changed
+        if width != self.cached_width {
+            self.heights.clear();
+            self.cached_width = width;
+            self.cached_count = 0;
+        }
+
+        // Only compute new/changed segments
+        if self.cached_count > segments.len() {
+            // Segments were removed (shouldn't happen, but handle it)
+            self.heights.truncate(segments.len());
+            self.cached_count = segments.len();
+        }
+
+        // Recompute the last segment (it might be streaming)
+        if !segments.is_empty() && self.cached_count == segments.len() {
+            let last = segments.len() - 1;
+            self.heights[last] = segments[last].height(width, t);
+        }
+
+        // Compute any new segments
+        while self.cached_count < segments.len() {
+            let h = segments[self.cached_count].height(width, t);
+            if self.cached_count < self.heights.len() {
+                self.heights[self.cached_count] = h;
+            } else {
+                self.heights.push(h);
+            }
+            self.cached_count += 1;
+        }
+    }
+
+    /// Total height of all segments.
+    fn total_height(&self) -> u16 {
+        self.heights.iter().copied().sum()
+    }
+}
+
+impl Default for ConvState {
+    fn default() -> Self { Self::new() }
+}
+
+/// The conversation widget — renders segments into a scrollable viewport.
+pub struct ConversationWidget<'a> {
+    segments: &'a [Segment],
+    theme: &'a dyn Theme,
+}
+
+impl<'a> ConversationWidget<'a> {
+    pub fn new(segments: &'a [Segment], theme: &'a dyn Theme) -> Self {
+        Self { segments, theme }
+    }
+}
+
+impl<'a> StatefulWidget for ConversationWidget<'a> {
+    type State = ConvState;
+
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut ConvState) {
+        if area.width == 0 || area.height == 0 || self.segments.is_empty() {
+            return;
+        }
+
+        // Ensure all segment heights are computed
+        state.ensure_heights(self.segments, area.width, self.theme);
+
+        let viewport_height = area.height;
+        let total_height = state.total_height();
+
+        // Clamp scroll offset so we don't scroll past the top
+        let max_scroll = total_height.saturating_sub(viewport_height);
+        if state.scroll_offset > max_scroll {
+            state.scroll_offset = max_scroll;
+        }
+
+        // The scroll_offset is from the BOTTOM (0 = at bottom).
+        // Convert to a top-based offset for rendering.
+        let top_offset = if total_height <= viewport_height {
+            0 // Content fits — no scrolling
+        } else {
+            total_height - viewport_height - state.scroll_offset
+        };
+
+        // Walk segments to find which ones are visible
+        let mut y_cursor: u16 = 0; // absolute y position from the top of all content
+        for (i, segment) in self.segments.iter().enumerate() {
+            let seg_height = state.heights[i];
+            let seg_top = y_cursor;
+            let seg_bottom = y_cursor + seg_height;
+            y_cursor = seg_bottom;
+
+            // Skip segments entirely above the viewport
+            if seg_bottom <= top_offset {
+                continue;
+            }
+            // Stop once we're past the viewport
+            if seg_top >= top_offset + viewport_height {
+                break;
+            }
+
+            // This segment is at least partially visible.
+            // Compute where it renders in the viewport.
+            let render_y = if seg_top >= top_offset {
+                area.y + (seg_top - top_offset)
+            } else {
+                // Segment starts above the viewport — it's partially clipped.
+                // We still render it, but the top is cut off by ratatui's
+                // buffer bounds (rendering outside area is a no-op).
+                area.y.saturating_sub(top_offset - seg_top)
+            };
+
+            let available_height = (area.bottom()).saturating_sub(render_y);
+            if available_height == 0 { continue; }
+
+            let seg_area = Rect {
+                x: area.x,
+                y: render_y,
+                width: area.width,
+                height: seg_height.min(available_height),
+            };
+
+            segment.render(seg_area, buf, self.theme);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::theme::Alpharius;
+
+    #[test]
+    fn empty_segments_renders_nothing() {
+        let segments: Vec<Segment> = vec![];
+        let widget = ConversationWidget::new(&segments, &Alpharius);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = ConvState::new();
+        widget.render(area, &mut buf, &mut state);
+        // Should not panic
+    }
+
+    #[test]
+    fn single_segment_renders() {
+        let segments = vec![
+            Segment::UserPrompt { text: "hello".into() },
+        ];
+        let widget = ConversationWidget::new(&segments, &Alpharius);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = ConvState::new();
+        widget.render(area, &mut buf, &mut state);
+
+        // Check that something was rendered
+        let mut found = false;
+        for y in 0..24 {
+            for x in 0..80 {
+                if buf[(x, y)].symbol() != " " {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "should render something");
+    }
+
+    #[test]
+    fn scroll_state_lifecycle() {
+        let mut state = ConvState::new();
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.user_scrolled);
+
+        state.scroll_up(5);
+        assert_eq!(state.scroll_offset, 5);
+        assert!(state.user_scrolled);
+
+        state.scroll_down(3);
+        assert_eq!(state.scroll_offset, 2);
+        assert!(state.user_scrolled);
+
+        state.scroll_down(10);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.user_scrolled);
+    }
+
+    #[test]
+    fn force_scroll_resets() {
+        let mut state = ConvState::new();
+        state.scroll_up(10);
+        assert!(state.user_scrolled);
+
+        state.force_scroll_to_bottom();
+        assert_eq!(state.scroll_offset, 0);
+        assert!(!state.user_scrolled);
+    }
+
+    #[test]
+    fn height_cache_works() {
+        let segments = vec![
+            Segment::TurnSeparator,
+            Segment::UserPrompt { text: "test".into() },
+            Segment::TurnSeparator,
+        ];
+        let mut state = ConvState::new();
+        state.ensure_heights(&segments, 80, &Alpharius);
+        assert_eq!(state.heights.len(), 3);
+        assert_eq!(state.heights[0], 1); // separator
+        assert_eq!(state.heights[2], 1); // separator
+    }
+
+    #[test]
+    fn multiple_segments_render() {
+        let segments = vec![
+            Segment::UserPrompt { text: "first".into() },
+            Segment::AssistantText { text: "response".into(), thinking: String::new(), complete: true },
+            Segment::ToolCard {
+                id: "1".into(), name: "bash".into(),
+                args_summary: None, detail_args: Some("echo hi".into()),
+                result_summary: None, detail_result: Some("hi".into()),
+                is_error: false, complete: true,
+            },
+        ];
+        let widget = ConversationWidget::new(&segments, &Alpharius);
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let mut state = ConvState::new();
+        widget.render(area, &mut buf, &mut state);
+        // Should render all three without panic
+        assert!(state.heights.len() == 3);
+    }
+}
