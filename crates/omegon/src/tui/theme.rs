@@ -79,24 +79,28 @@ pub trait Theme: Send + Sync {
 pub struct Alpharius;
 
 impl Theme for Alpharius {
-    fn bg(&self) -> Color { Color::Rgb(6, 8, 14) }
-    fn card_bg(&self) -> Color { Color::Rgb(14, 22, 34) }
-    fn surface_bg(&self) -> Color { Color::Rgb(19, 30, 46) }
-    fn border(&self) -> Color { Color::Rgb(26, 52, 72) }
-    fn border_dim(&self) -> Color { Color::Rgb(14, 30, 48) }
+    // ── Backgrounds — stepped contrast for visual layering ──────
+    fn bg(&self) -> Color { Color::Rgb(8, 10, 18) }           // void
+    fn card_bg(&self) -> Color { Color::Rgb(16, 24, 38) }     // raised card
+    fn surface_bg(&self) -> Color { Color::Rgb(22, 34, 52) }  // code/result blocks
+    fn border(&self) -> Color { Color::Rgb(36, 64, 88) }      // visible borders
+    fn border_dim(&self) -> Color { Color::Rgb(20, 38, 56) }  // subtle dividers
 
-    fn fg(&self) -> Color { Color::Rgb(196, 216, 228) }
-    fn muted(&self) -> Color { Color::Rgb(96, 120, 136) }
-    fn dim(&self) -> Color { Color::Rgb(52, 72, 88) }
+    // ── Text — clear hierarchy from bright to barely visible ────
+    fn fg(&self) -> Color { Color::Rgb(200, 218, 230) }       // primary text
+    fn muted(&self) -> Color { Color::Rgb(120, 148, 168) }    // secondary text
+    fn dim(&self) -> Color { Color::Rgb(64, 88, 108) }        // tertiary/chrome
 
+    // ── Brand — iridescent ceramite teal ────────────────────────
     fn accent(&self) -> Color { Color::Rgb(42, 180, 200) }
-    fn accent_muted(&self) -> Color { Color::Rgb(26, 136, 152) }
-    fn accent_bright(&self) -> Color { Color::Rgb(110, 202, 216) }
+    fn accent_muted(&self) -> Color { Color::Rgb(28, 140, 160) }
+    fn accent_bright(&self) -> Color { Color::Rgb(120, 210, 224) }
 
-    fn success(&self) -> Color { Color::Rgb(26, 184, 120) }
-    fn error(&self) -> Color { Color::Rgb(200, 48, 48) }
-    fn warning(&self) -> Color { Color::Rgb(200, 100, 24) }
-    fn caution(&self) -> Color { Color::Rgb(184, 144, 32) }
+    // ── Signal — status colors ──────────────────────────────────
+    fn success(&self) -> Color { Color::Rgb(32, 192, 128) }
+    fn error(&self) -> Color { Color::Rgb(220, 56, 56) }
+    fn warning(&self) -> Color { Color::Rgb(210, 120, 32) }
+    fn caution(&self) -> Color { Color::Rgb(196, 160, 40) }
 }
 
 /// The default theme instance.

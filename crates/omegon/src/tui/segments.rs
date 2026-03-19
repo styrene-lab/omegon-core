@@ -210,6 +210,8 @@ fn render_assistant_text(
                 line.to_string(),
                 Style::default().fg(t.accent_muted()).bg(t.surface_bg()),
             )));
+        } else if is_table_line(line) {
+            lines.push(render_table_line(line, t));
         } else {
             lines.push(super::widgets::highlight_line(line, t));
         }
@@ -410,6 +412,57 @@ fn try_highlight<'a>(
             Span::styled(span.content.to_string(), span.style)
         }).collect::<Vec<_>>())
     }).collect())
+}
+
+/// Detect markdown table lines: `| cell | cell |` or `|---|---|`
+fn is_table_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 2
+}
+
+/// Detect table separator: `|---|---|` or `| --- | --- |`
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|')
+        && trimmed.chars().all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+}
+
+/// Render a markdown table line with cell highlighting.
+fn render_table_line<'a>(line: &str, t: &dyn Theme) -> Line<'a> {
+    let trimmed = line.trim();
+
+    // Separator row: |---|---|
+    if is_table_separator(trimmed) {
+        return Line::from(Span::styled(
+            trimmed.to_string(),
+            Style::default().fg(t.border()).bg(t.surface_bg()),
+        ));
+    }
+
+    // Content row: | cell | cell |
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let cells: Vec<&str> = trimmed.split('|')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(t.surface_bg())));
+    for (i, cell) in cells.iter().enumerate() {
+        let cell_text = cell.trim();
+        // First row cells (header) get bold accent, content rows get fg
+        // We can't distinguish header from content without multi-line context,
+        // so just use accent_muted for all cells with inline highlighting
+        let cell_spans = super::widgets::highlight_inline_pub(cell_text, t);
+        for mut s in cell_spans {
+            s.style = s.style.bg(t.surface_bg());
+            spans.push(s);
+        }
+        if i < cells.len() - 1 {
+            spans.push(Span::styled(" │ ", Style::default().fg(t.border()).bg(t.surface_bg())));
+        }
+    }
+    spans.push(Span::styled("│", Style::default().fg(t.border()).bg(t.surface_bg())));
+
+    Line::from(spans)
 }
 
 fn render_system(text: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme) {
