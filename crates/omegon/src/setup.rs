@@ -172,6 +172,9 @@ impl AgentSetup {
         let lifecycle_snapshot = LifecycleSnapshot::from_lifecycle_feature(&lifecycle_feature);
         bus.register(Box::new(lifecycle_feature));
 
+        // ─── Cleave (decomposition + dispatch) ─────────────────────────
+        bus.register(Box::new(features::cleave::CleaveFeature::new(&cwd)));
+
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));
         bus.register(Box::new(features::terminal_title::TerminalTitle::new(

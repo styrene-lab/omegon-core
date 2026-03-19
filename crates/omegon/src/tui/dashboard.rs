@@ -12,11 +12,14 @@ use crate::lifecycle::types::*;
 use super::theme::Theme;
 use super::widgets;
 
+use crate::features::cleave::CleaveProgress;
+
 /// Dashboard state — updated from lifecycle scanning.
 #[derive(Default)]
 pub struct DashboardState {
     pub focused_node: Option<FocusedNodeSummary>,
     pub active_changes: Vec<ChangeSummary>,
+    pub cleave: Option<CleaveProgress>,
     pub turns: u32,
     pub tool_calls: u32,
     pub compactions: u32,
@@ -96,6 +99,42 @@ impl DashboardState {
                 lines.push(Line::from(spans));
             }
             lines.push(Line::from(""));
+        }
+
+        // ─── Cleave Progress ─────────────────────────────────────
+        if let Some(ref cleave) = self.cleave
+            && (cleave.active || cleave.total_children > 0) {
+                lines.push(widgets::section_divider("cleave", inner_w, t));
+                if cleave.active {
+                    let done = cleave.completed + cleave.failed;
+                    lines.push(Line::from(Span::styled(
+                        format!("  ⟳ {}/{} children", done, cleave.total_children),
+                        Style::default().fg(t.warning()),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ✓ {} ok, {} failed", cleave.completed, cleave.failed),
+                        Style::default().fg(if cleave.failed > 0 { t.error() } else { t.success() }),
+                    )));
+                }
+                for child in &cleave.children {
+                    let (icon, color) = match child.status.as_str() {
+                        "completed" => ("✓", t.success()),
+                        "failed" => ("✗", t.error()),
+                        "running" => ("⟳", t.warning()),
+                        _ => ("○", t.dim()),
+                    };
+                    let dur = child.duration_secs.map(|d| format!(" {:.0}s", d)).unwrap_or_default();
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {icon} "), Style::default().fg(color)),
+                        Span::styled(
+                            widgets::truncate_str(&child.label, inner_w.saturating_sub(8), "…").to_string(),
+                            Style::default().fg(t.muted()),
+                        ),
+                        Span::styled(dur, Style::default().fg(t.dim())),
+                    ]));
+                }
+                lines.push(Line::from(""));
         }
 
         // ─── Session Stats ──────────────────────────────────────

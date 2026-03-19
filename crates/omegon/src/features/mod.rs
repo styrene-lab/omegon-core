@@ -20,6 +20,7 @@
 //! - Context injection → `Feature::provide_context()`
 
 pub mod auto_compact;
+pub mod cleave;
 pub mod legacy_bridge;
 pub mod lifecycle;
 pub mod terminal_title;
