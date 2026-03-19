@@ -98,7 +98,7 @@ for platform in "${PLATFORMS[@]}"; do
   fi
 
   echo "  ▸ @styrene-lab/omegon-${platform}@${VERSION}"
-  (cd "$platform_dir" && npm publish --access public --provenance $DRY_RUN 2>&1) || {
+  (cd "$platform_dir" && npm publish --access public $DRY_RUN 2>&1) || {
     echo "  ✗ Failed to publish @styrene-lab/omegon-${platform}"
     # Don't bail — other platforms may succeed
   }
@@ -107,7 +107,7 @@ echo ""
 
 # ── Publish wrapper package ─────────────────────────────────────────────
 echo "Publishing omegon@${VERSION}..."
-(cd "$SCRIPT_DIR/omegon" && npm publish --access public --provenance $DRY_RUN 2>&1)
+(cd "$SCRIPT_DIR/omegon" && npm publish --access public $DRY_RUN 2>&1)
 echo ""
 
 # ── Deprecate old TS versions ───────────────────────────────────────────
