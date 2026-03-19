@@ -73,53 +73,82 @@ impl Segment {
     }
 
     /// Calculate the height this segment needs at the given width.
-    /// Renders into a throw-away buffer to measure — avoids duplicating
-    /// wrapping logic.
-    pub fn height(&self, width: u16, t: &dyn Theme) -> u16 {
+    /// Uses line counting rather than render-and-measure — simpler and
+    /// avoids temp buffer allocation.
+    pub fn height(&self, width: u16, _t: &dyn Theme) -> u16 {
         if width == 0 { return 1; }
+        let w = width as usize;
 
-        // Quick paths for simple types
         match self {
-            Self::TurnSeparator => return 1,
-            Self::LifecycleEvent { .. } => return 1,
-            _ => {}
-        }
+            Self::TurnSeparator => 1,
+            Self::LifecycleEvent { .. } => 1,
 
-        // Render into a temp buffer to measure
-        let height_guess = match self {
-            Self::UserPrompt { text } => (text.len() as u16 / width).max(1) + 2,
+            Self::UserPrompt { text } => {
+                // ▸ prefix + text, wrapped, + 1 blank line after
+                let text_lines = wrapped_line_count(text, w.saturating_sub(4));
+                (text_lines as u16).max(1) + 1
+            }
+
             Self::AssistantText { text, thinking, .. } => {
-                let lines = text.lines().count() + thinking.lines().count();
-                (lines as u16).max(1) + 4
-            }
-            Self::ToolCard { detail_result, detail_args, .. } => {
-                let arg_lines = detail_args.as_ref().map(|a| a.lines().count()).unwrap_or(0);
-                let result_lines = detail_result.as_ref().map(|r| r.lines().count().min(12)).unwrap_or(0);
-                (arg_lines + result_lines + 4) as u16 // borders + separator + padding
-            }
-            Self::SystemNotification { text } => (text.lines().count() as u16).max(1) + 1,
-            _ => 3,
-        };
-
-        // Render into temp buffer for exact measurement
-        let temp_area = Rect::new(0, 0, width, height_guess.max(20));
-        let mut temp_buf = Buffer::empty(temp_area);
-        self.render(temp_area, &mut temp_buf, t);
-
-        // Find the last non-empty row
-        let mut last_row = 0u16;
-        for y in 0..temp_area.height {
-            for x in 0..temp_area.width {
-                let cell = &temp_buf[(x, y)];
-                if cell.symbol() != " " || cell.bg != Color::Reset {
-                    last_row = y;
-                    break;
+                let mut h: u16 = 0;
+                if !thinking.is_empty() {
+                    h += 1; // "◌ thinking…" header
+                    h += thinking.lines().count().min(20) as u16;
+                    h += 1; // gap
                 }
+                // Each text line may wrap
+                for line in text.lines() {
+                    h += wrapped_line_count(line, w.saturating_sub(2)) as u16;
+                }
+                if text.is_empty() && thinking.is_empty() {
+                    h += 1; // streaming cursor "…"
+                }
+                h.max(1) + 1 // +1 spacing after
+            }
+
+            Self::ToolCard { name, detail_args, detail_result, .. } => {
+                let mut h: u16 = 2; // top border + bottom border
+                let inner_w = w.saturating_sub(6); // borders + padding
+
+                // Args
+                if let Some(args) = detail_args {
+                    let lines = if *name == "bash" {
+                        args.lines().count().min(4)
+                    } else {
+                        1 // single line for path-based tools
+                    };
+                    h += lines as u16;
+                }
+                // Separator
+                if detail_args.is_some() && detail_result.is_some() {
+                    h += 1;
+                }
+                // Result (capped at 12 + truncation notice)
+                if let Some(result) = detail_result {
+                    let total = result.lines().count();
+                    let show = total.min(12);
+                    // Account for wrapping in result lines
+                    for line in result.lines().take(show) {
+                        h += wrapped_line_count(line, inner_w) as u16;
+                    }
+                    if total > 12 { h += 1; } // "… N lines" notice
+                }
+                h.max(3) + 1 // +1 spacing after card
+            }
+
+            Self::SystemNotification { text } => {
+                let lines = text.lines().count();
+                (lines as u16).max(1) + 1
             }
         }
-
-        (last_row + 2).min(height_guess) // +1 for the row itself, +1 for spacing
     }
+}
+
+/// How many terminal rows a line of text occupies when wrapped at `width`.
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    if width == 0 || text.is_empty() { return 1; }
+    let len = text.chars().count();
+    len.div_ceil(width).max(1)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -215,11 +244,21 @@ fn render_tool_card(
         ),
     ]);
 
+    // Use the status color for the border — makes the card visually pop
+    let border_color = if !complete {
+        t.warning()
+    } else if is_error {
+        t.error()
+    } else {
+        t.border()
+    };
+
     let card_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.border_dim()).bg(t.card_bg()))
+        .border_style(Style::default().fg(border_color).bg(t.card_bg()))
         .title(title)
+        .padding(Padding::horizontal(1))
         .style(Style::default().bg(t.card_bg()));
 
     let card_inner = card_block.inner(area);

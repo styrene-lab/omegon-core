@@ -1048,10 +1048,10 @@ pub async fn run_tui(
                 Event::Mouse(mouse) => {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
-                            app.conversation.scroll_down(3);
+                            app.conversation.scroll_up(3);
                         }
                         MouseEventKind::ScrollDown => {
-                            app.conversation.scroll_up(3);
+                            app.conversation.scroll_down(3);
                         }
                         _ => {}
                     }
