@@ -110,6 +110,8 @@ pub struct App {
     dashboard_refresh_turn: u32,
     /// Web dashboard server address (if running).
     web_server_addr: Option<std::net::SocketAddr>,
+    /// Prompt queued while agent was busy — sent on next AgentEnd.
+    queued_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +168,7 @@ impl App {
             dashboard_handles: dashboard::DashboardHandles::default(),
             dashboard_refresh_turn: 0,
             web_server_addr: None,
+            queued_prompt: None,
         }
     }
 
@@ -403,20 +406,26 @@ impl App {
         // Hint line between footer and editor
         {
             let ctx_mode = self.footer_data.context_mode;
-            let hint_spans = vec![
-                Span::styled("Tab ", Style::default().fg(t.dim())),
-                Span::styled("expand card", Style::default().fg(t.dim())),
-                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
-                Span::styled(format!("{} {}", ctx_mode.icon(), ctx_mode.as_str()), Style::default().fg(t.dim())),
-                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
-                Span::styled(
+            let mut hint_spans = Vec::new();
+            if let Some(ref queued) = self.queued_prompt {
+                let preview = if queued.len() > 40 { &queued[..40] } else { queued.as_str() };
+                hint_spans.push(Span::styled("⏳ Queued: ", Style::default().fg(t.warning())));
+                hint_spans.push(Span::styled(preview.to_string(), Style::default().fg(t.muted())));
+            } else if self.agent_active {
+                hint_spans.push(Span::styled("Type ahead ", Style::default().fg(t.accent_muted())));
+                hint_spans.push(Span::styled("· Enter queues · Esc interrupts", Style::default().fg(t.dim())));
+            } else {
+                hint_spans.push(Span::styled("Tab ", Style::default().fg(t.dim())));
+                hint_spans.push(Span::styled("expand card", Style::default().fg(t.dim())));
+                hint_spans.push(Span::styled("  ·  ", Style::default().fg(t.border_dim())));
+                hint_spans.push(Span::styled(format!("{} {}", ctx_mode.icon(), ctx_mode.as_str()), Style::default().fg(t.dim())));
+                hint_spans.push(Span::styled("  ·  ", Style::default().fg(t.border_dim())));
+                hint_spans.push(Span::styled(
                     format!("{} {}", self.settings().thinking.icon(), self.settings().thinking.as_str()),
                     Style::default().fg(t.dim()),
-                ),
-                Span::styled("  ·  ", Style::default().fg(t.border_dim())),
-                Span::styled("Shift+click ", Style::default().fg(t.dim())),
-                Span::styled("select text", Style::default().fg(t.dim())),
-            ];
+                ));
+            }
+            let hint_spans = hint_spans;
             let hint = Paragraph::new(Line::from(hint_spans))
                 .style(Style::default().bg(t.card_bg()));
             frame.render_widget(hint, chunks[2]);
@@ -1184,17 +1193,10 @@ pub async fn run_tui(
                 }
                 // ── Paste — insert pasted text into editor ──────────
                 Event::Paste(text) => {
-                    if !app.agent_active {
-                        for c in text.chars() {
-                            // Skip control characters except newline
-                            if c == '\n' || c == '\r' {
-                                // For single-line editor, treat newline as submit
-                                // (user pasted a command and hit enter)
-                                continue;
-                            }
-                            if !c.is_control() {
-                                app.editor.insert(c);
-                            }
+                    for c in text.chars() {
+                        if c == '\n' || c == '\r' { continue; }
+                        if !c.is_control() {
+                            app.editor.insert(c);
                         }
                     }
                 }
@@ -1281,44 +1283,44 @@ pub async fn run_tui(
                     }
 
                     // ── Editor: word/line operations (idle only) ────
-                    (KeyCode::Char('w'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                         app.editor.delete_word_backward();
                     }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                         app.editor.clear_line();
                     }
-                    (KeyCode::Char('k'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                         app.editor.kill_to_end();
                     }
-                    (KeyCode::Char('y'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                         app.editor.yank();
                     }
-                    (KeyCode::Char('a'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
                         app.editor.move_home();
                     }
-                    (KeyCode::Char('e'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
                         app.editor.move_end();
                     }
-                    (KeyCode::Char('r'), KeyModifiers::CONTROL) if !app.agent_active => {
+                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                         app.editor.start_reverse_search();
                     }
 
                     // Meta (Alt) key combos for word operations
-                    (KeyCode::Backspace, KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Backspace, KeyModifiers::ALT) => {
                         app.editor.delete_word_backward();
                     }
-                    (KeyCode::Char('d'), KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Char('d'), KeyModifiers::ALT) => {
                         app.editor.delete_word_forward();
                     }
-                    (KeyCode::Char('b'), KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Char('b'), KeyModifiers::ALT) => {
                         app.editor.move_word_backward();
                     }
-                    (KeyCode::Char('f'), KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Char('f'), KeyModifiers::ALT) => {
                         app.editor.move_word_forward();
                     }
 
                     // Tab: command completion if typing, or toggle tool card expansion
-                    (KeyCode::Tab, _) if !app.agent_active => {
+                    (KeyCode::Tab, _) => {
                         let text = app.editor.render_text().to_string();
                         if text.starts_with('/') {
                             // Command completion
@@ -1336,55 +1338,72 @@ pub async fn run_tui(
                     }
 
                     // Submit
-                    (KeyCode::Enter, _) if !app.agent_active => {
+                    (KeyCode::Enter, _) => {
                         let text = app.editor.take_text();
                         if !text.is_empty() {
-                            match app.handle_slash_command(&text, &command_tx) {
-                                SlashResult::Display(response) => {
-                                    app.conversation.push_system(&response);
+                            // Slash commands always execute immediately
+                            if text.starts_with('/') {
+                                match app.handle_slash_command(&text, &command_tx) {
+                                    SlashResult::Display(response) => {
+                                        app.conversation.push_system(&response);
+                                    }
+                                    SlashResult::Handled => {}
+                                    SlashResult::Quit => {
+                                        app.should_quit = true;
+                                        let _ = command_tx.send(TuiCommand::Quit).await;
+                                    }
+                                    SlashResult::NotACommand => {
+                                        // Unknown /command — queue as prompt if agent busy
+                                        if app.agent_active {
+                                            app.queued_prompt = Some(text.clone());
+                                            app.conversation.push_system(&format!("⏳ Queued: {text}"));
+                                        } else {
+                                            app.conversation.push_user(&text);
+                                            app.history.push(text.clone());
+                                            app.history_idx = None;
+                                            app.agent_active = true;
+                                            let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
+                                        }
+                                    }
                                 }
-                                SlashResult::Handled => {
-                                    // Command handled silently (popup opened, etc.)
-                                }
-                                SlashResult::Quit => {
-                                    app.should_quit = true;
-                                    let _ = command_tx.send(TuiCommand::Quit).await;
-                                }
-                                SlashResult::NotACommand => {
-                                    // Not a slash command — send as user prompt
-                                    app.conversation.push_user(&text);
-                                    app.history.push(text.clone());
-                                    app.history_idx = None;
-                                    app.agent_active = true;
-                                    let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
-                                }
+                            } else if app.agent_active {
+                                // Agent busy — queue the prompt
+                                app.queued_prompt = Some(text.clone());
+                                app.conversation.push_system(&format!("⏳ Queued: {text}"));
+                            } else {
+                                // Agent idle — send immediately
+                                app.conversation.push_user(&text);
+                                app.history.push(text.clone());
+                                app.history_idx = None;
+                                app.agent_active = true;
+                                let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
                             }
                         }
                     }
 
                     // Basic editing
-                    (KeyCode::Char(c), _) if !app.agent_active => {
+                    (KeyCode::Char(c), _) => {
                         app.editor.insert(c);
                     }
-                    (KeyCode::Backspace, _) if !app.agent_active => {
+                    (KeyCode::Backspace, _) => {
                         app.editor.backspace();
                     }
-                    (KeyCode::Left, KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Left, KeyModifiers::ALT) => {
                         app.editor.move_word_backward();
                     }
-                    (KeyCode::Right, KeyModifiers::ALT) if !app.agent_active => {
+                    (KeyCode::Right, KeyModifiers::ALT) => {
                         app.editor.move_word_forward();
                     }
-                    (KeyCode::Left, _) if !app.agent_active => {
+                    (KeyCode::Left, _) => {
                         app.editor.move_left();
                     }
-                    (KeyCode::Right, _) if !app.agent_active => {
+                    (KeyCode::Right, _) => {
                         app.editor.move_right();
                     }
-                    (KeyCode::Home, _) if !app.agent_active => {
+                    (KeyCode::Home, _) => {
                         app.editor.move_home();
                     }
-                    (KeyCode::End, _) if !app.agent_active => {
+                    (KeyCode::End, _) => {
                         app.editor.move_end();
                     }
 
@@ -1401,17 +1420,19 @@ pub async fn run_tui(
                     (KeyCode::PageDown, _) => {
                         app.conversation.scroll_down(20);
                     }
-                    (KeyCode::Up, _) if app.agent_active => {
-                        app.conversation.scroll_up(3);
+                    (KeyCode::Up, _) => {
+                        if app.agent_active || !app.editor.render_text().is_empty() {
+                            app.conversation.scroll_up(3);
+                        } else {
+                            app.history_up();
+                        }
                     }
-                    (KeyCode::Down, _) if app.agent_active => {
-                        app.conversation.scroll_down(3);
-                    }
-                    (KeyCode::Up, _) if !app.agent_active => {
-                        app.history_up();
-                    }
-                    (KeyCode::Down, _) if !app.agent_active => {
-                        app.history_down();
+                    (KeyCode::Down, _) => {
+                        if app.agent_active || !app.editor.render_text().is_empty() {
+                            app.conversation.scroll_down(3);
+                        } else {
+                            app.history_down();
+                        }
                     }
                     _ => {}
                 }
@@ -1423,6 +1444,16 @@ pub async fn run_tui(
         // Drain agent events
         while let Ok(agent_event) = events_rx.try_recv() {
             app.handle_agent_event(agent_event);
+        }
+
+        // Drain queued prompt after agent finishes
+        if !app.agent_active && app.queued_prompt.is_some() {
+            let text = app.queued_prompt.take().unwrap();
+            app.conversation.push_user(&text);
+            app.history.push(text.clone());
+            app.history_idx = None;
+            app.agent_active = true;
+            let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
         }
 
         if app.should_quit {
