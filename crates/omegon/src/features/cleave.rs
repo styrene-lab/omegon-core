@@ -60,11 +60,18 @@ fn assess_directive(directive: &str, threshold: f64) -> Value {
     let lower = directive.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
 
-    // Find best matching pattern
+    // Find best matching pattern — use word-boundary matching:
+    // a keyword matches if it equals a word OR the word starts with it
+    // (catches "refactoring" for "refactor") but not substring matches
+    // (avoids "stool" matching "tool", "build" matching "ui").
+    let word_matches = |word: &str, kw: &str| -> bool {
+        word == kw || word.starts_with(kw) && word.len() <= kw.len() + 4
+    };
+
     let mut best: Option<(&Pattern, f64)> = None;
     for pattern in PATTERNS {
         let matches = pattern.keywords.iter()
-            .filter(|kw| words.iter().any(|w| w.contains(**kw)))
+            .filter(|kw| words.iter().any(|w| word_matches(w, kw)))
             .count();
         if matches > 0 {
             let confidence = (matches as f64 / pattern.keywords.len() as f64).min(1.0);
@@ -74,9 +81,9 @@ fn assess_directive(directive: &str, threshold: f64) -> Value {
         }
     }
 
-    // Count modifiers
+    // Count modifiers (same word-boundary matching)
     let active_modifiers: Vec<&str> = MODIFIERS.iter()
-        .filter(|(_, kws)| kws.iter().any(|kw| words.iter().any(|w| w.contains(kw))))
+        .filter(|(_, kws)| kws.iter().any(|kw| words.iter().any(|w| word_matches(w, kw))))
         .map(|(name, _)| *name)
         .collect();
 
@@ -208,7 +215,7 @@ impl CleaveFeature {
             agent_binary,
             bridge_path: PathBuf::new(), // Not used in native mode
             node: String::new(),
-            model: std::env::var("OMEGON_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".into()),
+            model: std::env::var("OMEGON_MODEL").unwrap_or_else(|_| "anthropic:claude-sonnet-4-6".into()),
             max_parallel,
             timeout_secs: 900,
             idle_timeout_secs: 180,

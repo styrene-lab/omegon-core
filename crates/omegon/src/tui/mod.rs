@@ -266,6 +266,16 @@ impl App {
     }
 
     /// Try to cancel the active agent turn. Returns true if cancelled.
+    /// Queue a prompt to be sent when the agent finishes.
+    /// Replaces any previously queued prompt with a warning.
+    fn queue_prompt(&mut self, text: String) {
+        if let Some(ref prev) = self.queued_prompt {
+            self.conversation.push_system(&format!("⏳ Replaced queued: {}", &prev[..prev.len().min(40)]));
+        }
+        self.conversation.push_system(&format!("⏳ Queued: {text}"));
+        self.queued_prompt = Some(text);
+    }
+
     fn interrupt(&self) -> bool {
         if let Ok(guard) = self.cancel.lock()
             && let Some(ref token) = *guard {
@@ -1008,11 +1018,13 @@ pub async fn run_tui(
     cancel: SharedCancel,
     settings: crate::settings::SharedSettings,
 ) -> io::Result<()> {
-    // Initialize image protocol detection before entering alt screen
-    image::init_picker();
-
     // Set up terminal with mouse capture for scroll events
     enable_raw_mode()?;
+
+    // Initialize image protocol detection AFTER raw mode (suppresses echo)
+    // but BEFORE alt screen (picker queries need the primary screen).
+    image::init_picker();
+
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
@@ -1355,8 +1367,7 @@ pub async fn run_tui(
                                     SlashResult::NotACommand => {
                                         // Unknown /command — queue as prompt if agent busy
                                         if app.agent_active {
-                                            app.queued_prompt = Some(text.clone());
-                                            app.conversation.push_system(&format!("⏳ Queued: {text}"));
+                                            app.queue_prompt(text.clone());
                                         } else {
                                             app.conversation.push_user(&text);
                                             app.history.push(text.clone());
@@ -1368,8 +1379,7 @@ pub async fn run_tui(
                                 }
                             } else if app.agent_active {
                                 // Agent busy — queue the prompt
-                                app.queued_prompt = Some(text.clone());
-                                app.conversation.push_system(&format!("⏳ Queued: {text}"));
+                                app.queue_prompt(text.clone());
                             } else {
                                 // Agent idle — send immediately
                                 app.conversation.push_user(&text);
@@ -1381,8 +1391,9 @@ pub async fn run_tui(
                         }
                     }
 
-                    // Basic editing
-                    (KeyCode::Char(c), _) => {
+                    // Basic editing — only insert if no Ctrl modifier
+                    // (Ctrl+letter arms above handle those explicitly)
+                    (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) => {
                         app.editor.insert(c);
                     }
                     (KeyCode::Backspace, _) => {

@@ -433,7 +433,15 @@ fn serialize_frontmatter(node: &DesignNode) -> String {
     }
 
     if !node.tags.is_empty() {
-        lines.push(format!("tags: [{}]", node.tags.join(", ")));
+        // Quote tags that contain commas or spaces to prevent parse ambiguity
+        let formatted: Vec<String> = node.tags.iter().map(|t| {
+            if t.contains(',') || t.contains(' ') {
+                format!("\"{}\"", t.replace('"', "\\\""))
+            } else {
+                t.clone()
+            }
+        }).collect();
+        lines.push(format!("tags: [{}]", formatted.join(", ")));
     } else {
         lines.push("tags: []".into());
     }
@@ -496,70 +504,67 @@ fn serialize_frontmatter(node: &DesignNode) -> String {
 }
 
 /// Serialize a full design document (frontmatter + sections).
+/// Uses writeln! to a String to avoid double-newline accumulation.
 fn serialize_document(node: &DesignNode, sections: &DocumentSections) -> String {
-    let mut parts = vec![serialize_frontmatter(node)];
+    use std::fmt::Write;
+    let mut out = serialize_frontmatter(node);
+    writeln!(out).unwrap();
+    writeln!(out, "\n# {}", node.title).unwrap();
 
-    parts.push(format!("\n# {}\n", node.title));
-
-    // Overview
     if !sections.overview.is_empty() {
-        parts.push("## Overview\n".into());
-        parts.push(sections.overview.clone());
-        parts.push(String::new());
+        writeln!(out, "\n## Overview\n").unwrap();
+        // Trim trailing whitespace from overview to prevent accumulation
+        write!(out, "{}", sections.overview.trim_end()).unwrap();
+        writeln!(out).unwrap();
     }
 
-    // Research
     if !sections.research.is_empty() {
-        parts.push("## Research\n".into());
+        writeln!(out, "\n## Research").unwrap();
         for entry in &sections.research {
-            parts.push(format!("### {}\n", entry.heading));
-            parts.push(entry.content.clone());
-            parts.push(String::new());
+            writeln!(out, "\n### {}\n", entry.heading).unwrap();
+            write!(out, "{}", entry.content.trim_end()).unwrap();
+            writeln!(out).unwrap();
         }
     }
 
-    // Decisions
     if !sections.decisions.is_empty() {
-        parts.push("## Decisions\n".into());
+        writeln!(out, "\n## Decisions").unwrap();
         for dec in &sections.decisions {
-            parts.push(format!("### {}\n", dec.title));
-            parts.push(format!("**Status:** {}\n", dec.status));
-            parts.push(format!("**Rationale:** {}\n", dec.rationale));
+            writeln!(out, "\n### {}\n", dec.title).unwrap();
+            writeln!(out, "**Status:** {}\n", dec.status).unwrap();
+            writeln!(out, "**Rationale:** {}", dec.rationale).unwrap();
         }
     }
 
-    // Open Questions
     if !sections.open_questions.is_empty() {
-        parts.push("## Open Questions\n".into());
+        writeln!(out, "\n## Open Questions\n").unwrap();
         for q in &sections.open_questions {
-            parts.push(format!("- {q}"));
+            writeln!(out, "- {q}").unwrap();
         }
-        parts.push(String::new());
     }
 
-    // Implementation Notes
     if !sections.impl_file_scope.is_empty() || !sections.impl_constraints.is_empty() {
-        parts.push("## Implementation Notes\n".into());
+        writeln!(out, "\n## Implementation Notes").unwrap();
 
         if !sections.impl_file_scope.is_empty() {
-            parts.push("### File Scope\n".into());
+            writeln!(out, "\n### File Scope\n").unwrap();
             for fs in &sections.impl_file_scope {
                 let action = fs.action.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
-                parts.push(format!("- `{}` — {}{}", fs.path, fs.description, action));
+                writeln!(out, "- `{}` — {}{}", fs.path, fs.description, action).unwrap();
             }
-            parts.push(String::new());
         }
 
         if !sections.impl_constraints.is_empty() {
-            parts.push("### Constraints\n".into());
+            writeln!(out, "\n### Constraints\n").unwrap();
             for c in &sections.impl_constraints {
-                parts.push(format!("- {c}"));
+                writeln!(out, "- {c}").unwrap();
             }
-            parts.push(String::new());
         }
     }
 
-    parts.join("\n")
+    // Ensure file ends with exactly one newline
+    let trimmed = out.trim_end().to_string();
+    trimmed + "\n"
 }
 
 /// Create a new design node document.
@@ -618,10 +623,16 @@ pub fn update_node(
     // Read existing content to preserve the body
     let content = fs::read_to_string(&node.file_path)?;
     let body = extract_body(&content);
-    let sections = parse_sections(body);
+    let mut sections = parse_sections(body);
 
     // Apply the mutation
     mutate(node);
+
+    // Sync sections with mutated node state — frontmatter is the source of truth
+    // for open_questions, but the body also has an ## Open Questions section.
+    // Without this sync, questions added/removed via frontmatter mutation would
+    // be overwritten by the stale body section on the next update_node call.
+    sections.open_questions = node.open_questions.clone();
 
     // Rewrite
     let new_content = serialize_document(node, &sections);
@@ -1047,5 +1058,95 @@ mod mutation_tests {
         let read = node_from_frontmatter(&fm, node.file_path).unwrap();
         assert!(read.title.contains("quotes"));
         assert!(read.title.contains("—"));
+    }
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn serialize_parse_roundtrip_is_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+
+        // Create a node with all sections populated
+        let node = create_node(&docs, "rt", "Round Trip Test", Some("parent"), Some("exploring"),
+            &["rust".into(), "test".into()], "Overview text here.").unwrap();
+
+        // Add content to all sections
+        add_research(&node, "Topic A", "Research content A.").unwrap();
+        add_decision(&node, "Use X", "decided", "Because Y.").unwrap();
+        add_impl_notes(&node, &[FileScope {
+            path: "src/foo.rs".into(),
+            description: "Main impl".into(),
+            action: Some("new".into()),
+        }], &["Must handle UTF-8".into()]).unwrap();
+
+        // Add a question
+        let mut node = {
+            let content = fs::read_to_string(&node.file_path).unwrap();
+            let fm = parse_frontmatter(&content).unwrap();
+            node_from_frontmatter(&fm, node.file_path.clone()).unwrap()
+        };
+        update_node(&mut node, |n| {
+            n.open_questions.push("What about Z?".into());
+        }).unwrap();
+
+        // Read the content after first write
+        let content_v1 = fs::read_to_string(&node.file_path).unwrap();
+
+        // Do a no-op update (should not change the file)
+        update_node(&mut node, |_| {}).unwrap();
+        let content_v2 = fs::read_to_string(&node.file_path).unwrap();
+
+        assert_eq!(content_v1, content_v2,
+            "no-op update should produce identical output\nv1:\n{content_v1}\n\nv2:\n{content_v2}");
+
+        // Do another no-op update (third write — should still be stable)
+        update_node(&mut node, |_| {}).unwrap();
+        let content_v3 = fs::read_to_string(&node.file_path).unwrap();
+        assert_eq!(content_v2, content_v3, "third write should still be stable");
+    }
+
+    #[test]
+    fn question_sync_between_frontmatter_and_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+
+        let mut node = create_node(&docs, "qs", "Question Sync", None, None, &[], "").unwrap();
+
+        // Add questions via update_node
+        update_node(&mut node, |n| {
+            n.open_questions.push("Q1?".into());
+            n.open_questions.push("Q2?".into());
+        }).unwrap();
+
+        // Remove one question
+        update_node(&mut node, |n| {
+            n.open_questions.retain(|q| q != "Q1?");
+        }).unwrap();
+
+        // Re-read and verify both frontmatter and body are in sync
+        let content = fs::read_to_string(&node.file_path).unwrap();
+        let fm = parse_frontmatter(&content).unwrap();
+        let read_node = node_from_frontmatter(&fm, node.file_path.clone()).unwrap();
+
+        assert_eq!(read_node.open_questions, vec!["Q2?"],
+            "frontmatter should only have Q2");
+
+        let body = extract_body(&content);
+        let sections = parse_sections(body);
+        assert_eq!(sections.open_questions, vec!["Q2?"],
+            "body should only have Q2");
+
+        // Another update should be stable
+        let mut node = read_node;
+        node.file_path = docs.join("qs.md");
+        update_node(&mut node, |_| {}).unwrap();
+        let content_after = fs::read_to_string(&node.file_path).unwrap();
+        let sections_after = parse_sections(extract_body(&content_after));
+        assert_eq!(sections_after.open_questions, vec!["Q2?"],
+            "questions should remain stable after re-write");
     }
 }

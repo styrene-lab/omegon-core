@@ -49,9 +49,10 @@ impl SessionLog {
             Err(e) => return CommandResult::Display(format!("Error reading session log: {e}")),
         };
 
-        // Split by ## headings
+        // Split by ## headings — first chunk is the file header (if it starts with #)
         let entries: Vec<&str> = content.split("\n## ").collect();
-        let total = if entries.len() > 1 { entries.len() - 1 } else { 0 }; // first chunk is header
+        let has_header = entries.first().is_some_and(|e| e.starts_with('#') && !e.starts_with("## "));
+        let total = if has_header { entries.len().saturating_sub(1) } else { entries.len() };
 
         if total == 0 {
             return CommandResult::Display("No entries found in .session_log".into());

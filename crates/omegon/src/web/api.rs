@@ -61,6 +61,8 @@ pub struct NodeBrief {
     pub open_questions: usize,
     pub openspec_change: Option<String>,
     pub dependencies: Vec<String>,
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -157,6 +159,8 @@ pub fn build_snapshot(state: &WebState) -> StateSnapshot {
                     open_questions: node.open_questions.len(),
                     openspec_change: node.openspec_change.clone(),
                     dependencies: node.dependencies.clone(),
+                    branches: node.branches.clone(),
+                    tags: node.tags.clone(),
                 };
 
                 if matches!(node.status, NodeStatus::Implementing) {

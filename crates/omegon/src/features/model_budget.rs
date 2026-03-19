@@ -64,24 +64,48 @@ impl ModelTier {
         }
     }
 
-    /// Resolve tier to a concrete model ID.
-    fn resolve_model(&self, provider: &str) -> &'static str {
+    /// Model ID prefix for this tier — used for prefix-matching against
+    /// the current model to detect which tier is active, and for resolving
+    /// a tier to a concrete model ID.
+    fn prefix(&self, provider: &str) -> &'static str {
         match (self, provider) {
-            (Self::Gloriana, "anthropic") => "claude-opus-4-20250918",
-            (Self::Victory, "anthropic") => "claude-sonnet-4-20250514",
-            (Self::Retribution, "anthropic") => "claude-haiku-4-20250506",
+            (Self::Gloriana, "anthropic") => "claude-opus",
+            (Self::Victory, "anthropic") => "claude-sonnet",
+            (Self::Retribution, "anthropic") => "claude-haiku",
+            (Self::Gloriana, "openai") => "o3",
+            (Self::Victory, "openai") => "gpt-5",
+            (Self::Retribution, "openai") => "gpt-4.1-mini",
+            (Self::Local, _) => "local",
+            (Self::Gloriana, _) => "claude-opus",
+            (Self::Victory, _) => "claude-sonnet",
+            (Self::Retribution, _) => "claude-haiku",
+        }
+    }
 
+    /// Resolve tier to a concrete model ID.
+    /// If the current model already matches this tier's prefix, keep it
+    /// (preserves the exact version). Otherwise use the short alias.
+    ///
+    /// The short alias format (e.g., `claude-sonnet-4-6`) is a stable
+    /// pointer that Anthropic/OpenAI resolve to the latest version. This
+    /// avoids hardcoding dated model IDs that rot when new versions ship.
+    fn resolve_model(&self, provider: &str, current_model: &str) -> String {
+        let prefix = self.prefix(provider);
+        // If the current model already matches the target tier's prefix, keep it
+        if current_model.starts_with(prefix) {
+            return current_model.to_string();
+        }
+        // Use short alias — these are stable pointers, not dated versions
+        match (self, provider) {
+            (Self::Gloriana, "anthropic") => "claude-opus-4-6",
+            (Self::Victory, "anthropic") => "claude-sonnet-4-6",
+            (Self::Retribution, "anthropic") => "claude-haiku-4-5",
             (Self::Gloriana, "openai") => "o3",
             (Self::Victory, "openai") => "gpt-5.4",
             (Self::Retribution, "openai") => "gpt-4.1-mini",
-
             (Self::Local, _) => "local",
-
-            // Default to Anthropic
-            (Self::Gloriana, _) => "claude-opus-4-20250918",
-            (Self::Victory, _) => "claude-sonnet-4-20250514",
-            (Self::Retribution, _) => "claude-haiku-4-20250506",
-        }
+            _ => "claude-sonnet-4-6",
+        }.to_string()
     }
 }
 
@@ -99,12 +123,16 @@ impl ModelBudget {
     }
 
     fn switch_tier(&self, tier: ModelTier, reason: &str) -> String {
-        let provider = self.current_provider();
-        let model = tier.resolve_model(&provider);
-        self.settings.lock().unwrap().model = model.to_string();
+        let mut s = self.settings.lock().unwrap();
+        let provider = s.provider().to_string();
+        let current = s.model_short().to_string();
+        let model = tier.resolve_model(&provider, &current);
+        s.model = format!("{provider}:{model}");
+        s.context_window = crate::settings::Settings::new(&s.model).context_window;
+        drop(s);
         format!(
-            "{} {} → {} ({})\n{}",
-            tier.icon(), tier.as_str(), model, provider, reason
+            "{} {} → {provider}:{model} ({})\n{reason}",
+            tier.icon(), tier.as_str(), tier.description(),
         )
     }
 
@@ -184,7 +212,7 @@ impl Feature for ModelBudget {
                 let msg = self.switch_tier(tier, reason);
                 Ok(ToolResult {
                     content: vec![ContentBlock::Text { text: msg }],
-                    details: json!({"tier": tier_str, "model": tier.resolve_model(&self.current_provider())}),
+                    details: json!({"tier": tier_str, "model": tier.resolve_model(&self.current_provider(), "")}),
                 })
             }
             "set_thinking_level" => {
@@ -266,24 +294,35 @@ mod tests {
 
     #[test]
     fn tier_resolve_anthropic() {
-        assert!(ModelTier::Gloriana.resolve_model("anthropic").contains("opus"));
-        assert!(ModelTier::Victory.resolve_model("anthropic").contains("sonnet"));
-        assert!(ModelTier::Retribution.resolve_model("anthropic").contains("haiku"));
+        assert!(ModelTier::Gloriana.resolve_model("anthropic", "").contains("opus"));
+        assert!(ModelTier::Victory.resolve_model("anthropic", "").contains("sonnet"));
+        assert!(ModelTier::Retribution.resolve_model("anthropic", "").contains("haiku"));
     }
 
     #[test]
     fn tier_resolve_openai() {
-        assert_eq!(ModelTier::Gloriana.resolve_model("openai"), "o3");
-        assert!(ModelTier::Victory.resolve_model("openai").contains("gpt"));
+        assert_eq!(ModelTier::Gloriana.resolve_model("openai", ""), "o3");
+        assert!(ModelTier::Victory.resolve_model("openai", "").contains("gpt"));
     }
 
     #[test]
     fn switch_tier_updates_settings() {
-        let settings = crate::settings::shared("claude-sonnet-4-20250514");
+        let settings = crate::settings::shared("anthropic:claude-sonnet-4-6");
         let budget = ModelBudget::new(settings.clone());
         let msg = budget.switch_tier(ModelTier::Gloriana, "test");
-        assert!(msg.contains("gloriana"));
-        assert!(settings.lock().unwrap().model.contains("opus"));
+        assert!(msg.contains("gloriana"), "should mention tier: {msg}");
+        assert!(settings.lock().unwrap().model.contains("opus"), "should switch to opus");
+    }
+
+    #[test]
+    fn resolve_preserves_current_model_version() {
+        // If already on a sonnet variant, switching to victory should keep it
+        let model = ModelTier::Victory.resolve_model("anthropic", "claude-sonnet-4-6");
+        assert_eq!(model, "claude-sonnet-4-6", "should preserve exact version");
+
+        // If on a different tier, should switch to default
+        let model = ModelTier::Gloriana.resolve_model("anthropic", "claude-sonnet-4-6");
+        assert!(model.contains("opus"), "should switch to opus: {model}");
     }
 
     #[test]
