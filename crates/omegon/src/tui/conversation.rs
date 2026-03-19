@@ -57,6 +57,10 @@ pub struct ConversationView {
     scroll: u16,
     /// Whether we're currently receiving streaming text.
     streaming: bool,
+    /// True when the user has manually scrolled away from the bottom.
+    /// Prevents auto-scroll on new content so the user can read history
+    /// while the agent is working.
+    user_scrolled: bool,
     /// Tool display mode — compact (single line) or detailed (bordered cards).
     pub tool_detail: crate::settings::ToolDetail,
 }
@@ -67,6 +71,7 @@ impl ConversationView {
             messages: Vec::new(),
             scroll: 0,
             streaming: false,
+            user_scrolled: false,
             tool_detail: crate::settings::ToolDetail::Compact,
         }
     }
@@ -75,12 +80,12 @@ impl ConversationView {
 
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(Message::User(text.to_string()));
-        self.scroll = 0;
+        self.auto_scroll_to_bottom();
     }
 
     pub fn push_system(&mut self, text: &str) {
         self.messages.push(Message::System(text.to_string()));
-        self.scroll = 0;
+        self.auto_scroll_to_bottom();
     }
 
     pub fn push_lifecycle(&mut self, icon: &str, text: &str) {
@@ -88,7 +93,7 @@ impl ConversationView {
             icon: icon.to_string(),
             text: text.to_string(),
         });
-        self.scroll = 0;
+        self.auto_scroll_to_bottom();
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
@@ -104,7 +109,7 @@ impl ConversationView {
         if let Some(Message::Assistant { text, .. }) = self.messages.last_mut() {
             text.push_str(delta);
         }
-        self.scroll = 0;
+        self.auto_scroll_to_bottom();
     }
 
     pub fn append_thinking(&mut self, delta: &str) {
@@ -133,7 +138,7 @@ impl ConversationView {
             detail_args: detail_args.map(|s| s.to_string()),
             detail_result: None,
         });
-        self.scroll = 0;
+        self.auto_scroll_to_bottom();
     }
 
     pub fn push_tool_end(&mut self, id: &str, is_error: bool, result_text: Option<&str>) {
@@ -192,14 +197,26 @@ impl ConversationView {
 
     pub fn scroll_up(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_add(amount);
+        self.user_scrolled = self.scroll > 0;
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_sub(amount);
+        // If we've scrolled back to the bottom, re-enable auto-scroll
+        if self.scroll == 0 {
+            self.user_scrolled = false;
+        }
     }
 
     pub fn scroll_offset(&self) -> u16 {
         self.scroll
+    }
+
+    /// Auto-scroll to bottom — only if the user hasn't manually scrolled away.
+    fn auto_scroll_to_bottom(&mut self) {
+        if !self.user_scrolled {
+            self.scroll = 0;
+        }
     }
 
     // ─── Rendering ──────────────────────────────────────────────

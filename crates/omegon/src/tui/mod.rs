@@ -13,6 +13,7 @@
 pub mod conversation;
 pub mod dashboard;
 pub mod editor;
+pub mod effects;
 pub mod footer;
 pub mod selector;
 pub mod spinner;
@@ -23,11 +24,12 @@ pub mod widgets;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio::sync::{broadcast, mpsc};
@@ -90,6 +92,8 @@ pub struct App {
     working_verb: &'static str,
     /// When true, replay the splash animation.
     replay_splash: bool,
+    /// Visual effects manager (tachyonfx).
+    effects: effects::Effects,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +145,7 @@ impl App {
             last_tool_name: None,
             working_verb: "Working",
             replay_splash: false,
+            effects: effects::Effects::new(),
         }
     }
 
@@ -290,7 +295,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),    // conversation (all remaining space)
-                Constraint::Length(4), // footer cards
+                Constraint::Length(5), // footer cards (bordered)
                 Constraint::Length(1), // hint line
                 Constraint::Length(3), // editor
             ])
@@ -411,10 +416,11 @@ impl App {
                 frame.render_widget(palette, palette_area);
             }
 
-            // Position cursor in editor
+            // Position cursor in editor — no left border (Borders::TOP only),
+            // so text starts at x=0 within the block's inner area (y+1 for top border).
             let editor_area = chunks[3];
-            let cursor_x = editor_area.x + 1 + self.editor.cursor_position() as u16;
-            let cursor_y = editor_area.y + 1; // +1 for border
+            let cursor_x = editor_area.x + self.editor.cursor_position() as u16;
+            let cursor_y = editor_area.y + 1; // +1 for top border
             frame.set_cursor_position(Position::new(
                 cursor_x.min(editor_area.right().saturating_sub(1)),
                 cursor_y,
@@ -425,6 +431,10 @@ impl App {
         if let Some(ref sel) = self.selector {
             sel.render(area, frame, t.as_ref());
         }
+
+        // ── Post-render effects (tachyonfx) ─────────────────────────
+        self.effects.set_areas(chunks[0], chunks[1]);
+        self.effects.process(frame.buffer_mut(), area);
     }
 
     /// Command registry: (name, description, subcommands).
@@ -669,6 +679,7 @@ impl App {
                 self.agent_active = true;
                 self.turn = turn;
                 self.working_verb = spinner::next_verb();
+                self.effects.start_spinner_glow();
             }
             AgentEvent::TurnEnd { turn } => {
                 self.turn = turn;
@@ -677,7 +688,7 @@ impl App {
                 let est_tokens = (turn as usize) * 2000 + (self.tool_calls as usize) * 500;
                 let ctx_window = self.footer_data.context_window;
                 if ctx_window > 0 {
-                    self.footer_data.estimated_tokens = est_tokens;
+                    self.footer_data.memory_tokens_est = est_tokens;
                     self.footer_data.context_percent =
                         (est_tokens as f32 / ctx_window as f32 * 100.0).min(100.0);
                 }
@@ -712,8 +723,12 @@ impl App {
                 if let Some(ref name) = self.last_tool_name {
                     if name == "memory_store" || name == "memory_supersede" {
                         self.footer_data.total_facts += 1;
+                        let t = &self.theme;
+                        self.effects.ping_footer(t.as_ref());
                     } else if name == "memory_archive" {
                         self.footer_data.total_facts = self.footer_data.total_facts.saturating_sub(1);
+                        let t = &self.theme;
+                        self.effects.ping_footer(t.as_ref());
                     }
                 }
                 self.last_tool_name = None;
@@ -721,6 +736,7 @@ impl App {
             AgentEvent::AgentEnd => {
                 self.agent_active = false;
                 self.conversation.finalize_message();
+                self.effects.stop_spinner_glow();
             }
             AgentEvent::PhaseChanged { phase } => {
                 self.conversation.push_lifecycle("◈", &format!("Phase → {phase:?}"));
@@ -783,15 +799,17 @@ pub async fn run_tui(
     cancel: SharedCancel,
     settings: crate::settings::SharedSettings,
 ) -> io::Result<()> {
-    // Set up terminal
+    // Set up terminal with mouse capture for scroll events
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     // Install panic hook that restores terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = io::stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
         original_hook(info);
@@ -891,6 +909,12 @@ pub async fn run_tui(
         }
     }
 
+    // Queue startup reveal effects (footer sweep-in, conversation fade)
+    {
+        let t = &app.theme;
+        app.effects.queue_startup(t.as_ref());
+    }
+
     loop {
         // ── Splash replay (/splash command) ─────────────────────────
         if app.replay_splash {
@@ -922,8 +946,23 @@ pub async fn run_tui(
         // Poll for events with timeout (16ms ≈ 60fps)
         let has_terminal_event = event::poll(Duration::from_millis(16))?;
 
-        if has_terminal_event
-            && let Event::Key(key) = event::read()? {
+        if has_terminal_event {
+            match event::read()? {
+                // ── Mouse scroll — natural direction (matches macOS touchpad) ──
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        // ScrollDown = fingers move down = content moves up = scroll toward end
+                        MouseEventKind::ScrollDown => {
+                            app.conversation.scroll_down(3);
+                        }
+                        // ScrollUp = fingers move up = content moves down = scroll toward start
+                        MouseEventKind::ScrollUp => {
+                            app.conversation.scroll_up(3);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Key(key) => {
                 // ── Selector popup intercepts all keys when open ────
                 if app.selector.is_some() {
                     match key.code {
@@ -1131,7 +1170,10 @@ pub async fn run_tui(
                     }
                     _ => {}
                 }
-            }
+            } // Event::Key
+            _ => {} // Other events (resize, etc.)
+        } // match event::read()
+        } // if has_terminal_event
 
         // Drain agent events
         while let Ok(agent_event) = events_rx.try_recv() {
@@ -1144,6 +1186,7 @@ pub async fn run_tui(
     }
 
     // Restore terminal
+    io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
