@@ -1071,7 +1071,8 @@ pub async fn run_tui(
         let facts = app.footer_data.total_facts;
         let ctx = s.context_window / 1000;
 
-        let mut welcome = format!("Ω Omegon — {project}");
+        let version = env!("CARGO_PKG_VERSION");
+        let mut welcome = format!("Ω Omegon {version} — {project}");
         welcome.push_str(&format!("\n  ▸ {model_short}  ·  {ctx}k context"));
         if facts > 0 {
             welcome.push_str(&format!("  ·  {facts} facts loaded"));

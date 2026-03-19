@@ -39,7 +39,7 @@ use bridge::{LlmBridge, SubprocessBridge};
 use omegon_traits::AgentEvent;
 
 #[derive(Parser)]
-#[command(name = "omegon", about = "Omegon — AI coding agent")]
+#[command(name = "omegon", about = "Omegon — AI coding agent", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
