@@ -628,7 +628,15 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     cancel,
                     &loop_config,
                 ).await {
+                    // Surface a concise error to the user, not the raw JSON blob
+                    let user_msg = format_agent_error(&e);
                     tracing::error!("Agent loop error: {e}");
+                    let _ = events_tx.send(AgentEvent::SystemNotification {
+                        message: user_msg,
+                    });
+                    // The loop emits AgentEnd on success but not on error —
+                    // emit it here so the TUI exits the "working" state.
+                    let _ = events_tx.send(AgentEvent::AgentEnd);
                 }
 
                 if let Ok(mut guard) = shared_cancel.lock() {
@@ -653,6 +661,29 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     bridge.shutdown().await;
     tui_handle.abort();
     Ok(())
+}
+
+/// Format an agent loop error into a concise user-facing message.
+/// Extracts the meaningful part from API error JSON blobs.
+fn format_agent_error(e: &anyhow::Error) -> String {
+    let raw = format!("{e}");
+    // Try to extract the "message" field from Anthropic/OpenAI error JSON
+    if let Some(start) = raw.find("\"message\":\"") {
+        let rest = &raw[start + 11..];
+        if let Some(end) = rest.find('"') {
+            return format!("⚠ API error: {}", &rest[..end]);
+        }
+    }
+    // Try to extract a status code
+    if let Some(start) = raw.find("status=") {
+        let rest = &raw[start..];
+        if let Some(end) = rest.find(' ') {
+            return format!("⚠ {}", &rest[..end.min(40)]);
+        }
+    }
+    // Fallback: truncate
+    let truncated = if raw.len() > 120 { &raw[..120] } else { &raw };
+    format!("⚠ {truncated}")
 }
 
 async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {

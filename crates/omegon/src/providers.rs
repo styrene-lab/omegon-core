@@ -176,7 +176,9 @@ struct ToolCallAccum {
 impl ToolCallAccum {
     fn to_value(&self) -> Value {
         let args: Value = serde_json::from_str(&self.args_json)
-            .unwrap_or(Value::Object(Default::default()));
+            .unwrap_or_else(|_| json!({}));
+        // Ensure arguments is always an object — Anthropic rejects null/string.
+        let args = if args.is_object() { args } else { json!({}) };
         json!({"id": self.id, "name": self.name, "arguments": args})
     }
 }
@@ -277,11 +279,17 @@ impl AnthropicClient {
                     content.push(json!({"type": "text", "text": t}));
                 }
                 for tc in tool_calls {
+                    // Anthropic requires `input` to be a JSON object, never null/string.
+                    let input = if tc.arguments.is_object() {
+                        tc.arguments.clone()
+                    } else {
+                        json!({})
+                    };
                     content.push(json!({
                         "type": "tool_use",
                         "id": tc.id,
                         "name": tc.name,
-                        "input": tc.arguments,
+                        "input": input,
                     }));
                 }
                 json!({"role": "assistant", "content": content})
@@ -413,7 +421,11 @@ impl LlmBridge for AnthropicClient {
                 "Anthropic API error"
             );
             tracing::debug!(request_body = %serde_json::to_string(&body).unwrap_or_default(), "failed request body");
-            let _ = tx.send(LlmEvent::Error { message: format!("Anthropic {status}: {err}") }).await;
+            // Extract the human-readable message from the API error body
+            let user_msg = serde_json::from_str::<Value>(&err).ok()
+                .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| err.chars().take(200).collect());
+            let _ = tx.send(LlmEvent::Error { message: format!("Anthropic {status}: {user_msg}") }).await;
             return Ok(rx);
         }
         tracing::debug!(status = %response.status(), "Anthropic response OK — starting SSE stream");
@@ -534,13 +546,17 @@ async fn parse_anthropic_stream(
                     }
                     Some("tool_use") => {
                         if let Some(tc) = tool_calls.last() {
+                            let input = serde_json::from_str::<Value>(&tc.args_json)
+                                .ok()
+                                .filter(|v| v.is_object())
+                                .unwrap_or_else(|| json!({}));
                             content_blocks.push(json!({
                                 "type": "tool_use",
                                 "id": tc.id,
                                 "name": tc.name,
-                                "input": serde_json::from_str::<Value>(&tc.args_json).unwrap_or_default(),
+                                "input": input,
                             }));
-                            let _ = tx.try_send(LlmEvent::ToolCallEnd { tool_call: crate::bridge::WireToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: serde_json::from_str(&tc.args_json).unwrap_or_default() } });
+                            let _ = tx.try_send(LlmEvent::ToolCallEnd { tool_call: crate::bridge::WireToolCall { id: tc.id.clone(), name: tc.name.clone(), arguments: input.clone() } });
                         }
                     }
                     _ => {}
@@ -651,7 +667,7 @@ impl LlmBridge for OpenAIClient {
                     if !tool_calls.is_empty() {
                         msg["tool_calls"] = tool_calls.iter().map(|tc| json!({
                             "id": tc.id, "type": "function",
-                            "function": {"name": tc.name, "arguments": tc.arguments.to_string()},
+                            "function": {"name": tc.name, "arguments": if tc.arguments.is_object() { tc.arguments.to_string() } else { "{}".to_string() }},
                         })).collect();
                     }
                     wire_msgs.push(msg);
@@ -681,7 +697,10 @@ impl LlmBridge for OpenAIClient {
         if !response.status().is_success() {
             let status = response.status();
             let err = response.text().await.unwrap_or_default();
-            let _ = tx.send(LlmEvent::Error { message: format!("OpenAI {status}: {err}") }).await;
+            let user_msg = serde_json::from_str::<Value>(&err).ok()
+                .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| err.chars().take(200).collect());
+            let _ = tx.send(LlmEvent::Error { message: format!("OpenAI {status}: {user_msg}") }).await;
             return Ok(rx);
         }
 
@@ -808,5 +827,27 @@ mod tests {
         assert_eq!(wire[0]["role"], "user");
         assert_eq!(wire[0]["content"][0]["type"], "tool_result");
         assert_eq!(wire[0]["content"][0]["tool_use_id"], "tc1");
+    }
+
+    #[test]
+    fn anthropic_tool_use_input_always_object() {
+        // When arguments is null (e.g. tools with no required params),
+        // Anthropic requires `input` to be `{}`, not `null`.
+        let messages = vec![
+            LlmMessage::Assistant {
+                text: vec![],
+                thinking: vec![],
+                tool_calls: vec![crate::bridge::WireToolCall {
+                    id: "tc1".into(),
+                    name: "memory_query".into(),
+                    arguments: Value::Null,
+                }],
+                raw: None, // Force fallback path (no raw content blocks)
+            },
+        ];
+        let wire = AnthropicClient::build_messages(&messages);
+        let input = &wire[0]["content"][0]["input"];
+        assert!(input.is_object(), "input should be object, got: {input}");
+        assert_eq!(input, &json!({}));
     }
 }
