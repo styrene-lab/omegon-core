@@ -172,12 +172,14 @@ impl Editor {
     /// Returns the matched history entry (if any) for display.
     pub fn search_update(&mut self, history: &[String]) -> Option<String> {
         if let EditorMode::ReverseSearch { ref query, ref mut match_idx } = self.mode {
-            if query.is_empty() {
+            if query.is_empty() || history.is_empty() {
                 *match_idx = None;
                 return None;
             }
             // Search backward through history for a match
-            let start = match_idx.map(|i| i.saturating_sub(1)).unwrap_or(history.len().saturating_sub(1));
+            let start = match_idx
+                .map(|i| i.saturating_sub(1))
+                .unwrap_or(history.len() - 1); // safe: history is non-empty
             for i in (0..=start).rev() {
                 if history[i].contains(query.as_str()) {
                     *match_idx = Some(i);
@@ -201,7 +203,7 @@ impl Editor {
     /// Search backward one more step (Ctrl+R pressed again during search).
     pub fn search_prev(&mut self, history: &[String]) -> Option<String> {
         if let EditorMode::ReverseSearch { ref query, ref mut match_idx } = self.mode {
-            if query.is_empty() { return None; }
+            if query.is_empty() || history.is_empty() { return None; }
             let start = match_idx.map(|i| i.saturating_sub(1)).unwrap_or(0);
             for i in (0..=start).rev() {
                 if history[i].contains(query.as_str()) && Some(i) != *match_idx {
@@ -486,6 +488,19 @@ mod tests {
         e.move_home();
         e.backspace();
         assert_eq!(e.render_text(), "a");
+    }
+
+    #[test]
+    fn reverse_search_empty_history_no_panic() {
+        let empty: Vec<String> = vec![];
+        let mut e = Editor::new();
+        e.start_reverse_search();
+        e.insert('x');
+        // This used to panic with index out of bounds on empty history
+        let result = e.search_update(&empty);
+        assert!(result.is_none());
+        let result2 = e.search_prev(&empty);
+        assert!(result2.is_none());
     }
 
     #[test]
