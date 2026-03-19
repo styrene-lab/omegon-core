@@ -247,22 +247,29 @@ fn render_tool_card(
         ),
     ]);
 
-    // Use the status color for the border — makes the card visually pop
+    // Border color matches status — makes the card visually distinct
     let border_color = if !complete {
         t.warning()
     } else if is_error {
         t.error()
     } else {
-        t.border()
+        t.success()
+    };
+
+    // Card background varies by status
+    let bg = if is_error {
+        t.tool_error_bg()
+    } else {
+        t.tool_success_bg()
     };
 
     let card_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color).bg(t.card_bg()))
+        .border_style(Style::default().fg(border_color).bg(bg))
         .title(title)
         .padding(Padding::horizontal(1))
-        .style(Style::default().bg(t.card_bg()));
+        .style(Style::default().bg(bg));
 
     let card_inner = card_block.inner(area);
     card_block.render(area, buf);
@@ -280,21 +287,21 @@ fn render_tool_card(
                 for (i, line) in args.lines().take(4).enumerate() {
                     let prefix = if i == 0 { "$ " } else { "  " };
                     lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(t.dim()).bg(t.card_bg())),
-                        Span::styled(line.to_string(), Style::default().fg(t.fg()).bg(t.card_bg())),
+                        Span::styled(prefix, Style::default().fg(t.dim()).bg(bg)),
+                        Span::styled(line.to_string(), Style::default().fg(t.fg()).bg(bg)),
                     ]));
                 }
             }
             "edit" => {
                 lines.push(Line::from(vec![
-                    Span::styled("▸ edit ", Style::default().fg(t.accent_muted()).bg(t.card_bg())),
-                    Span::styled(args.to_string(), Style::default().fg(t.dim()).bg(t.card_bg())),
+                    Span::styled("▸ edit ", Style::default().fg(t.accent_muted()).bg(bg)),
+                    Span::styled(args.to_string(), Style::default().fg(t.dim()).bg(bg)),
                 ]));
             }
             _ => {
                 lines.push(Line::from(Span::styled(
                     args.to_string(),
-                    Style::default().fg(t.dim()).bg(t.card_bg()),
+                    Style::default().fg(t.dim()).bg(bg),
                 )));
             }
         }
