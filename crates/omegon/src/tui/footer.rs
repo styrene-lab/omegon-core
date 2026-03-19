@@ -10,7 +10,7 @@
 
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 
 use super::theme::Theme;
 use super::widgets::{self, GaugeConfig};
@@ -50,6 +50,11 @@ impl FooterData {
     pub fn render(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
         let width = area.width as usize;
 
+        // Fill the entire footer zone with card_bg background
+        let bg_block = Block::default()
+            .style(Style::default().bg(t.card_bg()));
+        frame.render_widget(bg_block, area);
+
         if width < 60 {
             self.render_narrow(area, frame, t);
             return;
@@ -69,6 +74,7 @@ impl FooterData {
             ])
             .split(area);
 
+        let card_style = Style::default().bg(t.card_bg());
         self.render_context_card(cols[0], frame, t);
         Self::render_divider(cols[1], frame, t);
         self.render_model_card(cols[2], frame, t);
@@ -76,15 +82,18 @@ impl FooterData {
         self.render_memory_card(cols[4], frame, t);
         Self::render_divider(cols[5], frame, t);
         self.render_system_card(cols[6], frame, t);
+
+        // Suppress unused warning
+        let _ = card_style;
     }
 
     /// Render a vertical divider (│) filling the full height.
     fn render_divider(area: Rect, frame: &mut Frame, t: &dyn Theme) {
         let mut lines: Vec<Line<'static>> = Vec::new();
         for _ in 0..area.height {
-            lines.push(Line::from(Span::styled("│", Style::default().fg(t.border_dim()))));
+            lines.push(Line::from(Span::styled("│", Style::default().fg(t.border()).bg(t.card_bg()))));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines).style(Style::default().bg(t.card_bg())), area);
     }
 
     fn render_narrow(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
@@ -153,8 +162,8 @@ impl FooterData {
             ),
         ]));
 
-        let block = Block::default().borders(Borders::NONE);
-        let widget = Paragraph::new(lines).block(block);
+        let widget = Paragraph::new(lines)
+            .style(Style::default().bg(t.card_bg()));
         frame.render_widget(widget, area);
     }
 
@@ -182,7 +191,7 @@ impl FooterData {
             Span::styled(auth_type, Style::default().fg(t.muted())),
         ]));
 
-        let widget = Paragraph::new(lines);
+        let widget = Paragraph::new(lines).style(Style::default().bg(t.card_bg()));
         frame.render_widget(widget, area);
     }
 
@@ -221,7 +230,7 @@ impl FooterData {
 
         lines.push(Line::from(parts));
 
-        let widget = Paragraph::new(lines);
+        let widget = Paragraph::new(lines).style(Style::default().bg(t.card_bg()));
         frame.render_widget(widget, area);
     }
 
@@ -243,7 +252,7 @@ impl FooterData {
             Span::styled(display_cwd, Style::default().fg(t.muted())),
         ]));
 
-        let widget = Paragraph::new(lines);
+        let widget = Paragraph::new(lines).style(Style::default().bg(t.card_bg()));
         frame.render_widget(widget, area);
     }
 

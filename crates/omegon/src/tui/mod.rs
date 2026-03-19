@@ -292,9 +292,11 @@ impl App {
             ])
             .split(area);
 
-        // Conversation view
+        // Conversation view — left margin for breathing room
         let t = &self.theme;
-        let conv_block = Block::default().borders(Borders::NONE);
+        let conv_block = Block::default()
+            .borders(Borders::NONE)
+            .padding(ratatui::widgets::Padding::horizontal(1));
         let conv_text = self.conversation.render_themed(t.as_ref());
         let conv_widget = Paragraph::new(conv_text)
             .block(conv_block)
@@ -329,7 +331,8 @@ impl App {
                     Style::default().fg(t.dim()),
                 ),
             ];
-            let hint = Paragraph::new(Line::from(hint_spans));
+            let hint = Paragraph::new(Line::from(hint_spans))
+                .style(Style::default().bg(t.card_bg()));
             frame.render_widget(hint, chunks[2]);
         }
 
@@ -360,7 +363,7 @@ impl App {
 
         let editor_block = Block::default()
             .borders(Borders::TOP)
-            .border_style(t.style_border_dim())
+            .border_style(Style::default().fg(t.border()).bg(t.surface_bg()))
             .title(editor_title);
 
         let display_text = if editor_content.is_empty() {
@@ -369,7 +372,7 @@ impl App {
             editor_content
         };
         let editor_widget = Paragraph::new(display_text)
-            .style(t.style_fg())
+            .style(Style::default().fg(t.fg()).bg(t.surface_bg()))
             .block(editor_block);
         frame.render_widget(editor_widget, chunks[3]);
 
