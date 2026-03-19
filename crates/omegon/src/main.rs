@@ -83,6 +83,10 @@ struct Cli {
     #[arg(long)]
     no_session: bool,
 
+    /// Skip the splash screen animation on startup.
+    #[arg(long)]
+    no_splash: bool,
+
     /// Log level: error, warn, info, debug, trace. Overrides RUST_LOG.
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
@@ -429,6 +433,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         cwd: agent.cwd.to_string_lossy().to_string(),
         is_oauth,
         initial,
+        no_splash: cli.no_splash,
     };
     let tui_cancel = shared_cancel.clone();
     let tui_settings = shared_settings.clone();

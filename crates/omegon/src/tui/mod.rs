@@ -16,6 +16,7 @@ pub mod editor;
 pub mod footer;
 pub mod selector;
 pub mod spinner;
+pub mod splash;
 pub mod theme;
 pub mod widgets;
 
@@ -87,6 +88,8 @@ pub struct App {
     last_tool_name: Option<String>,
     /// Current spinner verb — rotates on each tool call.
     working_verb: &'static str,
+    /// When true, replay the splash animation.
+    replay_splash: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,6 +140,7 @@ impl App {
             selector_kind: None,
             last_tool_name: None,
             working_verb: "Working",
+            replay_splash: false,
         }
     }
 
@@ -436,6 +440,7 @@ impl App {
         ("sessions", "list saved sessions",                  &[]),
         ("memory",   "memory stats",                        &[]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
+        ("splash",   "replay splash animation",              &[]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
 
@@ -588,6 +593,12 @@ impl App {
                 let cwd = std::path::Path::new(&self.footer_data.cwd);
                 let report = crate::migrate::run(source, cwd);
                 SlashResult::Display(report.summary())
+            }
+
+            "splash" => {
+                // Set flag to replay splash on next draw cycle
+                self.replay_splash = true;
+                SlashResult::Handled
             }
 
             "exit" | "quit" => SlashResult::Quit,
@@ -743,6 +754,8 @@ pub struct TuiConfig {
     pub is_oauth: bool,
     /// Pre-populated initial state so the first frame isn't empty.
     pub initial: TuiInitialState,
+    /// Skip the splash animation on startup.
+    pub no_splash: bool,
 }
 
 /// Initial state snapshot gathered during setup, before the TUI event loop starts.
@@ -821,7 +834,88 @@ pub async fn run_tui(
         app.conversation.push_system(&welcome);
     }
 
+    // ── Splash screen ───────────────────────────────────────────────
+    if !config.no_splash {
+        let size = terminal.size()?;
+        if let Some(mut splash) = splash::SplashScreen::new(size.width, size.height) {
+            // Mark loading items done immediately — we load fast
+            splash.set_load_state("providers", splash::LoadState::Active);
+            splash.set_load_state("memory", splash::LoadState::Active);
+            splash.set_load_state("tools", splash::LoadState::Active);
+
+            // Run splash animation loop
+            let splash_start = std::time::Instant::now();
+            let safety_timeout = std::time::Duration::from_secs(5);
+
+            loop {
+                // Draw splash
+                {
+                    let t = &app.theme;
+                    terminal.draw(|f| splash.draw(f, t.as_ref()))?;
+                }
+
+                // Poll for keypress at animation frame rate
+                let interval = splash::SplashScreen::frame_interval();
+                if event::poll(interval)?
+                    && matches!(event::read()?, Event::Key(_))
+                    && (splash.ready_to_dismiss()
+                        || splash_start.elapsed() > std::time::Duration::from_millis(300))
+                {
+                    break;
+                }
+
+                splash.tick();
+
+                // Mark items done after a few frames (simulates fast loading)
+                if splash.frame >= 8 {
+                    splash.set_load_state("providers", splash::LoadState::Done);
+                }
+                if splash.frame >= 12 {
+                    splash.set_load_state("memory", splash::LoadState::Done);
+                }
+                if splash.frame >= 16 {
+                    splash.set_load_state("tools", splash::LoadState::Done);
+                }
+
+                // Safety timeout
+                if splash_start.elapsed() > safety_timeout {
+                    splash.force_done();
+                    break;
+                }
+
+                // Auto-dismiss after hold period
+                if splash.ready_to_dismiss() && splash.hold_count > splash::HOLD_FRAMES_PUB + 30 {
+                    break;
+                }
+            }
+        }
+    }
+
     loop {
+        // ── Splash replay (/splash command) ─────────────────────────
+        if app.replay_splash {
+            app.replay_splash = false;
+            let size = terminal.size()?;
+            if let Some(mut splash) = splash::SplashScreen::new(size.width, size.height) {
+                splash.force_done(); // No loading checklist on replay
+                loop {
+                    {
+                        let t = &app.theme;
+                        terminal.draw(|f| splash.draw(f, t.as_ref()))?;
+                    }
+                    let interval = splash::SplashScreen::frame_interval();
+                    if event::poll(interval)? && matches!(event::read()?, Event::Key(_)) {
+                        break;
+                    }
+                    splash.tick();
+                    // Auto-end after full animation + hold
+                    if splash.frame > splash::TOTAL_FRAMES_PUB + splash::HOLD_FRAMES_PUB + 20 {
+                        break;
+                    }
+                }
+            }
+        }
+
         // Draw
         terminal.draw(|f| app.draw(f))?;
 
