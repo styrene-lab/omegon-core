@@ -271,13 +271,7 @@ pub fn badge<'a>(icon: &str, text: &str, color: ratatui::style::Color) -> Vec<Sp
     ]
 }
 
-/// Tool call card — compact single-line rendering.
-///
-/// In-progress:  `│ → read (src/main.rs)`
-/// Success:      `│ ✓ read (src/main.rs)  245 lines`
-/// Error:        `│ ✗ edit (src/lib.rs)  oldText not found`
-///
-/// Args and result are truncated to keep the card compact.
+/// Tool call card — compact single-line with colored left bar.
 pub fn tool_card<'a>(
     name: &str,
     is_error: bool,
@@ -289,49 +283,43 @@ pub fn tool_card<'a>(
     let (icon, color) = if complete {
         if is_error { ("✗", t.error()) } else { ("✓", t.success()) }
     } else {
-        ("→", t.warning())
+        ("⟳", t.warning())
     };
 
-    let gutter_style = Style::default().fg(t.border_dim());
     let mut spans = vec![
-        Span::styled("  ", gutter_style), // indent
-        Span::styled(format!("{icon} "), Style::default().fg(color)),
-        Span::styled(name.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled("▎", Style::default().fg(color)),
+        Span::styled(format!(" {icon} "), Style::default().fg(color).bg(t.card_bg())),
+        Span::styled(name.to_string(), Style::default().fg(color).bg(t.card_bg()).add_modifier(Modifier::BOLD)),
     ];
 
-    // Args — truncate aggressively for bash commands
     if let Some(args) = args_summary {
         let display = if args.len() > 50 {
             format!(" {}…", &args[..49.min(args.len())])
         } else {
             format!(" {args}")
         };
-        spans.push(Span::styled(display, Style::default().fg(t.dim())));
+        spans.push(Span::styled(display, Style::default().fg(t.dim()).bg(t.card_bg())));
     }
 
-    // Result preview — short and meaningful
     if let Some(summary) = result_summary {
         let display = if summary.len() > 40 {
             format!("  {}…", &summary[..39.min(summary.len())])
         } else {
             format!("  {summary}")
         };
-        spans.push(Span::styled(display, Style::default().fg(t.muted())));
+        spans.push(Span::styled(display, Style::default().fg(t.muted()).bg(t.card_bg())));
     }
 
     Line::from(spans)
 }
 
-/// Detailed tool card — bordered box showing full command + output.
+/// Detailed tool card — colored left bar with contrasting background.
 ///
-/// ```text
-///   ┌ bash ──────────────────────────────────
-///   │ $ find . -maxdepth 1 -type f | head -20
-///   │ .npmignore
-///   │ README.md
-///   │ package.json
-///   └────────────────────────────────────────
-/// ```
+/// Visual style matches the TS Omegon dashboard:
+/// - Thick colored left bar (▎) — green for success, red for error, yellow for in-progress
+/// - card_bg background on all lines — visually distinct from conversation text
+/// - Prominent tool name header
+/// - Output in muted text
 pub fn tool_card_detailed<'a>(
     name: &str,
     is_error: bool,
@@ -340,62 +328,72 @@ pub fn tool_card_detailed<'a>(
     detail_result: Option<&str>,
     t: &dyn Theme,
 ) -> Vec<Line<'a>> {
-    let (icon, color) = if complete {
+    let (icon, bar_color) = if complete {
         if is_error { ("✗", t.error()) } else { ("✓", t.success()) }
     } else {
-        ("→", t.warning())
+        ("⟳", t.warning())
     };
 
-    let border = Style::default().fg(t.border_dim());
-    let b = box_chars();
+    let bar = Style::default().fg(bar_color);
+    let card = Style::default().bg(t.card_bg());
+    let card_dim = Style::default().fg(t.dim()).bg(t.card_bg());
+    let card_fg = Style::default().fg(t.fg()).bg(t.card_bg());
+    let card_surface = Style::default().fg(t.muted()).bg(t.surface_bg());
+
     let mut lines = Vec::new();
 
-    // Header: ┌ ✓ bash ────────────────
-    let header_text = format!(" {} {icon} {name} ", b.tl);
-    let fill = 50usize.saturating_sub(visible_width(&header_text));
-    lines.push(Line::from(vec![
-        Span::styled(format!("  {}", b.tl), border),
-        Span::styled(format!(" {icon} "), Style::default().fg(color)),
-        Span::styled(name.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {}", b.h.repeat(fill)), border),
-    ]));
-
-    // Args lines: │ $ command...
+    // Header: ▎ ✓ read  path/to/file.rs
+    let mut header = vec![
+        Span::styled("▎", bar),
+        Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(t.card_bg())),
+        Span::styled(
+            name.to_string(),
+            Style::default().fg(bar_color).bg(t.card_bg()).add_modifier(Modifier::BOLD),
+        ),
+    ];
     if let Some(args) = detail_args {
-        let prefix = if name == "bash" { "$ " } else { "" };
+        // For bash: show the command on the header line if it's short
+        if name == "bash" && !args.contains('\n') && args.len() < 80 {
+            header.push(Span::styled(format!("  $ {args}"), card_dim));
+        } else if name != "bash" {
+            // For read/edit/write: show the path
+            header.push(Span::styled(format!("  {args}"), card_dim));
+        }
+    }
+    lines.push(Line::from(header));
+
+    // Multi-line args (bash commands that are long or multi-line)
+    if let Some(args) = detail_args
+        && name == "bash"
+        && (args.contains('\n') || args.len() >= 80)
+    {
         for line in args.lines().take(3) {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", b.v), border),
-                Span::styled(format!("{prefix}{line}"), Style::default().fg(t.fg())),
+                Span::styled("▎", bar),
+                Span::styled(format!(" $ {line}"), card_fg),
             ]));
         }
     }
 
-    // Result lines: │ output...
+    // Result lines with surface background
     if let Some(result) = detail_result {
-        if detail_args.is_some() {
-            // Thin separator between args and result
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", b.v), border),
-                Span::styled("─".repeat(40), Style::default().fg(t.border_dim())),
-            ]));
-        }
         for line in result.lines().take(8) {
-            let style = if is_error {
-                Style::default().fg(t.error())
+            let style = if is_error { 
+                Style::default().fg(t.error()).bg(t.surface_bg())
             } else {
-                Style::default().fg(t.muted())
+                card_surface
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", b.v), border),
-                Span::styled(line.to_string(), style),
+                Span::styled("▎", bar),
+                Span::styled(format!(" {line}"), style),
             ]));
         }
     }
 
-    // Footer: └────────────────────
+    // Bottom edge — thin line to close the card
     lines.push(Line::from(vec![
-        Span::styled(format!("  {}{}", b.bl, b.h.repeat(50)), border),
+        Span::styled("▎", bar),
+        Span::styled("", card),
     ]));
 
     lines
@@ -758,7 +756,7 @@ mod tests {
         let t = Alpharius;
         let line = tool_card("bash", false, false, Some("cargo test"), None, &t);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("→"));
+        assert!(text.contains("⟳"));
         assert!(text.contains("bash"));
     }
 

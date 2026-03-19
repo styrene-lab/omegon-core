@@ -215,7 +215,7 @@ impl ConversationView {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut in_code_fence = false;
 
-        for (idx, msg) in self.messages.iter().enumerate() {
+        for msg in &self.messages {
             match msg {
                 Message::User(text) => {
                     // Thin separator before user messages (except first)
@@ -308,9 +308,6 @@ impl ConversationView {
                     detail_result,
                     ..
                 } => {
-                    let prev_is_tool = idx > 0 && matches!(self.messages.get(idx - 1), Some(Message::Tool { .. }));
-                    let next_is_tool = matches!(self.messages.get(idx + 1), Some(Message::Tool { .. }));
-
                     match self.tool_detail {
                         crate::settings::ToolDetail::Detailed => {
                             // Bordered card with full args + result
@@ -324,13 +321,6 @@ impl ConversationView {
                             ));
                         }
                         crate::settings::ToolDetail::Compact => {
-                            // Single-line compact card with grouping brackets
-                            if !prev_is_tool {
-                                lines.push(Line::from(Span::styled(
-                                    "  ┌",
-                                    Style::default().fg(t.border_dim()),
-                                )));
-                            }
                             lines.push(widgets::tool_card(
                                 name,
                                 *is_error,
@@ -339,12 +329,6 @@ impl ConversationView {
                                 result_summary.as_deref(),
                                 t,
                             ));
-                            if !next_is_tool {
-                                lines.push(Line::from(Span::styled(
-                                    "  └",
-                                    Style::default().fg(t.border_dim()),
-                                )));
-                            }
                         }
                     }
                 }
@@ -412,19 +396,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_renders_with_bracket() {
+    fn tool_card_renders_with_bar() {
         let mut cv = ConversationView::new();
         cv.push_tool_start("t1", "edit", Some("lib.rs"), None);
         cv.push_tool_end("t1", false, Some("Applied edit"));
         let lines = cv.render_text();
-        // First line is the ┌ bracket, second is the tool card, third is └
-        assert!(lines.len() >= 3, "should have bracket + card + bracket, got {}", lines.len());
-        let bracket: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(bracket.contains("┌"), "should have opening bracket: {bracket}");
-        let card: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(card.contains("✓"), "card should have checkmark: {card}");
-        assert!(card.contains("edit"), "card should have tool name: {card}");
-        assert!(card.contains("lib.rs"), "card should have args: {card}");
+        assert!(!lines.is_empty(), "should render tool card");
+        let all: String = lines.iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(all.contains("▎"), "should have left bar: {all}");
+        assert!(all.contains("✓"), "should have checkmark: {all}");
+        assert!(all.contains("edit"), "should have tool name: {all}");
+        assert!(all.contains("lib.rs"), "should have args: {all}");
     }
 
     #[test]

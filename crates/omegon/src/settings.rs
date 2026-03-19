@@ -38,9 +38,9 @@ pub struct Settings {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolDetail {
     /// Single-line cards with truncated args + result preview.
-    #[default]
     Compact,
     /// Bordered cards showing full command + output (first 8 lines).
+    #[default]
     Detailed,
 }
 
