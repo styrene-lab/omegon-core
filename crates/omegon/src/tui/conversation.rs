@@ -438,7 +438,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.to_string())
             .collect();
-        assert!(all.contains("▎"), "should have left bar: {all}");
+        assert!(all.contains("╭") || all.contains("▎"), "should have card border: {all}");
         assert!(all.contains("✓"), "should have checkmark: {all}");
         assert!(all.contains("edit"), "should have tool name: {all}");
         assert!(all.contains("lib.rs"), "should have args: {all}");

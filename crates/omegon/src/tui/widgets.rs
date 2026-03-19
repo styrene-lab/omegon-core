@@ -334,67 +334,99 @@ pub fn tool_card_detailed<'a>(
         ("⟳", t.warning())
     };
 
-    let bar = Style::default().fg(bar_color);
-    let card = Style::default().bg(t.card_bg());
+    let border = Style::default().fg(t.border_dim()).bg(t.card_bg());
+    let header_style = Style::default().fg(bar_color).bg(t.card_bg());
     let card_dim = Style::default().fg(t.dim()).bg(t.card_bg());
     let card_fg = Style::default().fg(t.fg()).bg(t.card_bg());
-    let card_surface = Style::default().fg(t.muted()).bg(t.surface_bg());
+    let surface = Style::default().fg(t.muted()).bg(t.surface_bg());
+    let surface_err = Style::default().fg(t.error()).bg(t.surface_bg());
 
     let mut lines = Vec::new();
 
-    // Header: ▎ ✓ read  path/to/file.rs
-    let mut header = vec![
-        Span::styled("▎", bar),
-        Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(t.card_bg())),
-        Span::styled(
-            name.to_string(),
-            Style::default().fg(bar_color).bg(t.card_bg()).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if let Some(args) = detail_args {
-        // For bash: show the command on the header line if it's short
-        if name == "bash" && !args.contains('\n') && args.len() < 80 {
-            header.push(Span::styled(format!("  $ {args}"), card_dim));
-        } else if name != "bash" {
-            // For read/edit/write: show the path
-            header.push(Span::styled(format!("  {args}"), card_dim));
-        }
-    }
-    lines.push(Line::from(header));
-
-    // Multi-line args (bash commands that are long or multi-line)
-    if let Some(args) = detail_args
-        && name == "bash"
-        && (args.contains('\n') || args.len() >= 80)
-    {
-        for line in args.lines().take(3) {
-            lines.push(Line::from(vec![
-                Span::styled("▎", bar),
-                Span::styled(format!(" $ {line}"), card_fg),
-            ]));
-        }
-    }
-
-    // Result lines with surface background
-    if let Some(result) = detail_result {
-        for line in result.lines().take(8) {
-            let style = if is_error { 
-                Style::default().fg(t.error()).bg(t.surface_bg())
-            } else {
-                card_surface
-            };
-            lines.push(Line::from(vec![
-                Span::styled("▎", bar),
-                Span::styled(format!(" {line}"), style),
-            ]));
-        }
-    }
-
-    // Bottom edge — thin line to close the card
+    // ── Top border with tool name ───────────────────────────────────
+    // ╭─ ▸ bash ──────────────────────────────────────────────────────╮
     lines.push(Line::from(vec![
-        Span::styled("▎", bar),
-        Span::styled("", card),
+        Span::styled("╭─ ", border),
+        Span::styled(format!("{icon} "), header_style),
+        Span::styled(
+            format!("{name} "),
+            Style::default()
+                .fg(bar_color)
+                .bg(t.card_bg())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(60), border),
     ]));
+
+    // ── Args section (command / path) ───────────────────────────────
+    if let Some(args) = detail_args {
+        match name {
+            "bash" => {
+                // Show command with $ prefix
+                for (i, line) in args.lines().take(4).enumerate() {
+                    let prefix = if i == 0 { "│ $ " } else { "│   " };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, border),
+                        Span::styled(line.to_string(), card_fg),
+                    ]));
+                }
+            }
+            "edit" => {
+                // Show file path with edit-specific formatting
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", border),
+                    Span::styled("▸ edit ", Style::default().fg(t.accent_muted()).bg(t.card_bg())),
+                    Span::styled(args.to_string(), card_dim),
+                ]));
+            }
+            _ => {
+                // Generic: show path or args
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", border),
+                    Span::styled(args.to_string(), card_dim),
+                ]));
+            }
+        }
+    }
+
+    // ── Result section (output on surface background) ───────────────
+    if let Some(result) = detail_result {
+        // Separator between args and result
+        if detail_args.is_some() {
+            lines.push(Line::from(vec![
+                Span::styled("├─", border),
+                Span::styled("─".repeat(60), Style::default().fg(t.border_dim()).bg(t.surface_bg())),
+            ]));
+        }
+
+        let result_lines: Vec<&str> = result.lines().collect();
+        let total = result_lines.len();
+        let show = total.min(12);
+        let style = if is_error { surface_err } else { surface };
+
+        for line in &result_lines[..show] {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(t.border_dim()).bg(t.surface_bg())),
+                Span::styled(line.to_string(), style),
+            ]));
+        }
+
+        if total > show {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(t.border_dim()).bg(t.surface_bg())),
+                Span::styled(
+                    format!("  … {total} lines total"),
+                    Style::default().fg(t.dim()).bg(t.surface_bg()),
+                ),
+            ]));
+        }
+    }
+
+    // ── Bottom border ───────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        format!("╰─{}─╯", "─".repeat(58)),
+        border,
+    )));
 
     lines
 }
