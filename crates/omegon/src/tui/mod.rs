@@ -106,6 +106,12 @@ pub struct App {
     dashboard_handles: dashboard::DashboardHandles,
     /// Turn counter for throttled dashboard refresh.
     dashboard_refresh_turn: u32,
+    /// Web dashboard server address (if running).
+    web_server_addr: Option<std::net::SocketAddr>,
+    /// AgentEvent broadcast sender — cloned to the web server for WS push.
+    events_tx: Option<broadcast::Sender<AgentEvent>>,
+    /// Channel for web commands → main loop.
+    web_command_tx: Option<tokio::sync::mpsc::Sender<crate::web::WebCommand>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -161,6 +167,9 @@ impl App {
             bus_commands: Vec::new(),
             dashboard_handles: dashboard::DashboardHandles::default(),
             dashboard_refresh_turn: 0,
+            web_server_addr: None,
+            events_tx: None,
+            web_command_tx: None,
         }
     }
 
@@ -516,6 +525,7 @@ impl App {
         ("memory",   "memory stats",                        &[]),
         ("chronos",  "date/time context",                      &["week", "month", "quarter", "relative", "iso", "epoch", "tz", "range", "all"]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
+        ("dash",     "toggle dashboard panel / open web UI",  &["open"]),
         ("splash",   "replay splash animation",              &[]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
@@ -674,6 +684,55 @@ impl App {
                 match crate::tools::chronos::execute(sub, None, None, None) {
                     Ok(text) => SlashResult::Display(text),
                     Err(e) => SlashResult::Display(format!("❌ {e}")),
+                }
+            }
+
+            "dash" => {
+                if args == "open" {
+                    // Start web server and open browser
+                    if let Some(addr) = self.web_server_addr {
+                        // Already running — just open browser
+                        let url = format!("http://{addr}");
+                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        SlashResult::Display(format!("Dashboard at {url}"))
+                    } else if let Some(events_tx) = self.events_tx.clone() {
+                        let handles = self.dashboard_handles.clone();
+                        let (web_cmd_tx, _web_cmd_rx) = tokio::sync::mpsc::channel(32);
+                        let web_state = crate::web::WebState {
+                            handles,
+                            events_tx,
+                            command_tx: web_cmd_tx.clone(),
+                        };
+                        self.web_command_tx = Some(web_cmd_tx);
+
+                        // Spawn the web server
+                        let addr_result = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(
+                                crate::web::start_server(web_state, 7842)
+                            )
+                        });
+
+                        match addr_result {
+                            Ok(addr) => {
+                                self.web_server_addr = Some(addr);
+                                let url = format!("http://{addr}");
+                                let _ = std::process::Command::new("open").arg(&url).spawn();
+                                SlashResult::Display(format!("Dashboard started at {url}"))
+                            }
+                            Err(e) => SlashResult::Display(format!("Failed to start dashboard: {e}")),
+                        }
+                    } else {
+                        SlashResult::Display("Web dashboard not available (no event channel)".into())
+                    }
+                } else {
+                    // Toggle dashboard panel visibility
+                    // For now just show/hide the dashboard
+                    if let Some(addr) = self.web_server_addr {
+                        let url = format!("http://{addr}");
+                        SlashResult::Display(format!("Dashboard running at {url}\nUse /dash open to open in browser"))
+                    } else {
+                        SlashResult::Display("Use /dash open to start the web dashboard".into())
+                    }
                 }
             }
 
@@ -926,6 +985,8 @@ pub struct TuiConfig {
     pub bus_commands: Vec<omegon_traits::CommandDefinition>,
     /// Shared handles for live dashboard updates during the session.
     pub dashboard_handles: dashboard::DashboardHandles,
+    /// AgentEvent broadcast sender — web server subscribes to this.
+    pub events_tx: broadcast::Sender<AgentEvent>,
 }
 
 /// Initial state snapshot gathered during setup, before the TUI event loop starts.
@@ -990,6 +1051,7 @@ pub async fn run_tui(
     app.footer_data.is_oauth = config.is_oauth;
     app.bus_commands = config.bus_commands;
     app.dashboard_handles = config.dashboard_handles;
+    app.events_tx = Some(config.events_tx);
     app.cancel = cancel;
 
     // Pre-populate from initial state so first frame isn't empty

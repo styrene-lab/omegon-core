@@ -32,6 +32,7 @@ pub mod settings;
 mod setup;
 mod tools;
 mod tui;
+mod web;
 
 use bridge::{LlmBridge, SubprocessBridge};
 use omegon_traits::AgentEvent;
@@ -446,6 +447,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         no_splash: cli.no_splash,
         bus_commands,
         dashboard_handles: agent.dashboard_handles.clone(),
+        events_tx: events_tx.clone(),
     };
     let tui_cancel = shared_cancel.clone();
     let tui_settings = shared_settings.clone();
