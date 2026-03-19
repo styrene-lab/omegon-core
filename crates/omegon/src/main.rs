@@ -444,6 +444,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         initial,
         no_splash: cli.no_splash,
         bus_commands,
+        dashboard_handles: agent.dashboard_handles.clone(),
     };
     let tui_cancel = shared_cancel.clone();
     let tui_settings = shared_settings.clone();

@@ -12,7 +12,55 @@ use crate::lifecycle::types::*;
 use super::theme::Theme;
 use super::widgets;
 
+use std::sync::{Arc, Mutex};
+
 use crate::features::cleave::CleaveProgress;
+use crate::lifecycle::context::LifecycleContextProvider;
+use crate::lifecycle::design;
+
+/// Shared handles to feature state, for live dashboard updates.
+#[derive(Clone, Default)]
+pub struct DashboardHandles {
+    pub lifecycle: Option<Arc<Mutex<LifecycleContextProvider>>>,
+    pub cleave: Option<Arc<Mutex<CleaveProgress>>>,
+}
+
+impl DashboardHandles {
+    /// Refresh dashboard state from the shared feature handles.
+    pub fn refresh_into(&self, state: &mut DashboardState) {
+        // Lifecycle
+        if let Some(ref lp_lock) = self.lifecycle
+            && let Ok(lp) = lp_lock.lock() {
+                state.focused_node = lp.focused_node_id().and_then(|id| {
+                    lp.get_node(id).map(|n| {
+                        let sections = design::read_node_sections(n);
+                        FocusedNodeSummary {
+                            id: n.id.clone(),
+                            title: n.title.clone(),
+                            status: n.status,
+                            open_questions: n.open_questions.len(),
+                            decisions: sections.map(|s| s.decisions.len()).unwrap_or(0),
+                        }
+                    })
+                });
+                state.active_changes = lp.changes().iter()
+                    .filter(|c| !matches!(c.stage, ChangeStage::Archived))
+                    .map(|c| ChangeSummary {
+                        name: c.name.clone(),
+                        stage: c.stage,
+                        done_tasks: c.done_tasks,
+                        total_tasks: c.total_tasks,
+                    })
+                    .collect();
+        }
+
+        // Cleave
+        if let Some(ref cp_lock) = self.cleave
+            && let Ok(cp) = cp_lock.lock() {
+                state.cleave = Some(cp.clone());
+        }
+    }
+}
 
 /// Dashboard state — updated from lifecycle scanning.
 #[derive(Default)]

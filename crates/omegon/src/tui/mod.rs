@@ -100,6 +100,10 @@ pub struct App {
     effects: effects::Effects,
     /// Command definitions from bus features.
     bus_commands: Vec<omegon_traits::CommandDefinition>,
+    /// Shared handles for live dashboard updates.
+    dashboard_handles: dashboard::DashboardHandles,
+    /// Turn counter for throttled dashboard refresh.
+    dashboard_refresh_turn: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +157,8 @@ impl App {
             replay_splash: false,
             effects: effects::Effects::new(),
             bus_commands: Vec::new(),
+            dashboard_handles: dashboard::DashboardHandles::default(),
+            dashboard_refresh_turn: 0,
         }
     }
 
@@ -294,6 +300,12 @@ impl App {
         // Update dashboard stats
         self.dashboard.turns = self.turn;
         self.dashboard.tool_calls = self.tool_calls;
+
+        // Refresh dashboard from shared feature handles (throttled)
+        if self.turn != self.dashboard_refresh_turn {
+            self.dashboard_refresh_turn = self.turn;
+            self.dashboard_handles.refresh_into(&mut self.dashboard);
+        }
 
         let area = frame.area();
 
@@ -865,6 +877,8 @@ pub struct TuiConfig {
     pub no_splash: bool,
     /// Command definitions from bus features — shown in command palette.
     pub bus_commands: Vec<omegon_traits::CommandDefinition>,
+    /// Shared handles for live dashboard updates during the session.
+    pub dashboard_handles: dashboard::DashboardHandles,
 }
 
 /// Initial state snapshot gathered during setup, before the TUI event loop starts.
@@ -925,6 +939,7 @@ pub async fn run_tui(
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
     app.bus_commands = config.bus_commands;
+    app.dashboard_handles = config.dashboard_handles;
     app.cancel = cancel;
 
     // Pre-populate from initial state so first frame isn't empty

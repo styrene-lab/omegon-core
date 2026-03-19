@@ -151,6 +151,11 @@ impl CleaveFeature {
         self.progress.lock().unwrap().clone()
     }
 
+    /// Get a shared handle to the progress for live dashboard updates.
+    pub fn shared_progress(&self) -> Arc<Mutex<CleaveProgress>> {
+        Arc::clone(&self.progress)
+    }
+
     fn execute_assess(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let directive = args["directive"].as_str()
             .ok_or_else(|| anyhow::anyhow!("directive required"))?;

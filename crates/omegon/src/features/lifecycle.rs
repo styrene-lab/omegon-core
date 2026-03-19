@@ -8,7 +8,7 @@
 //! - Event handling: refresh on TurnEnd
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -29,7 +29,7 @@ use crate::lifecycle::{design, spec, types::*};
 /// but mutations need `&mut`. The bus guarantees sequential delivery so
 /// this is safe in practice.
 pub struct LifecycleFeature {
-    provider: Mutex<LifecycleContextProvider>,
+    provider: Arc<Mutex<LifecycleContextProvider>>,
     repo_path: PathBuf,
     /// Counter for refresh throttling — only refresh every N turns.
     turn_counter: u32,
@@ -39,16 +39,20 @@ impl LifecycleFeature {
     pub fn new(repo_path: &std::path::Path) -> Self {
         let provider = LifecycleContextProvider::new(repo_path);
         Self {
-            provider: Mutex::new(provider),
+            provider: Arc::new(Mutex::new(provider)),
             repo_path: repo_path.to_path_buf(),
             turn_counter: 0,
         }
     }
 
-    /// Borrow the provider immutably for TUI dashboard state extraction.
-    /// Only call this before the Feature is boxed and registered.
+    /// Lock the provider for dashboard state extraction.
     pub fn provider(&self) -> std::sync::MutexGuard<'_, LifecycleContextProvider> {
         self.provider.lock().unwrap()
+    }
+
+    /// Get a shared handle to the provider for live dashboard updates.
+    pub fn shared_provider(&self) -> Arc<Mutex<LifecycleContextProvider>> {
+        Arc::clone(&self.provider)
     }
 
     // ── Tool dispatch ───────────────────────────────────────────────────

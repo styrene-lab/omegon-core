@@ -26,6 +26,8 @@ pub struct AgentSetup {
     pub cwd: PathBuf,
     /// Snapshot of lifecycle + memory state at startup for TUI pre-population.
     pub(crate) startup_snapshot: StartupSnapshot,
+    /// Shared handles for live dashboard updates.
+    pub dashboard_handles: crate::tui::dashboard::DashboardHandles,
 }
 
 /// Pre-computed state gathered during setup for TUI initial display.
@@ -170,10 +172,13 @@ impl AgentSetup {
         // ─── Lifecycle (design-tree + openspec) ──────────────────────────
         let lifecycle_feature = features::lifecycle::LifecycleFeature::new(&cwd);
         let lifecycle_snapshot = LifecycleSnapshot::from_lifecycle_feature(&lifecycle_feature);
+        let lifecycle_handle = lifecycle_feature.shared_provider();
         bus.register(Box::new(lifecycle_feature));
 
         // ─── Cleave (decomposition + dispatch) ─────────────────────────
-        bus.register(Box::new(features::cleave::CleaveFeature::new(&cwd)));
+        let cleave_feature = features::cleave::CleaveFeature::new(&cwd);
+        let cleave_handle = cleave_feature.shared_progress();
+        bus.register(Box::new(cleave_feature));
 
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));
@@ -228,6 +233,10 @@ impl AgentSetup {
             conversation,
             cwd,
             startup_snapshot,
+            dashboard_handles: crate::tui::dashboard::DashboardHandles {
+                lifecycle: Some(lifecycle_handle),
+                cleave: Some(cleave_handle),
+            },
         })
     }
 
