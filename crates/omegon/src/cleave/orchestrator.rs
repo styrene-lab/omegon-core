@@ -386,18 +386,23 @@ async fn dispatch_child(
         .context(format!("Failed to write prompt file for child '{label}'"))?;
 
     let max_turns_str = config.max_turns.to_string();
-    let args = [
+    // Don't pass --bridge by default — let children auto-detect native providers.
+    // Forcing --bridge bypasses native providers entirely, which breaks children
+    // when the bridge script path is relative or node_modules are missing.
+    let mut args = vec![
         "--prompt-file", prompt_file.to_str().unwrap(),
         "--cwd", cwd.to_str().unwrap(),
-        "--bridge", config.bridge_path.to_str().unwrap(),
-        "--node", config.node,
         "--model", config.model,
         "--max-turns", &max_turns_str,
     ];
+    if std::env::var("OMEGON_FORCE_BRIDGE").is_ok() {
+        args.extend(["--bridge", config.bridge_path.to_str().unwrap()]);
+        args.extend(["--node", config.node]);
+    }
     tracing::info!(child = %label, args = ?args, "spawn args");
 
     let mut child = Command::new(config.agent_binary)
-        .args(args)
+        .args(&args)
         .env("OMEGON_CHILD", "1") // Signal child mode — read-only memory, no session save
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
