@@ -2,10 +2,11 @@
 
 All notable changes to Omegon are documented here.
 
-## [Unreleased]
+## [0.13.0] — 2026-03-19
 
 ### Added
 
+- **release**: versioning system — cargo-release, git-cliff, --version flag
 - **site**: add BSL 1.1 license link and date range to footer
 - **site**: replace text logo with hydra icon SVG
 - **site**: Alpharius colors (blue omega, green hydras), scanlines, Tomorrow font
@@ -73,6 +74,7 @@ All notable changes to Omegon are documented here.
 - **site**: dark-bg icon SVG, remove baked text, drop CSS filter hack
 - **site**: inline SVG icon, remove redundant title text
 - **site**: actually inline the recolored SVG into index.html
+- **stream**: add idle timeouts to prevent indefinite hangs on stalled LLM streams
 - model selector only shows authenticated providers
 - address all critical + warning findings from adversarial review
 - SQLite contention during cleave — busy_timeout + child read-only mode
