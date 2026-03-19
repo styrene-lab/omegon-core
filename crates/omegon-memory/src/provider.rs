@@ -198,6 +198,25 @@ fn tool_defs() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "memory_ingest_lifecycle".into(),
+            label: "memory_ingest_lifecycle".into(),
+            description: "Internal tool for lifecycle candidate ingestion. Used by design-tree, openspec, and cleave extensions.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["source_kind", "authority", "section", "content"],
+                "properties": {
+                    "source_kind": { "type": "string" },
+                    "authority": { "type": "string", "enum": ["explicit", "inferred"] },
+                    "section": { "type": "string" },
+                    "content": { "type": "string" },
+                    "supersedes": { "type": "string" },
+                    "artifact_ref_type": { "type": "string" },
+                    "artifact_ref_path": { "type": "string" },
+                    "artifact_ref_sub": { "type": "string" }
+                }
+            }),
+        },
+        ToolDefinition {
             name: "memory_search_archive".into(),
             label: "memory_search_archive".into(),
             description: "Search archived project memories from previous months.".into(),
@@ -433,6 +452,33 @@ impl<B: MemoryBackend + 'static, R: ContextRenderer + 'static> ToolProvider for 
                     details: serde_json::json!({ "action": "compact_requested" }),
                 })
             }
+            "memory_ingest_lifecycle" => {
+                // Lifecycle fact ingestion — stores with source metadata
+                let content = args["content"].as_str().unwrap_or("").to_string();
+                let section_str = args["section"].as_str().unwrap_or("Architecture");
+                let section: Section = serde_json::from_value(Value::String(section_str.into()))
+                    .unwrap_or(Section::Architecture);
+                let authority = args["authority"].as_str().unwrap_or("inferred");
+                let source_kind = args["source_kind"].as_str().unwrap_or("unknown");
+
+                let result = self.backend.store_fact(StoreFact {
+                    mind: self.mind.clone(),
+                    content: content.clone(),
+                    section,
+                    decay_profile: DecayProfileName::Standard,
+                    source: Some(format!("lifecycle:{source_kind}")),
+                }).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                let msg = match result.action {
+                    StoreAction::Stored => format!("Ingested ({authority}/{source_kind}): {}", content.chars().take(80).collect::<String>()),
+                    StoreAction::Reinforced => format!("Reinforced lifecycle fact"),
+                    StoreAction::Deduplicated => "Duplicate lifecycle fact — already exists".to_string(),
+                };
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text { text: msg }],
+                    details: serde_json::json!({ "action": format!("{:?}", result.action), "id": result.fact.id }),
+                })
+            }
             "memory_search_archive" => {
                 let query = args["query"].as_str().unwrap_or("").to_string();
                 // Search archived facts using FTS
@@ -537,12 +583,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_provider_exposes_11_tools() {
+    async fn tool_provider_exposes_12_tools() {
         let provider = MemoryProvider::new(
             InMemoryBackend::new(), NoopRenderer, "test".into()
         );
         let tools = provider.tools();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));

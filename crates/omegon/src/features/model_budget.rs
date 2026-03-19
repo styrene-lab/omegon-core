@@ -174,6 +174,25 @@ impl Feature for ModelBudget {
                 }),
             },
             ToolDefinition {
+                name: "switch_to_offline_driver".into(),
+                label: "switch_to_offline_driver".into(),
+                description: "Switch from cloud to a local offline model (Ollama). Use when detecting connectivity issues, API errors, or when offline mode is requested.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Why switching to offline mode"
+                        },
+                        "preferred_model": {
+                            "type": "string",
+                            "description": "Optional specific model ID. Omit to auto-select."
+                        }
+                    },
+                    "required": ["reason"]
+                }),
+            },
+            ToolDefinition {
                 name: "set_thinking_level".into(),
                 label: "set_thinking_level".into(),
                 description: "Adjust the extended thinking budget. Higher = more reasoning tokens, slower. Use 'high' for complex problems, 'low' for speed.".into(),
@@ -213,6 +232,18 @@ impl Feature for ModelBudget {
                 Ok(ToolResult {
                     content: vec![ContentBlock::Text { text: msg }],
                     details: json!({"tier": tier_str, "model": tier.resolve_model(&self.current_provider(), "")}),
+                })
+            }
+            "switch_to_offline_driver" => {
+                let reason = args["reason"].as_str().unwrap_or("User requested offline mode");
+                let preferred = args["preferred_model"].as_str();
+                let model = preferred.unwrap_or("auto");
+                let msg = self.switch_tier(ModelTier::Local, reason);
+                Ok(ToolResult {
+                    content: vec![ContentBlock::Text {
+                        text: format!("{msg}\nModel preference: {model}. Local inference via Ollama.")
+                    }],
+                    details: json!({"tier": "local", "preferred_model": model, "reason": reason}),
                 })
             }
             "set_thinking_level" => {

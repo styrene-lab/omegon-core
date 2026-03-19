@@ -209,6 +209,10 @@ impl AgentSetup {
             bus.register(Box::new(features::model_budget::ModelBudget::new(settings.clone())));
         }
 
+        // ─── Tool management ─────────────────────────────────────────────
+        let manage_tools = features::manage_tools::ManageTools::new();
+        bus.register(Box::new(manage_tools));
+
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));
         bus.register(Box::new(features::terminal_title::TerminalTitle::new(

@@ -23,6 +23,7 @@ pub mod auto_compact;
 pub mod cleave;
 pub mod adapter;
 pub mod lifecycle;
+pub mod manage_tools;
 pub mod model_budget;
 pub mod session_log;
 pub mod terminal_title;
