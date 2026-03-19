@@ -45,11 +45,15 @@
     text-align: center;
   }
   .hero-logo {
+    display: flex; align-items: center; justify-content: center; gap: 16px;
     font-size: 48px; font-weight: 700; letter-spacing: -1px;
-    color: var(--accent);
+    color: var(--fg);
     font-family: 'SF Mono', 'Fira Code', monospace;
   }
-  .hero-logo span { color: var(--fg); }
+  .hero-logo img {
+    width: 72px; height: 72px;
+    filter: invert(1) brightness(0.85) sepia(1) hue-rotate(150deg) saturate(0.4);
+  }
   .hero-sub {
     color: var(--muted); font-size: 17px; margin-top: 12px;
     max-width: 480px; margin-left: auto; margin-right: auto;
@@ -163,7 +167,7 @@
 <div class="container">
 
   <div class="hero">
-    <div class="hero-logo">Ω <span>omegon</span></div>
+    <div class="hero-logo"><img src="/icon.svg" alt="Omegon"> omegon</div>
     <p class="hero-sub">
       Native AI agent harness. Single binary, zero dependencies.
       Anthropic &amp; OpenAI. Terminal UI with design tree, lifecycle
