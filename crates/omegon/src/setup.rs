@@ -201,6 +201,12 @@ impl AgentSetup {
             env!("CARGO_PKG_VERSION"),
         )));
 
+        // ─── External plugins (TOML manifests) ────────────────────────
+        let plugins = crate::plugins::discover_plugins(&cwd);
+        for plugin in plugins {
+            bus.register(plugin);
+        }
+
         // ─── Finalize bus (caches tool/command definitions) ─────────────
         bus.finalize();
 

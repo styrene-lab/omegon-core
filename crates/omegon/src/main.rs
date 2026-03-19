@@ -30,6 +30,7 @@ mod providers;
 mod session;
 pub mod settings;
 mod setup;
+mod plugins;
 mod tools;
 mod tui;
 mod web;
