@@ -1201,6 +1201,8 @@ pub async fn run_tui(
                 Event::Mouse(mouse) => {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
+                            // Terminal sends ScrollUp = show older content
+                            // (natural scrolling is handled by the terminal emulator)
                             app.conversation.scroll_up(3);
                         }
                         MouseEventKind::ScrollDown => {
@@ -1468,8 +1470,8 @@ pub async fn run_tui(
             app.handle_agent_event(agent_event);
         }
 
-        // Drain queued prompt after agent finishes
-        if !app.agent_active && app.queued_prompt.is_some() {
+        // Drain queued prompt after agent finishes (but not if quitting)
+        if !app.agent_active && !app.should_quit && app.queued_prompt.is_some() {
             let text = app.queued_prompt.take().unwrap();
             app.conversation.push_user(&text);
             app.history.push(text.clone());

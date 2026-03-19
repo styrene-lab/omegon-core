@@ -853,3 +853,31 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_agent_error_extracts_message() {
+        let raw = r#"Anthropic 400 Bad Request: {"type":"error","error":{"type":"invalid_request_error","message":"Input should be a valid dictionary"}}"#;
+        let e = anyhow::anyhow!("{raw}");
+        let result = format_agent_error(&e);
+        assert!(result.contains("Input should be a valid dictionary"), "got: {result}");
+    }
+
+    #[test]
+    fn format_agent_error_truncates_long() {
+        let long = "x".repeat(500);
+        let e = anyhow::anyhow!("{long}");
+        let result = format_agent_error(&e);
+        assert!(result.len() < 200, "should truncate, got len {}", result.len());
+    }
+
+    #[test]
+    fn format_agent_error_extracts_status() {
+        let e = anyhow::anyhow!("status=429 Too Many Requests blah blah");
+        let result = format_agent_error(&e);
+        assert!(result.contains("status=429"), "got: {result}");
+    }
+}

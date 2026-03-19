@@ -850,4 +850,23 @@ mod tests {
         assert!(input.is_object(), "input should be object, got: {input}");
         assert_eq!(input, &json!({}));
     }
+
+    #[test]
+    fn error_message_extraction_from_api_json() {
+        // Simulate what happens when Anthropic returns a 400 error
+        let raw_body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.1.tool_use.input: Input should be a valid dictionary"},"request_id":"req_abc123"}"#;
+        let user_msg = serde_json::from_str::<Value>(raw_body).ok()
+            .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| raw_body.chars().take(200).collect());
+        assert_eq!(user_msg, "messages.1.content.1.tool_use.input: Input should be a valid dictionary");
+    }
+
+    #[test]
+    fn error_message_fallback_on_non_json() {
+        let raw_body = "Service Unavailable";
+        let user_msg = serde_json::from_str::<Value>(raw_body).ok()
+            .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| raw_body.chars().take(200).collect());
+        assert_eq!(user_msg, "Service Unavailable");
+    }
 }

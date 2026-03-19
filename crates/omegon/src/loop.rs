@@ -119,7 +119,9 @@ pub async fn run(
         // If context is getting large, try LLM-driven compaction.
         // The context_window default is 200k tokens (Anthropic models).
         // Trigger at 75% utilization.
-        let context_window = 200_000;
+        let context_window = config.settings.as_ref()
+            .and_then(|s| s.lock().ok().map(|g| g.context_window))
+            .unwrap_or(200_000);
         if conversation.needs_compaction(context_window, 0.75)
             && let Some((payload, evict_count)) = conversation.build_compaction_payload() {
                 tracing::info!(
@@ -438,6 +440,11 @@ async fn stream_with_retry(
                     delay_ms = delay,
                     "Transient LLM error, retrying: {err_msg}"
                 );
+                // Notify the TUI so the user knows why it's paused
+                let short_err = if err_msg.len() > 80 { &err_msg[..80] } else { &err_msg };
+                let _ = events.send(AgentEvent::SystemNotification {
+                    message: format!("⟳ Retrying ({attempt}/{})… {short_err}", config.max_retries),
+                });
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 delay = (delay * 2).min(30_000); // exponential backoff, cap at 30s
             }
@@ -1055,6 +1062,8 @@ mod tests {
         // Should NOT match: permanent errors
         assert!(!is_transient_error("Invalid API key"));
         assert!(!is_transient_error("Model not found"));
+        assert!(!is_transient_error("400 Bad Request: Input should be a valid dictionary"));
+        assert!(!is_transient_error("401 Unauthorized"));
 
         // Should NOT match: status codes embedded in non-error contexts
         assert!(!is_transient_error("model gpt-500 not found"));
