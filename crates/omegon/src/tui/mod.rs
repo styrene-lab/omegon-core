@@ -686,6 +686,36 @@ impl App {
         }
     }
 
+    /// Load editor history from disk.
+    fn load_history(cwd: &str) -> Vec<String> {
+        let path = history_path(cwd);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Save editor history to disk.
+    fn save_history(&self) {
+        let path = history_path(&self.footer_data.cwd);
+        if self.history.is_empty() {
+            return;
+        }
+        // Keep last 500 entries
+        let start = self.history.len().saturating_sub(500);
+        let content = self.history[start..].join("\n");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, content) {
+            tracing::debug!("Failed to save history: {e}");
+        }
+    }
+
     fn history_up(&mut self) {
         if self.history.is_empty() {
             return;
@@ -829,6 +859,12 @@ pub struct TuiInitialState {
     pub active_changes: Vec<dashboard::ChangeSummary>,
 }
 
+/// Path to the editor history file — persists across sessions.
+fn history_path(cwd: &str) -> std::path::PathBuf {
+    let project_root = crate::setup::find_project_root(std::path::Path::new(cwd));
+    project_root.join(".omegon").join("history")
+}
+
 fn sel_opt(value: &str, label: &str, desc: &str, current: &str) -> selector::SelectOption {
     selector::SelectOption {
         value: value.to_string(),
@@ -868,6 +904,7 @@ pub async fn run_tui(
         .unwrap_or(42));
 
     let mut app = App::new(settings);
+    app.history = App::load_history(&config.cwd);
     app.footer_data.cwd = config.cwd;
     app.footer_data.is_oauth = config.is_oauth;
     app.bus_commands = config.bus_commands;
@@ -1261,6 +1298,9 @@ pub async fn run_tui(
             break;
         }
     }
+
+    // Save history before restoring terminal
+    app.save_history();
 
     // Restore terminal
     io::stdout().execute(DisableMouseCapture)?;
