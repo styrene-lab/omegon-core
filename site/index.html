@@ -144,8 +144,7 @@
     display: flex; align-items: center; gap: 10px;
     font-size: 13px;
   }
-  .platform-icon { font-size: 18px; }
-  .platform-name { color: var(--fg); }
+  .platform-name { color: var(--fg); font-weight: 600; }
   .platform-arch { color: var(--dim); font-size: 11px; font-family: 'SF Mono', monospace; }
 
   /* Footer */
@@ -187,12 +186,12 @@
 
   <div class="features">
     <div class="feature">
-      <div class="feature-icon">⚡</div>
+      <div class="feature-icon">▪</div>
       <h3>Single Binary</h3>
       <p>12MB native binary. No Node.js, no npm, no Python. Just download and run.</p>
     </div>
     <div class="feature">
-      <div class="feature-icon">🔐</div>
+      <div class="feature-icon">◉</div>
       <h3>OAuth Login</h3>
       <p>Works with your Claude Pro/Max subscription via OAuth. Or use API keys directly.</p>
     </div>
@@ -207,12 +206,12 @@
       <p>Cleave tasks into parallel git worktree children. Automatic merge and conflict detection.</p>
     </div>
     <div class="feature">
-      <div class="feature-icon">📊</div>
+      <div class="feature-icon">◐</div>
       <h3>Live Dashboard</h3>
       <p>Terminal panel + web dashboard. Force-directed design tree graph. Real-time WebSocket protocol.</p>
     </div>
     <div class="feature">
-      <div class="feature-icon">🧠</div>
+      <div class="feature-icon">◎</div>
       <h3>Project Memory</h3>
       <p>Persistent facts across sessions. Semantic recall. Architecture, decisions, constraints tracked automatically.</p>
     </div>
@@ -222,22 +221,18 @@
     <h2>Platforms</h2>
     <div class="platform-grid">
       <div class="platform">
-        <span class="platform-icon">🍎</span>
         <span class="platform-name">macOS</span>
         <span class="platform-arch">arm64 (Apple Silicon)</span>
       </div>
       <div class="platform">
-        <span class="platform-icon">🍎</span>
         <span class="platform-name">macOS</span>
         <span class="platform-arch">x86_64 (Intel)</span>
       </div>
       <div class="platform">
-        <span class="platform-icon">🐧</span>
         <span class="platform-name">Linux</span>
         <span class="platform-arch">x86_64</span>
       </div>
       <div class="platform">
-        <span class="platform-icon">🐧</span>
         <span class="platform-name">Linux</span>
         <span class="platform-arch">arm64 / aarch64</span>
       </div>
