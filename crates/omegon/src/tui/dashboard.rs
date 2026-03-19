@@ -165,10 +165,16 @@ impl DashboardState {
     }
 
     pub fn render_themed(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
+        // Clear the dashboard area first — ratatui uses diff-based rendering,
+        // so stale conversation text from a previous frame (before the dashboard
+        // appeared) would bleed through any cells the dashboard doesn't overwrite.
+        frame.render_widget(ratatui::widgets::Clear, area);
+
         let block = Block::default()
             .borders(Borders::LEFT)
             .border_style(Style::default().fg(t.border_dim()))
-            .title(Span::styled(" Ω Dashboard ", Style::default().fg(t.accent()).add_modifier(Modifier::BOLD)));
+            .title(Span::styled(" Ω Dashboard ", Style::default().fg(t.accent()).add_modifier(Modifier::BOLD)))
+            .style(Style::default().bg(t.bg()));
 
         let inner_w = area.width.saturating_sub(3) as usize; // left border + padding
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -226,23 +232,6 @@ impl DashboardState {
                     seg(c.implemented, "█", t.dim()),
                 ]));
             }
-            lines.push(Line::from(""));
-        }
-
-        // ─── Context Gauge ──────────────────────────────────────
-        if self.context_window_k > 0 {
-            let gauge_w = inner_w.saturating_sub(14).min(16);
-            let mut gauge_line: Vec<Span<'static>> = Vec::new();
-            gauge_line.extend(widgets::gauge_bar(&widgets::GaugeConfig {
-                percent: self.context_used_pct,
-                bar_width: gauge_w,
-                memory_blocks: 0,
-            }, t));
-            gauge_line.push(Span::styled(
-                format!(" {:.0}%/{}", self.context_used_pct, format_k(self.context_window_k)),
-                Style::default().fg(t.dim()),
-            ));
-            lines.push(Line::from(gauge_line));
             lines.push(Line::from(""));
         }
 
@@ -588,22 +577,6 @@ mod tests {
 
         let text = buf_text(&terminal);
         assert!(text.contains("rust-tui"), "should show implementing node: {text}");
-    }
-
-    #[test]
-    fn dashboard_with_context_gauge() {
-        let mut state = DashboardState::default();
-        state.status_counts.total = 1;
-        state.context_used_pct = 43.0;
-        state.context_window_k = 200_000;
-        let backend = TestBackend::new(36, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| {
-            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
-        }).unwrap();
-
-        let text = buf_text(&terminal);
-        assert!(text.contains("43%"), "should show context pct: {text}");
     }
 
     #[test]

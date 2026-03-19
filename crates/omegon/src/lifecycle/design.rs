@@ -904,13 +904,13 @@ mod integration_tests {
             .join("docs");
 
         if !docs_dir.exists() {
-            eprintln!("Skipping: docs/ not found at {}", docs_dir.display());
+            tracing::debug!("Skipping: docs/ not found at {}", docs_dir.display());
             return;
         }
 
         let nodes = scan_design_docs(&docs_dir);
         if nodes.is_empty() {
-            eprintln!("Skipping: no design nodes found in {}", docs_dir.display());
+            tracing::debug!("Skipping: no design nodes found in {}", docs_dir.display());
             return;
         }
 
@@ -934,7 +934,7 @@ mod integration_tests {
             assert!(!sections.decisions.is_empty(), "rust-lifecycle-crates should have decisions");
         }
 
-        eprintln!("Scanned {} design nodes from {}", nodes.len(), docs_dir.display());
+        tracing::debug!("Scanned {} design nodes from {}", nodes.len(), docs_dir.display());
     }
 }
 

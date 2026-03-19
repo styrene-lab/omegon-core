@@ -604,16 +604,16 @@ mod integration_tests {
             .parent().unwrap();
 
         let changes = list_changes(repo_path);
-        eprintln!("Found {} active OpenSpec changes", changes.len());
+        tracing::debug!("Found {} active OpenSpec changes", changes.len());
 
         // Verify baseline specs can be parsed
         let baseline_dir = repo_path.join("openspec/baseline");
         if baseline_dir.is_dir() {
             let specs = parse_specs_dir(&baseline_dir);
-            eprintln!("Parsed {} baseline spec files", specs.len());
+            tracing::debug!("Parsed {} baseline spec files", specs.len());
             for spec in &specs {
                 let scenario_count: usize = spec.requirements.iter().map(|r| r.scenarios.len()).sum();
-                eprintln!("  {}: {} requirements, {} scenarios", spec.domain, spec.requirements.len(), scenario_count);
+                tracing::debug!("  {}: {} requirements, {} scenarios", spec.domain, spec.requirements.len(), scenario_count);
                 assert!(!spec.requirements.is_empty() || scenario_count == 0,
                     "Spec {} should have requirements if it has scenarios", spec.domain);
             }

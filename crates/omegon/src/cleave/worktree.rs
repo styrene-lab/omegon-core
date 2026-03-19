@@ -155,7 +155,7 @@ mod tests {
         // Integration test — only runs if we're in a git repo
         let repo = std::env::current_dir().unwrap();
         if !repo.join(".git").exists() && !repo.join("../.git").exists() {
-            eprintln!("Skipping: not in a git repo");
+            tracing::debug!("Skipping: not in a git repo");
             return;
         }
 
