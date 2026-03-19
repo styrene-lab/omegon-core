@@ -19,6 +19,7 @@
     --success: #22c55e;
     --error: #ef4444;
     --warning: #f59e0b;
+    --caution: #8b5cf6;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -28,16 +29,30 @@
     font-size: 13px;
     line-height: 1.5;
   }
-  .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 16px; }
   header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 0; border-bottom: 1px solid var(--border-dim);
     margin-bottom: 16px;
   }
   header h1 { font-size: 16px; color: var(--accent); font-weight: 600; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .status-dot.connected { background: var(--success); }
   .status-dot.disconnected { background: var(--error); }
+
+  /* Tab bar */
+  .tab-bar { display: flex; gap: 2px; margin-bottom: 16px; }
+  .tab {
+    padding: 6px 16px; border-radius: 6px 6px 0 0; cursor: pointer;
+    background: var(--card-bg); color: var(--dim); border: 1px solid var(--border-dim);
+    border-bottom: none; font-family: inherit; font-size: 12px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { background: var(--surface-bg); color: var(--accent); border-color: var(--border); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
@@ -62,6 +77,10 @@
   .count-badge.success { color: var(--success); }
   .count-badge.warning { color: var(--warning); }
   .count-badge.error { color: var(--error); }
+
+  /* Pipeline funnel */
+  .funnel { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 8px 0; }
+  .funnel-seg { min-width: 2px; }
 
   .node-list { list-style: none; }
   .node-list li {
@@ -94,6 +113,50 @@
   .child-list li { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
 
   .empty { color: var(--dim); font-style: italic; padding: 8px 0; }
+
+  /* Graph view */
+  #graph-container {
+    background: var(--card-bg);
+    border: 1px solid var(--border-dim);
+    border-radius: 8px;
+    position: relative;
+    overflow: hidden;
+  }
+  #graph-canvas {
+    width: 100%; height: 600px; display: block;
+  }
+  #node-detail {
+    position: absolute; top: 12px; right: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px;
+    min-width: 240px; max-width: 320px;
+    display: none; font-size: 12px;
+  }
+  #node-detail.visible { display: block; }
+  #node-detail h3 { color: var(--accent); font-size: 13px; margin-bottom: 4px; }
+  #node-detail .nd-status { text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+  #node-detail .nd-meta { color: var(--dim); margin-top: 4px; }
+  #node-detail .nd-deps { margin-top: 6px; }
+  #node-detail .nd-close {
+    position: absolute; top: 8px; right: 10px; cursor: pointer;
+    color: var(--dim); font-size: 14px;
+  }
+  #node-detail .nd-close:hover { color: var(--fg); }
+
+  /* Graph legend */
+  .graph-legend {
+    position: absolute; bottom: 12px; left: 12px;
+    display: flex; gap: 12px; font-size: 11px; color: var(--dim);
+  }
+  .graph-legend span::before {
+    content: ''; display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 4px; vertical-align: middle;
+  }
+  .legend-exploring::before { background: var(--accent); }
+  .legend-decided::before { background: var(--success); }
+  .legend-implementing::before { background: var(--warning); }
+  .legend-implemented::before { background: var(--dim); }
+  .legend-blocked::before { background: var(--error); }
 
   #conversation {
     margin-top: 16px;
@@ -132,49 +195,74 @@
 <div class="container">
   <header>
     <h1>Ω Omegon Dashboard</h1>
-    <div>
+    <div class="header-right">
       <span class="status-dot" id="ws-status"></span>
       <span id="ws-label" style="color: var(--dim); font-size: 12px; margin-left: 4px;">connecting…</span>
     </div>
   </header>
 
-  <div class="grid">
-    <!-- Design Tree -->
-    <div class="card">
-      <h2>◈ Design Tree</h2>
-      <div class="count-row" id="design-counts"></div>
-      <div id="design-focused"></div>
-      <ul class="node-list" id="design-nodes"></ul>
-    </div>
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <button class="tab active" onclick="switchTab('overview')">Overview</button>
+    <button class="tab" onclick="switchTab('graph')">Graph</button>
+  </div>
 
-    <!-- OpenSpec -->
-    <div class="card">
-      <h2>◎ Implementation</h2>
-      <div id="openspec-summary"></div>
-      <ul class="change-list" id="openspec-changes"></ul>
-    </div>
+  <!-- Overview tab (existing dashboard) -->
+  <div class="tab-content active" id="tab-overview">
+    <div class="grid">
+      <div class="card">
+        <h2>◈ Design Tree</h2>
+        <div class="count-row" id="design-counts"></div>
+        <div class="funnel" id="design-funnel"></div>
+        <div id="design-focused"></div>
+        <ul class="node-list" id="design-nodes"></ul>
+      </div>
 
-    <!-- Cleave -->
-    <div class="card" id="cleave-card" style="display:none;">
-      <h2>⚡ Cleave</h2>
-      <div id="cleave-summary"></div>
-      <ul class="child-list" id="cleave-children"></ul>
-    </div>
+      <div class="card">
+        <h2>◎ Implementation</h2>
+        <div id="openspec-summary"></div>
+        <ul class="change-list" id="openspec-changes"></ul>
+      </div>
 
-    <!-- Session -->
-    <div class="card">
-      <h2>⊙ Session</h2>
-      <div id="session-info"></div>
+      <div class="card" id="cleave-card" style="display:none;">
+        <h2>⚡ Cleave</h2>
+        <div id="cleave-summary"></div>
+        <ul class="child-list" id="cleave-children"></ul>
+      </div>
+
+      <div class="card">
+        <h2>⊙ Session</h2>
+        <div id="session-info"></div>
+      </div>
     </div>
   </div>
 
-  <!-- Live conversation stream -->
+  <!-- Graph tab -->
+  <div class="tab-content" id="tab-graph">
+    <div id="graph-container">
+      <canvas id="graph-canvas"></canvas>
+      <div id="node-detail">
+        <span class="nd-close" onclick="closeDetail()">✕</span>
+        <h3 id="nd-title"></h3>
+        <div class="nd-status" id="nd-status"></div>
+        <div class="nd-meta" id="nd-meta"></div>
+        <div class="nd-deps" id="nd-deps"></div>
+      </div>
+      <div class="graph-legend">
+        <span class="legend-exploring">exploring</span>
+        <span class="legend-decided">decided</span>
+        <span class="legend-implementing">implementing</span>
+        <span class="legend-implemented">implemented</span>
+        <span class="legend-blocked">blocked</span>
+      </div>
+    </div>
+  </div>
+
   <div id="conversation">
     <h2>◌ Conversation</h2>
     <div id="conv-messages"><div class="empty">Waiting for agent activity…</div></div>
   </div>
 
-  <!-- Prompt bar -->
   <div id="prompt-bar">
     <input type="text" id="prompt-input" placeholder="Send a message to the agent…" />
     <button onclick="sendPrompt()">Send</button>
@@ -185,6 +273,15 @@
 // ── Auth token from URL ──────────────────────────────────────────
 const params = new URLSearchParams(location.search);
 const AUTH_TOKEN = params.get('token') || '';
+
+// ── Tab switching ────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelector(`.tab[onclick*="${name}"]`).classList.add('active');
+  if (name === 'graph' && !graphLoaded) loadGraph();
+}
 
 // ── WebSocket connection with auto-reconnect ─────────────────────
 let ws = null;
@@ -228,7 +325,6 @@ function handleEvent(event) {
       appendToLastMessage('assistant', event.text);
       break;
     case 'thinking_chunk':
-      // Don't render thinking in web UI (too noisy)
       break;
     case 'message_end':
       break;
@@ -257,7 +353,6 @@ function handleEvent(event) {
       break;
     case 'decomposition_completed':
       addMessage('system', `⚡ Cleave ${event.merged ? 'merged' : 'completed'}`);
-      // Refresh state after cleave
       fetch('/api/state').then(r => r.json()).then(d => { state = d; renderAll(); });
       break;
     default:
@@ -290,7 +385,12 @@ const STATUS_ICONS = {
 const STATUS_COLORS = {
   seed: 'var(--muted)', exploring: 'var(--accent)', resolved: 'var(--success)',
   decided: 'var(--success)', implementing: 'var(--warning)',
-  implemented: 'var(--success)', blocked: 'var(--error)', deferred: 'var(--dim)'
+  implemented: 'var(--dim)', blocked: 'var(--error)', deferred: 'var(--caution)'
+};
+const STATUS_HEX = {
+  seed: '#607888', exploring: '#2ab4c8', resolved: '#22c55e',
+  decided: '#22c55e', implementing: '#f59e0b',
+  implemented: '#405870', blocked: '#ef4444', deferred: '#8b5cf6'
 };
 const STAGE_ICONS = {
   proposed: '◌', specified: '◐', planned: '▸',
@@ -309,7 +409,6 @@ function renderDesign() {
   const d = state.design;
   const counts = d.counts;
 
-  // Count badges
   const badges = [];
   if (counts.implementing > 0) badges.push(`<span class="count-badge warning">${counts.implementing} implementing</span>`);
   if (counts.decided > 0) badges.push(`<span class="count-badge success">${counts.decided} decided</span>`);
@@ -318,6 +417,19 @@ function renderDesign() {
   if (counts.implemented > 0) badges.push(`<span class="count-badge">${counts.implemented} done</span>`);
   if (counts.open_questions > 0) badges.push(`<span class="count-badge">${counts.open_questions}?</span>`);
   document.getElementById('design-counts').innerHTML = badges.join('') || `<span class="count-badge">${counts.total} nodes</span>`;
+
+  // Pipeline funnel
+  const total = counts.total || 1;
+  const funnelEl = document.getElementById('design-funnel');
+  const segs = [
+    { count: counts.exploring + (counts.seed || 0), color: 'var(--accent)' },
+    { count: (counts.resolved || 0) + counts.decided, color: 'var(--success)' },
+    { count: counts.implementing, color: 'var(--warning)' },
+    { count: counts.implemented, color: 'var(--dim)' },
+  ].filter(s => s.count > 0);
+  funnelEl.innerHTML = segs.map(s =>
+    `<div class="funnel-seg" style="flex: ${s.count}; background: ${s.color}"></div>`
+  ).join('');
 
   // Focused node
   let focusedHtml = '';
@@ -451,12 +563,285 @@ document.getElementById('prompt-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendPrompt();
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── Force-directed graph (vanilla canvas) ────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+let graphLoaded = false;
+let graphNodes = [];
+let graphLinks = [];
+let graphSim = null;
+let selectedNode = null;
+
+// Camera state for pan/zoom
+let camX = 0, camY = 0, camZoom = 1;
+let isDragging = false, dragStartX = 0, dragStartY = 0;
+let dragNode = null;
+
+async function loadGraph() {
+  graphLoaded = true;
+  const res = await fetch('/api/graph');
+  const data = await res.json();
+
+  // Initialize node positions (random in a circle)
+  const cx = 400, cy = 300, r = 250;
+  data.nodes.forEach((n, i) => {
+    const angle = (i / data.nodes.length) * Math.PI * 2;
+    n.x = cx + Math.cos(angle) * r * (0.5 + Math.random() * 0.5);
+    n.y = cy + Math.sin(angle) * r * (0.5 + Math.random() * 0.5);
+    n.vx = 0; n.vy = 0;
+  });
+
+  // Build index for link lookup
+  const nodeMap = {};
+  data.nodes.forEach(n => nodeMap[n.id] = n);
+  data.links.forEach(l => {
+    l.sourceNode = nodeMap[l.source];
+    l.targetNode = nodeMap[l.target];
+  });
+  // Remove links with missing nodes
+  data.links = data.links.filter(l => l.sourceNode && l.targetNode);
+
+  graphNodes = data.nodes;
+  graphLinks = data.links;
+
+  const canvas = document.getElementById('graph-canvas');
+  const container = document.getElementById('graph-container');
+  canvas.width = container.clientWidth * devicePixelRatio;
+  canvas.height = 600 * devicePixelRatio;
+  canvas.style.height = '600px';
+
+  // Initial camera to center the graph
+  camX = canvas.width / devicePixelRatio / 2 - cx;
+  camY = canvas.height / devicePixelRatio / 2 - cy;
+  camZoom = Math.min(canvas.width / devicePixelRatio / 900, 1);
+
+  setupGraphEvents(canvas);
+  runSimulation(canvas);
+}
+
+function setupGraphEvents(canvas) {
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(0.2, Math.min(3, camZoom * delta));
+    // Zoom toward mouse position
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    camX = mx - (mx - camX) * (newZoom / camZoom);
+    camY = my - (my - camY) * (newZoom / camZoom);
+    camZoom = newZoom;
+  }, { passive: false });
+
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left - camX) / camZoom;
+    const my = (e.clientY - rect.top - camY) / camZoom;
+
+    // Check if clicking on a node
+    for (const n of graphNodes) {
+      const dx = n.x - mx, dy = n.y - my;
+      const r = nodeRadius(n);
+      if (dx*dx + dy*dy < (r+4)*(r+4)) {
+        dragNode = n;
+        showDetail(n);
+        break;
+      }
+    }
+
+    if (!dragNode) {
+      isDragging = true;
+      dragStartX = e.clientX - camX;
+      dragStartY = e.clientY - camY;
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (isDragging) {
+      camX = e.clientX - dragStartX;
+      camY = e.clientY - dragStartY;
+    } else if (dragNode) {
+      const rect = canvas.getBoundingClientRect();
+      dragNode.x = (e.clientX - rect.left - camX) / camZoom;
+      dragNode.y = (e.clientY - rect.top - camY) / camZoom;
+      dragNode.vx = 0; dragNode.vy = 0;
+    }
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    isDragging = false;
+    dragNode = null;
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    isDragging = false;
+    dragNode = null;
+  });
+}
+
+function nodeRadius(n) {
+  let r = 5;
+  if (n.group === 3) r = 7;       // implementing — larger
+  if (n.group <= 1) r = 4;        // seed/exploring — smaller
+  if (n.questions > 0) r += 1;
+  return r;
+}
+
+function nodeColor(n) {
+  return STATUS_HEX[n.status] || '#607888';
+}
+
+function showDetail(n) {
+  selectedNode = n;
+  const el = document.getElementById('node-detail');
+  document.getElementById('nd-title').textContent = n.id;
+  const statusEl = document.getElementById('nd-status');
+  statusEl.textContent = n.status;
+  statusEl.style.color = STATUS_HEX[n.status] || '#607888';
+
+  let meta = escapeHtml(n.title);
+  if (n.questions > 0) meta += `\n${n.questions} open question${n.questions > 1 ? 's' : ''}`;
+  if (n.has_openspec) meta += '\n◎ has OpenSpec change';
+  document.getElementById('nd-meta').textContent = meta;
+
+  // Find connections
+  const incoming = graphLinks.filter(l => l.target === n.id || (l.targetNode && l.targetNode.id === n.id));
+  const outgoing = graphLinks.filter(l => l.source === n.id || (l.sourceNode && l.sourceNode.id === n.id));
+  let deps = '';
+  if (incoming.length > 0) deps += `← ${incoming.map(l => l.source).join(', ')}\n`;
+  if (outgoing.length > 0) deps += `→ ${outgoing.map(l => l.target).join(', ')}`;
+  document.getElementById('nd-deps').textContent = deps;
+
+  el.classList.add('visible');
+}
+
+function closeDetail() {
+  selectedNode = null;
+  document.getElementById('node-detail').classList.remove('visible');
+}
+
+function runSimulation(canvas) {
+  const ctx = canvas.getContext('2d');
+  const dpr = devicePixelRatio;
+
+  function tick() {
+    // Force simulation step
+    const alpha = 0.3;
+    const repulsion = 800;
+    const springLen = 60;
+    const springK = 0.05;
+    const centerX = 400, centerY = 300;
+    const centerGrav = 0.01;
+    const damping = 0.85;
+
+    // Repulsion (Barnes-Hut would be faster but 140 nodes is fine with O(n²))
+    for (let i = 0; i < graphNodes.length; i++) {
+      const a = graphNodes[i];
+      for (let j = i + 1; j < graphNodes.length; j++) {
+        const b = graphNodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        let force = repulsion / (dist * dist);
+        let fx = dx / dist * force, fy = dy / dist * force;
+        a.vx -= fx * alpha; a.vy -= fy * alpha;
+        b.vx += fx * alpha; b.vy += fy * alpha;
+      }
+    }
+
+    // Spring forces along links
+    for (const l of graphLinks) {
+      const a = l.sourceNode, b = l.targetNode;
+      if (!a || !b) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      let force = (dist - springLen) * springK;
+      // Dependency links are longer
+      const targetLen = l.link_type === 'dependency' ? springLen * 2 : springLen;
+      force = (dist - targetLen) * springK;
+      let fx = dx / dist * force, fy = dy / dist * force;
+      a.vx += fx; a.vy += fy;
+      b.vx -= fx; b.vy -= fy;
+    }
+
+    // Center gravity
+    for (const n of graphNodes) {
+      n.vx += (centerX - n.x) * centerGrav;
+      n.vy += (centerY - n.y) * centerGrav;
+    }
+
+    // Integrate
+    for (const n of graphNodes) {
+      if (n === dragNode) continue; // Don't move dragged node
+      n.vx *= damping;
+      n.vy *= damping;
+      n.x += n.vx;
+      n.y += n.vy;
+    }
+
+    // Render
+    const w = canvas.width / dpr, h = canvas.height / dpr;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    ctx.translate(camX, camY);
+    ctx.scale(camZoom, camZoom);
+
+    // Draw links
+    for (const l of graphLinks) {
+      const a = l.sourceNode, b = l.targetNode;
+      if (!a || !b) continue;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = l.link_type === 'dependency' ? '#1a4458' : '#0c1828';
+      ctx.lineWidth = l.link_type === 'dependency' ? 1.5 : 0.8;
+      if (l.link_type === 'dependency') ctx.setLineDash([4, 4]);
+      else ctx.setLineDash([]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Draw nodes
+    for (const n of graphNodes) {
+      const r = nodeRadius(n);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = nodeColor(n);
+      if (selectedNode && selectedNode.id === n.id) {
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = nodeColor(n);
+        ctx.shadowBlur = 12;
+      }
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Label for non-implemented nodes (too many otherwise)
+      if (n.group !== 4 && camZoom > 0.5) {
+        ctx.font = `${10 / Math.max(camZoom, 0.7)}px monospace`;
+        ctx.fillStyle = '#607888';
+        ctx.textAlign = 'center';
+        ctx.fillText(n.id.length > 20 ? n.id.substring(0,18) + '…' : n.id, n.x, n.y + r + 12);
+      }
+
+      // Question badge
+      if (n.questions > 0) {
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#f59e0b';
+        ctx.textAlign = 'center';
+        ctx.fillText(n.questions + '?', n.x + r + 6, n.y - 2);
+      }
+    }
+
+    ctx.restore();
+    requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+}
+
 // ── Boot ─────────────────────────────────────────────────────────
 connect();
-// Also fetch initial state via HTTP (in case WS is slow)
 fetch('/api/state').then(r => r.json()).then(d => { state = d; renderAll(); }).catch(() => {});
-// Note: /api/state does not require auth (read-only, localhost). The token
-// protects the WebSocket (which accepts commands).
 </script>
 </body>
 </html>

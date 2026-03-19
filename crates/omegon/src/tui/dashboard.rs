@@ -5,6 +5,7 @@
 //! Uses shared widget primitives from `widgets.rs`.
 
 use ratatui::prelude::*;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
@@ -61,6 +62,39 @@ impl DashboardHandles {
                         total_tasks: c.total_tasks,
                     })
                     .collect();
+
+                // Status counts + node lists
+                let nodes = lp.all_nodes();
+                let mut counts = StatusCounts { total: nodes.len(), ..Default::default() };
+                state.implementing_nodes.clear();
+                state.actionable_nodes.clear();
+
+                for node in nodes.values() {
+                    match node.status {
+                        NodeStatus::Implementing => { counts.implementing += 1; },
+                        NodeStatus::Decided => { counts.decided += 1; },
+                        NodeStatus::Exploring => { counts.exploring += 1; },
+                        NodeStatus::Implemented => { counts.implemented += 1; },
+                        NodeStatus::Blocked => { counts.blocked += 1; },
+                        _ => {},
+                    }
+                    counts.open_questions += node.open_questions.len();
+
+                    let summary = NodeSummary {
+                        id: node.id.clone(),
+                        title: node.title.clone(),
+                        status: node.status,
+                        open_questions: node.open_questions.len(),
+                    };
+
+                    if matches!(node.status, NodeStatus::Implementing) {
+                        state.implementing_nodes.push(summary.clone());
+                    }
+                    if matches!(node.status, NodeStatus::Decided) {
+                        state.actionable_nodes.push(summary);
+                    }
+                }
+                state.status_counts = counts;
         }
 
         // Cleave
@@ -80,6 +114,32 @@ pub struct DashboardState {
     pub turns: u32,
     pub tool_calls: u32,
     pub compactions: u32,
+    // Enriched: status counts + node lists
+    pub status_counts: StatusCounts,
+    pub implementing_nodes: Vec<NodeSummary>,
+    pub actionable_nodes: Vec<NodeSummary>,
+    // Context gauge
+    pub context_used_pct: f32,
+    pub context_window_k: usize,
+}
+
+#[derive(Default, Clone)]
+pub struct StatusCounts {
+    pub total: usize,
+    pub implementing: usize,
+    pub decided: usize,
+    pub exploring: usize,
+    pub implemented: usize,
+    pub blocked: usize,
+    pub open_questions: usize,
+}
+
+#[derive(Clone)]
+pub struct NodeSummary {
+    pub id: String,
+    pub title: String,
+    pub status: NodeStatus,
+    pub open_questions: usize,
 }
 
 #[derive(Clone)]
@@ -113,19 +173,93 @@ impl DashboardState {
         let inner_w = area.width.saturating_sub(3) as usize; // left border + padding
         let mut lines: Vec<Line<'static>> = Vec::new();
 
+        // ─── Status Counts (pipeline) ───────────────────────────
+        if self.status_counts.total > 0 {
+            let c = &self.status_counts;
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}", c.total), Style::default().fg(t.accent()).add_modifier(Modifier::BOLD)),
+                Span::styled(" nodes", t.style_muted()),
+            ]));
+            let mut badge_parts: Vec<Span<'static>> = Vec::new();
+            if c.implementing > 0 {
+                badge_parts.extend(widgets::badge("⚙", &c.implementing.to_string(), t.warning()));
+                badge_parts.push(Span::styled(" ", Style::default()));
+            }
+            if c.decided > 0 {
+                badge_parts.extend(widgets::badge("●", &c.decided.to_string(), t.success()));
+                badge_parts.push(Span::styled(" ", Style::default()));
+            }
+            if c.exploring > 0 {
+                badge_parts.extend(widgets::badge("◐", &c.exploring.to_string(), t.accent()));
+                badge_parts.push(Span::styled(" ", Style::default()));
+            }
+            if c.implemented > 0 {
+                badge_parts.extend(widgets::badge("✓", &c.implemented.to_string(), t.dim()));
+            }
+            if !badge_parts.is_empty() {
+                lines.push(Line::from(badge_parts));
+            }
+            if c.open_questions > 0 || c.blocked > 0 {
+                let mut parts: Vec<Span<'static>> = Vec::new();
+                if c.blocked > 0 {
+                    parts.extend(widgets::badge("✕", &c.blocked.to_string(), t.error()));
+                    parts.push(Span::styled(" ", Style::default()));
+                }
+                if c.open_questions > 0 {
+                    parts.extend(widgets::badge("?", &c.open_questions.to_string(), t.warning()));
+                }
+                lines.push(Line::from(parts));
+            }
+            // Pipeline funnel: exploring → decided → implementing → done
+            let funnel_w = inner_w.saturating_sub(2);
+            if funnel_w >= 16 && c.total > 0 {
+                let total = c.total as f32;
+                let seg = |count: usize, ch: &str, color: Color| -> Span<'static> {
+                    let w = ((count as f32 / total) * funnel_w as f32).round().max(if count > 0 { 1.0 } else { 0.0 }) as usize;
+                    Span::styled(ch.repeat(w), Style::default().fg(color))
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(" ", Style::default()),
+                    seg(c.exploring, "░", t.accent()),
+                    seg(c.decided, "▒", t.success()),
+                    seg(c.implementing, "▓", t.warning()),
+                    seg(c.implemented, "█", t.dim()),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ─── Context Gauge ──────────────────────────────────────
+        if self.context_window_k > 0 {
+            let gauge_w = inner_w.saturating_sub(14).min(16);
+            let mut gauge_line: Vec<Span<'static>> = Vec::new();
+            gauge_line.extend(widgets::gauge_bar(&widgets::GaugeConfig {
+                percent: self.context_used_pct,
+                bar_width: gauge_w,
+                memory_blocks: 0,
+            }, t));
+            gauge_line.push(Span::styled(
+                format!(" {:.0}%/{}", self.context_used_pct, format_k(self.context_window_k)),
+                Style::default().fg(t.dim()),
+            ));
+            lines.push(Line::from(gauge_line));
+            lines.push(Line::from(""));
+        }
+
         // ─── Focused Node ───────────────────────────────────────
         if let Some(ref node) = self.focused_node {
+            lines.push(widgets::section_divider("focus", inner_w, t));
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{} ", node.status.icon()),
+                    format!("  {} ", node.status.icon()),
                     Style::default().fg(status_color(node.status, t)),
                 ),
                 Span::styled(node.id.clone(), t.style_heading()),
             ]));
-            let title = widgets::truncate_str(&node.title, inner_w.saturating_sub(2), "…");
-            lines.push(Line::from(Span::styled(format!("  {title}"), t.style_muted())));
+            let title = widgets::truncate_str(&node.title, inner_w.saturating_sub(4), "…");
+            lines.push(Line::from(Span::styled(format!("    {title}"), t.style_muted())));
             if node.decisions > 0 || node.open_questions > 0 {
-                let mut parts: Vec<Span<'static>> = vec![Span::styled("  ", Style::default())];
+                let mut parts: Vec<Span<'static>> = vec![Span::styled("    ", Style::default())];
                 if node.decisions > 0 {
                     parts.extend(widgets::badge("●", &node.decisions.to_string(), t.success()));
                     parts.push(Span::styled(" ", Style::default()));
@@ -134,6 +268,44 @@ impl DashboardState {
                     parts.extend(widgets::badge("?", &node.open_questions.to_string(), t.warning()));
                 }
                 lines.push(Line::from(parts));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ─── Implementing Nodes ─────────────────────────────────
+        if !self.implementing_nodes.is_empty() {
+            lines.push(widgets::section_divider("implementing", inner_w, t));
+            for node in self.implementing_nodes.iter().take(5) {
+                let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
+                lines.push(Line::from(vec![
+                    Span::styled("  ⚙ ", Style::default().fg(t.warning())),
+                    Span::styled(label.to_string(), t.style_muted()),
+                ]));
+            }
+            if self.implementing_nodes.len() > 5 {
+                lines.push(Line::from(Span::styled(
+                    format!("  +{} more", self.implementing_nodes.len() - 5),
+                    Style::default().fg(t.dim()),
+                )));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ─── Actionable (Decided) Nodes ─────────────────────────
+        if !self.actionable_nodes.is_empty() {
+            lines.push(widgets::section_divider("ready", inner_w, t));
+            for node in self.actionable_nodes.iter().take(5) {
+                let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
+                lines.push(Line::from(vec![
+                    Span::styled("  ● ", Style::default().fg(t.success())),
+                    Span::styled(label.to_string(), t.style_muted()),
+                ]));
+            }
+            if self.actionable_nodes.len() > 5 {
+                lines.push(Line::from(Span::styled(
+                    format!("  +{} more", self.actionable_nodes.len() - 5),
+                    Style::default().fg(t.dim()),
+                )));
             }
             lines.push(Line::from(""));
         }
@@ -212,6 +384,11 @@ impl DashboardState {
             .wrap(Wrap { trim: true });
         frame.render_widget(widget, area);
     }
+}
+
+fn format_k(tokens: usize) -> String {
+    if tokens >= 1_000_000 { format!("{}M", tokens / 1_000_000) }
+    else { format!("{}k", tokens / 1000) }
 }
 
 fn status_color(status: NodeStatus, t: &dyn Theme) -> Color {
@@ -367,5 +544,67 @@ mod tests {
         assert_eq!(icon, "⟳");
         let (icon, _) = stage_badge(ChangeStage::Archived, &t);
         assert_eq!(icon, "✓");
+    }
+
+    #[test]
+    fn dashboard_with_status_counts() {
+        let mut state = DashboardState::default();
+        state.status_counts = StatusCounts {
+            total: 140,
+            implementing: 7,
+            decided: 5,
+            exploring: 5,
+            implemented: 100,
+            blocked: 0,
+            open_questions: 24,
+        };
+        let backend = TestBackend::new(36, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("140"), "should show total: {text}");
+    }
+
+    #[test]
+    fn dashboard_with_implementing_nodes() {
+        let mut state = DashboardState::default();
+        state.status_counts.total = 10;
+        state.implementing_nodes = vec![
+            NodeSummary { id: "rust-tui".into(), title: "Rust TUI".into(), status: NodeStatus::Implementing, open_questions: 2 },
+            NodeSummary { id: "web-dash".into(), title: "Web Dashboard".into(), status: NodeStatus::Implementing, open_questions: 0 },
+        ];
+        let backend = TestBackend::new(36, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("rust-tui"), "should show implementing node: {text}");
+    }
+
+    #[test]
+    fn dashboard_with_context_gauge() {
+        let mut state = DashboardState::default();
+        state.status_counts.total = 1;
+        state.context_used_pct = 43.0;
+        state.context_window_k = 200_000;
+        let backend = TestBackend::new(36, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| {
+            state.render_themed(frame.area(), frame, &super::super::theme::Alpharius);
+        }).unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(text.contains("43%"), "should show context pct: {text}");
+    }
+
+    #[test]
+    fn format_k_values() {
+        assert_eq!(format_k(200_000), "200k");
+        assert_eq!(format_k(1_000_000), "1M");
     }
 }

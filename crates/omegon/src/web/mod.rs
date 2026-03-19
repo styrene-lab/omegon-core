@@ -71,6 +71,7 @@ pub async fn start_server(
 
     let app = Router::new()
         .route("/api/state", axum::routing::get(api::get_state))
+        .route("/api/graph", axum::routing::get(api::get_graph))
         .route("/ws", axum::routing::get(ws::ws_handler))
         .route("/", axum::routing::get(serve_dashboard))
         .layer(

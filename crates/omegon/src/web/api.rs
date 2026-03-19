@@ -105,6 +105,81 @@ pub struct SessionSnapshot {
     pub compactions: u32,
 }
 
+/// Graph data for force-directed visualization.
+#[derive(Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub links: Vec<GraphLink>,
+}
+
+#[derive(Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub group: u8,         // 0=seed, 1=exploring, 2=decided, 3=implementing, 4=implemented, 5=blocked
+    pub questions: usize,
+    pub has_openspec: bool,
+}
+
+#[derive(Serialize)]
+pub struct GraphLink {
+    pub source: String,
+    pub target: String,
+    #[serde(rename = "type")]
+    pub link_type: String,  // "parent", "dependency", "related"
+}
+
+/// GET /api/graph — graph data for force-directed layout.
+pub async fn get_graph(State(state): State<WebState>) -> Json<GraphData> {
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+
+    if let Some(ref lp_lock) = state.handles.lifecycle
+        && let Ok(lp) = lp_lock.lock()
+    {
+        let all = lp.all_nodes();
+        for node in all.values() {
+            let group = match node.status {
+                NodeStatus::Seed => 0,
+                NodeStatus::Exploring => 1,
+                NodeStatus::Resolved | NodeStatus::Decided => 2,
+                NodeStatus::Implementing => 3,
+                NodeStatus::Implemented => 4,
+                NodeStatus::Blocked => 5,
+                NodeStatus::Deferred => 6,
+            };
+            nodes.push(GraphNode {
+                id: node.id.clone(),
+                title: node.title.clone(),
+                status: node.status.as_str().to_string(),
+                group,
+                questions: node.open_questions.len(),
+                has_openspec: node.openspec_change.is_some(),
+            });
+
+            // Parent → child edges
+            if let Some(ref parent) = node.parent {
+                links.push(GraphLink {
+                    source: parent.clone(),
+                    target: node.id.clone(),
+                    link_type: "parent".into(),
+                });
+            }
+            // Dependencies
+            for dep in &node.dependencies {
+                links.push(GraphLink {
+                    source: dep.clone(),
+                    target: node.id.clone(),
+                    link_type: "dependency".into(),
+                });
+            }
+        }
+    }
+
+    Json(GraphData { nodes, links })
+}
+
 /// GET /api/state — build a full snapshot from the shared handles.
 pub async fn get_state(State(state): State<WebState>) -> Json<StateSnapshot> {
     let snapshot = build_snapshot(&state);
@@ -250,18 +325,42 @@ mod tests {
     use super::*;
     use crate::tui::dashboard::DashboardHandles;
 
-    #[test]
-    fn empty_snapshot() {
-        let state = WebState {
+    fn test_state() -> WebState {
+        WebState {
             handles: DashboardHandles::default(),
             events_tx: tokio::sync::broadcast::channel(16).0,
             command_tx: tokio::sync::mpsc::channel(16).0,
             auth_token: std::sync::Arc::new("test".into()),
-        };
-        let snap = build_snapshot(&state);
+        }
+    }
+
+    #[test]
+    fn empty_snapshot() {
+        let snap = build_snapshot(&test_state());
         assert_eq!(snap.design.counts.total, 0);
         assert!(snap.design.focused.is_none());
         assert!(snap.openspec.changes.is_empty());
         assert!(!snap.cleave.active);
+    }
+
+    #[test]
+    fn graph_node_serializes() {
+        let node = GraphNode {
+            id: "test".into(), title: "Test".into(), status: "exploring".into(),
+            group: 1, questions: 2, has_openspec: false,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains("\"group\":1"));
+        assert!(json.contains("\"questions\":2"));
+    }
+
+    #[test]
+    fn graph_link_type_field_name() {
+        let link = GraphLink {
+            source: "a".into(), target: "b".into(), link_type: "parent".into(),
+        };
+        let json = serde_json::to_string(&link).unwrap();
+        // "type" not "link_type" due to #[serde(rename)]
+        assert!(json.contains("\"type\":\"parent\""), "got: {json}");
     }
 }

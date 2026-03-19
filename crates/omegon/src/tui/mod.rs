@@ -331,6 +331,10 @@ impl App {
                 ss.tool_calls = self.tool_calls;
                 ss.compactions = self.dashboard.compactions;
             }
+
+            // Feed context gauge into dashboard
+            self.dashboard.context_used_pct = self.footer_data.context_percent;
+            self.dashboard.context_window_k = self.footer_data.context_window;
         }
 
         let area = frame.area();
@@ -338,7 +342,8 @@ impl App {
         // ── Horizontal split: main area | dashboard panel ───────────
         // Dashboard appears as a right-side panel when terminal is wide enough.
         let show_dashboard = area.width >= 120
-            && (self.dashboard.focused_node.is_some()
+            && (self.dashboard.status_counts.total > 0
+                || self.dashboard.focused_node.is_some()
                 || !self.dashboard.active_changes.is_empty()
                 || self.dashboard.cleave.as_ref().is_some_and(|c| c.active || c.total_children > 0));
 
