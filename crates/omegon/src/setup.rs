@@ -248,6 +248,9 @@ impl AgentSetup {
             dashboard_handles: crate::tui::dashboard::DashboardHandles {
                 lifecycle: Some(lifecycle_handle),
                 cleave: Some(cleave_handle),
+                session: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::tui::dashboard::SharedSessionStats::default(),
+                )),
             },
         })
     }

@@ -182,10 +182,14 @@
 </div>
 
 <script>
+// ── Auth token from URL ──────────────────────────────────────────
+const params = new URLSearchParams(location.search);
+const AUTH_TOKEN = params.get('token') || '';
+
 // ── WebSocket connection with auto-reconnect ─────────────────────
 let ws = null;
 let reconnectTimer = null;
-const WS_URL = `ws://${location.host}/ws`;
+const WS_URL = `ws://${location.host}/ws?token=${encodeURIComponent(AUTH_TOKEN)}`;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -323,7 +327,7 @@ function renderDesign() {
     focusedHtml = `
       <div style="padding: 8px; background: var(--surface-bg); border-radius: 6px; margin-bottom: 8px;">
         <span style="color: ${color}">${icon}</span>
-        <strong>${d.focused.id}</strong> — ${d.focused.title}
+        <strong>${escapeHtml(d.focused.id)}</strong> — ${escapeHtml(d.focused.title)}
         ${d.focused.open_questions.length > 0 ? `<span class="node-questions">${d.focused.open_questions.length}?</span>` : ''}
         ${d.focused.decisions > 0 ? `<span style="color: var(--success); font-size: 12px;">${d.focused.decisions} decisions</span>` : ''}
       </div>`;
@@ -338,8 +342,8 @@ function renderDesign() {
     document.getElementById('design-nodes').innerHTML = nodes.map(n => `
       <li>
         <span class="node-icon" style="color: ${STATUS_COLORS[n.status] || 'var(--muted)'}">${STATUS_ICONS[n.status] || '○'}</span>
-        <span class="node-id">${n.id}</span>
-        <span class="node-title">${n.title}</span>
+        <span class="node-id">${escapeHtml(n.id)}</span>
+        <span class="node-title">${escapeHtml(n.title)}</span>
         ${n.open_questions > 0 ? `<span class="node-questions">${n.open_questions}?</span>` : ''}
       </li>`).join('');
   }
@@ -363,7 +367,7 @@ function renderOpenSpec() {
     const pct = c.total_tasks > 0 ? Math.round(c.done_tasks / c.total_tasks * 100) : 0;
     return `<li>
       <span>${STAGE_ICONS[c.stage] || '◌'}</span>
-      <span style="flex: 1;">${c.name}</span>
+      <span style="flex: 1;">${escapeHtml(c.name)}</span>
       <span class="stage-badge">${c.stage}</span>
       ${c.total_tasks > 0 ? `
         <span style="color: var(--dim); font-size: 12px;">${c.done_tasks}/${c.total_tasks}</span>
@@ -393,7 +397,7 @@ function renderCleave() {
     const dur = c.duration_secs != null ? ` ${c.duration_secs.toFixed(0)}s` : '';
     return `<li>
       <span style="color: ${colors[c.status] || 'var(--dim)'}">${icons[c.status] || '○'}</span>
-      <span>${c.label}</span>
+      <span>${escapeHtml(c.label)}</span>
       <span style="color: var(--dim); font-size: 12px;">${dur}</span>
     </li>`;
   }).join('');
@@ -451,6 +455,8 @@ document.getElementById('prompt-input').addEventListener('keydown', (e) => {
 connect();
 // Also fetch initial state via HTTP (in case WS is slow)
 fetch('/api/state').then(r => r.json()).then(d => { state = d; renderAll(); }).catch(() => {});
+// Note: /api/state does not require auth (read-only, localhost). The token
+// protects the WebSocket (which accepts commands).
 </script>
 </body>
 </html>

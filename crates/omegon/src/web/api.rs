@@ -222,15 +222,22 @@ pub fn build_snapshot(state: &WebState) -> StateSnapshot {
         CleaveSnapshot { active: false, total_children: 0, completed: 0, failed: 0, children: Vec::new() }
     };
 
+    // Read session stats from shared handle
+    let session = if let Ok(ss) = state.handles.session.lock() {
+        SessionSnapshot {
+            turns: ss.turns,
+            tool_calls: ss.tool_calls,
+            compactions: ss.compactions,
+        }
+    } else {
+        SessionSnapshot { turns: 0, tool_calls: 0, compactions: 0 }
+    };
+
     StateSnapshot {
         design,
         openspec,
         cleave,
-        session: SessionSnapshot {
-            turns: 0, // TODO: wire from shared state
-            tool_calls: 0,
-            compactions: 0,
-        },
+        session,
     }
 }
 
@@ -245,6 +252,7 @@ mod tests {
             handles: DashboardHandles::default(),
             events_tx: tokio::sync::broadcast::channel(16).0,
             command_tx: tokio::sync::mpsc::channel(16).0,
+            auth_token: std::sync::Arc::new("test".into()),
         };
         let snap = build_snapshot(&state);
         assert_eq!(snap.design.counts.total, 0);

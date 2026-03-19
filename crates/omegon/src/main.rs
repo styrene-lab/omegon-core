@@ -410,6 +410,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     // ─── Event channel ──────────────────────────────────────────────────
     let (events_tx, events_rx) = broadcast::channel::<AgentEvent>(256);
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<tui::TuiCommand>(16);
+    let web_command_tx = command_tx.clone(); // For forwarding web dashboard commands
 
     // ─── Shared state ─────────────────────────────────────────────────
     let shared_cancel: tui::SharedCancel = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -447,7 +448,6 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
         no_splash: cli.no_splash,
         bus_commands,
         dashboard_handles: agent.dashboard_handles.clone(),
-        events_tx: events_tx.clone(),
     };
     let tui_cancel = shared_cancel.clone();
     let tui_settings = shared_settings.clone();
@@ -512,6 +512,50 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 // Send back to TUI as a system message
                 let _ = events_tx.send(AgentEvent::AgentEnd);
                 tracing::info!("{text}");
+            }
+
+            tui::TuiCommand::StartWebDashboard => {
+                let web_state = web::WebState::new(
+                    agent.dashboard_handles.clone(),
+                    events_tx.clone(),
+                );
+                let token = web_state.auth_token.to_string();
+                match web::start_server(web_state, 7842).await {
+                    Ok((addr, web_cmd_rx)) => {
+                        let url = format!("http://{addr}/?token={token}");
+                        tui::open_browser(&url);
+                        let _ = events_tx.send(AgentEvent::SystemNotification {
+                            message: format!("Dashboard started at {url}"),
+                        });
+                        // Spawn a task to forward web commands into the main TUI command channel
+                        let cmd_tx_clone = web_command_tx.clone();
+                        let cancel_clone = shared_cancel.clone();
+                        tokio::spawn(async move {
+                            let mut rx = web_cmd_rx;
+                            while let Some(web_cmd) = rx.recv().await {
+                                let tui_cmd = match web_cmd {
+                                    web::WebCommand::UserPrompt(text) => tui::TuiCommand::UserPrompt(text),
+                                    web::WebCommand::SlashCommand { name, args } => {
+                                        tui::TuiCommand::BusCommand { name, args }
+                                    }
+                                    web::WebCommand::Cancel => {
+                                        if let Ok(guard) = cancel_clone.lock()
+                                            && let Some(ref cancel) = *guard {
+                                                cancel.cancel();
+                                        }
+                                        continue;
+                                    }
+                                };
+                                if cmd_tx_clone.send(tui_cmd).await.is_err() { break; }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        let _ = events_tx.send(AgentEvent::SystemNotification {
+                            message: format!("Failed to start dashboard: {e}"),
+                        });
+                    }
+                }
             }
 
             tui::TuiCommand::BusCommand { name, args } => {

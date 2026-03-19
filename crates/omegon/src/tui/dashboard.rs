@@ -18,11 +18,20 @@ use crate::features::cleave::CleaveProgress;
 use crate::lifecycle::context::LifecycleContextProvider;
 use crate::lifecycle::design;
 
+/// Shared session stats — written by the TUI, read by the web API.
+#[derive(Default)]
+pub struct SharedSessionStats {
+    pub turns: u32,
+    pub tool_calls: u32,
+    pub compactions: u32,
+}
+
 /// Shared handles to feature state, for live dashboard updates.
 #[derive(Clone, Default)]
 pub struct DashboardHandles {
     pub lifecycle: Option<Arc<Mutex<LifecycleContextProvider>>>,
     pub cleave: Option<Arc<Mutex<CleaveProgress>>>,
+    pub session: Arc<Mutex<SharedSessionStats>>,
 }
 
 impl DashboardHandles {
