@@ -1282,7 +1282,12 @@ pub async fn run_tui(
                             app.agent_active = false; // Unblock editor immediately
                             app.conversation.finalize_message();
                             app.conversation.push_system("⎋ Interrupted (Ctrl+C)");
+                        } else if !app.editor.is_empty() {
+                            // Clear the line first (like a real terminal)
+                            app.editor.clear_line();
+                            app.last_ctrl_c = None;
                         } else {
+                            // Empty editor — double Ctrl+C to quit
                             let now = std::time::Instant::now();
                             if let Some(last) = app.last_ctrl_c {
                                 if now.duration_since(last).as_millis() < 1000 {
