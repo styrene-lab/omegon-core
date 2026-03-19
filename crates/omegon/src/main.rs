@@ -379,9 +379,12 @@ async fn run_cleave_command(
 async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
     tracing::info!(model = %cli.model, "omegon interactive starting");
 
+    // ─── Shared state (created early so features can reference it) ────
+    let shared_settings = settings::shared(&cli.model);
+
     // ─── Shared setup ───────────────────────────────────────────────────
     let resume = cli.resume.as_ref().map(|r| r.as_deref());
-    let mut agent = setup::AgentSetup::new(&cli.cwd, resume).await?;
+    let mut agent = setup::AgentSetup::new(&cli.cwd, resume, Some(shared_settings.clone())).await?;
 
     // ─── LLM provider ──────────────────────────────────────────────────
     // Native Rust clients by default. --bridge flag forces the Node.js subprocess.
@@ -409,8 +412,6 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
 
     // ─── Shared state ─────────────────────────────────────────────────
     let shared_cancel: tui::SharedCancel = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let shared_settings = settings::shared(&cli.model);
-
     // Load project profile → apply to settings (model, thinking, max_turns)
     let profile = settings::Profile::load(&agent.cwd);
     if let Ok(mut s) = shared_settings.lock() {
@@ -627,7 +628,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
 
     // ─── Shared setup ───────────────────────────────────────────────────
     let resume = cli.resume.as_ref().map(|r| r.as_deref());
-    let mut agent = setup::AgentSetup::new(&cli.cwd, resume).await?;
+    let mut agent = setup::AgentSetup::new(&cli.cwd, resume, None).await?;
     agent.conversation.push_user(prompt_text.clone());
 
     // ─── Build loop config ──────────────────────────────────────────────

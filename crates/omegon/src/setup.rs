@@ -79,7 +79,11 @@ impl LifecycleSnapshot {
 
 impl AgentSetup {
     /// Initialize the event bus, tools, memory, lifecycle context, and conversation.
-    pub async fn new(cwd: &Path, resume: Option<Option<&str>>) -> anyhow::Result<Self> {
+    pub async fn new(
+        cwd: &Path,
+        resume: Option<Option<&str>>,
+        settings: Option<crate::settings::SharedSettings>,
+    ) -> anyhow::Result<Self> {
         let cwd = std::fs::canonicalize(cwd)?;
         let is_child = std::env::var("OMEGON_CHILD").is_ok();
 
@@ -179,6 +183,14 @@ impl AgentSetup {
         let cleave_feature = features::cleave::CleaveFeature::new(&cwd);
         let cleave_handle = cleave_feature.shared_progress();
         bus.register(Box::new(cleave_feature));
+
+        // ─── Session log (context injection) ────────────────────────────
+        bus.register(Box::new(features::session_log::SessionLog::new(&cwd)));
+
+        // ─── Model budget (tier switching + thinking) ───────────────────
+        if let Some(ref settings) = settings {
+            bus.register(Box::new(features::model_budget::ModelBudget::new(settings.clone())));
+        }
 
         // ─── Native features ────────────────────────────────────────────
         bus.register(Box::new(features::auto_compact::AutoCompact::new()));

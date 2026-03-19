@@ -23,5 +23,7 @@ pub mod auto_compact;
 pub mod cleave;
 pub mod legacy_bridge;
 pub mod lifecycle;
+pub mod model_budget;
+pub mod session_log;
 pub mod terminal_title;
 pub mod version_check;
