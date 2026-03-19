@@ -580,6 +580,11 @@ function sendPrompt() {
 
 document.getElementById('prompt-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendPrompt();
+  // Ctrl+C or Cmd+Backspace — clear input
+  if ((e.key === 'c' && e.ctrlKey && !e.shiftKey) || (e.key === 'Backspace' && e.metaKey)) {
+    e.preventDefault();
+    e.target.value = '';
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
