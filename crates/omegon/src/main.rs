@@ -611,6 +611,7 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                     cwd: agent.cwd.clone(),
                     extended_context,
                     settings: Some(shared_settings.clone()),
+                    secrets: Some(agent.secrets.clone()),
                 };
 
                 let cancel = CancellationToken::new();
@@ -693,6 +694,7 @@ async fn run_agent_command(cli: &Cli) -> anyhow::Result<()> {
         cwd: agent.cwd.clone(),
         extended_context: false, // headless uses standard context
         settings: None, // headless doesn't have shared settings
+        secrets: Some(agent.secrets.clone()),
     };
 
     // ─── LLM provider ──────────────────────────────────────────────────

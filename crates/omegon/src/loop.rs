@@ -34,6 +34,8 @@ pub struct LoopConfig {
     pub extended_context: bool,
     /// Thinking level — shared settings handle for live reads.
     pub settings: Option<crate::settings::SharedSettings>,
+    /// Secrets manager for output redaction and tool guards.
+    pub secrets: Option<std::sync::Arc<omegon_secrets::SecretsManager>>,
 }
 
 impl Default for LoopConfig {
@@ -47,6 +49,7 @@ impl Default for LoopConfig {
             cwd: std::env::current_dir().unwrap_or_default(),
             extended_context: false,
             settings: None,
+            secrets: None,
         }
     }
 }
@@ -259,7 +262,8 @@ pub async fn run(
 
         // ─── Dispatch tool calls ────────────────────────────────────
         let results =
-            dispatch_tools(bus, tool_calls, events, cancel.clone(), &config.cwd).await;
+            dispatch_tools(bus, tool_calls, events, cancel.clone(), &config.cwd,
+                config.secrets.as_deref()).await;
 
         // Push tool results to conversation and update intent
         for result in &results {
@@ -602,6 +606,7 @@ async fn dispatch_tools(
     events: &broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
     cwd: &std::path::Path,
+    secrets: Option<&omegon_secrets::SecretsManager>,
 ) -> Vec<ToolResultEntry> {
     let mut results = Vec::with_capacity(tool_calls.len());
 
@@ -647,6 +652,36 @@ async fn dispatch_tools(
     let mut batch_failed = false;
 
     for call in tool_calls {
+        // ── Tool guard check ────────────────────────────────────────
+        if let Some(sm) = secrets {
+            if let Some(decision) = sm.check_guard(&call.name, &call.arguments) {
+                if decision.is_block() {
+                    let msg = match &decision {
+                        omegon_secrets::GuardDecision::Block { reason, path } =>
+                            format!("Blocked: {reason} ({path})"),
+                        _ => unreachable!(),
+                    };
+                    tracing::warn!(tool = call.name, %msg, "tool guard blocked");
+                    let _ = events.send(AgentEvent::ToolEnd {
+                        id: call.id.clone(),
+                        result: omegon_traits::ToolResult {
+                            content: vec![ContentBlock::Text { text: msg.clone() }],
+                            details: Value::Null,
+                        },
+                        is_error: true,
+                    });
+                    results.push(ToolResultEntry {
+                        call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        content: vec![ContentBlock::Text { text: msg }],
+                        is_error: true,
+                        args_summary: summarize_tool_args(&call.name, &call.arguments),
+                    });
+                    continue;
+                }
+            }
+        }
+
         let _ = events.send(AgentEvent::ToolStart {
             id: call.id.clone(),
             name: call.name.clone(),
@@ -755,16 +790,25 @@ async fn dispatch_tools(
             continue;
         }
 
+        // ── Redact secrets from output ────────────────────────────
+        let mut final_content = result.content;
+        if let Some(sm) = secrets {
+            sm.redact_content(&mut final_content);
+        }
+
         let _ = events.send(AgentEvent::ToolEnd {
             id: call.id.clone(),
-            result: result.clone(),
+            result: omegon_traits::ToolResult {
+                content: final_content.clone(),
+                details: result.details,
+            },
             is_error,
         });
 
         results.push(ToolResultEntry {
             call_id: call.id.clone(),
             tool_name: call.name.clone(),
-            content: result.content,
+            content: final_content,
             is_error,
             args_summary: summarize_tool_args(&call.name, &call.arguments),
         });
@@ -1194,7 +1238,7 @@ mod tests {
             },
         ];
 
-        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path()).await;
+        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path(), None).await;
 
         // The second edit should have failed
         assert!(results[1].is_error, "second edit should fail");
@@ -1255,7 +1299,7 @@ mod tests {
             arguments: serde_json::json!({"path": "/tmp/fake.rs", "oldText": "a", "newText": "b"}),
         }];
 
-        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path()).await;
+        let results = dispatch_tools(&bus, &calls, &events_tx, cancel, dir.path(), None).await;
         assert!(!results[0].is_error);
         let text = results[0].content[0].as_text().unwrap();
         assert!(!text.contains("rollback"), "single edit should have no batch overhead");

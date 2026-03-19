@@ -24,6 +24,8 @@ pub struct AgentSetup {
     pub context_manager: ContextManager,
     pub conversation: ConversationState,
     pub cwd: PathBuf,
+    /// Secrets manager — redaction, guards, recipes.
+    pub secrets: std::sync::Arc<omegon_secrets::SecretsManager>,
     /// Snapshot of lifecycle + memory state at startup for TUI pre-population.
     pub(crate) startup_snapshot: StartupSnapshot,
     /// Shared handles for live dashboard updates.
@@ -86,6 +88,21 @@ impl AgentSetup {
     ) -> anyhow::Result<Self> {
         let cwd = std::fs::canonicalize(cwd)?;
         let is_child = std::env::var("OMEGON_CHILD").is_ok();
+
+        // ─── Secrets manager ────────────────────────────────────────────
+        let secrets_dir = dirs::home_dir()
+            .unwrap_or_else(|| cwd.clone())
+            .join(".omegon");
+        let secrets = match omegon_secrets::SecretsManager::new(&secrets_dir) {
+            Ok(s) => std::sync::Arc::new(s),
+            Err(e) => {
+                tracing::warn!("Failed to initialize secrets manager: {e}");
+                std::sync::Arc::new(
+                    omegon_secrets::SecretsManager::new(&std::env::temp_dir())
+                        .expect("fallback secrets manager"),
+                )
+            }
+        };
 
         let mut bus = EventBus::new();
 
@@ -250,6 +267,7 @@ impl AgentSetup {
             context_manager,
             conversation,
             cwd,
+            secrets,
             startup_snapshot,
             dashboard_handles: crate::tui::dashboard::DashboardHandles {
                 lifecycle: Some(lifecycle_handle),

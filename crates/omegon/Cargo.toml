@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 omegon-traits = { path = "../omegon-traits" }
 omegon-memory = { path = "../omegon-memory" }
+omegon-secrets = { path = "../omegon-secrets" }
 tokio = { workspace = true }
 serde = { workspace = true }
 toml = "0.8"

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/omegon",
     "crates/omegon-memory",
+    "crates/omegon-secrets",
     "crates/omegon-traits",
 ]
 
