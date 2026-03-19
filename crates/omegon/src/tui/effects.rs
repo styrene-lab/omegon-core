@@ -74,7 +74,9 @@ impl Effects {
     }
 
     /// Queue the initial startup reveal effects.
+    /// Resets the frame timer so effects start from zero delta.
     pub fn queue_startup(&mut self, t: &dyn Theme) {
+        self.last_frame = Instant::now();
         // Footer sweeps in from bottom
         let footer_sweep = self.footer.unique(
             FooterSlot::Reveal,
@@ -83,7 +85,7 @@ impl Effects {
                 3,   // gradient length
                 1,   // randomness
                 t.bg(),
-                EffectTimer::from_ms(400, Interpolation::CubicOut),
+                EffectTimer::from_ms(600, Interpolation::CubicOut),
             ),
         );
         self.footer.add_effect(footer_sweep);
@@ -94,7 +96,7 @@ impl Effects {
             fx::fade_from(
                 t.bg(),
                 t.bg(),
-                EffectTimer::from_ms(600, Interpolation::CubicOut),
+                EffectTimer::from_ms(800, Interpolation::CubicOut),
             ),
         );
         self.conversation.add_effect(conv_fade);

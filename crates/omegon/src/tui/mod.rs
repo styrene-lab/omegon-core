@@ -295,14 +295,16 @@ impl App {
 
         let area = frame.area();
 
-        // Full-width vertical layout: conversation | footer | hint | editor
+        // Full-width vertical layout: conversation | editor | hint | footer
+        // The input box sits between conversation and footer — the footer
+        // is at the actual foot of the terminal.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),    // conversation (all remaining space)
-                Constraint::Length(5), // footer cards (bordered)
-                Constraint::Length(1), // hint line
-                Constraint::Length(3), // editor
+                Constraint::Min(3),    // [0] conversation (all remaining space)
+                Constraint::Length(3), // [1] editor (input box)
+                Constraint::Length(1), // [2] hint line
+                Constraint::Length(5), // [3] footer cards (bordered, at the foot)
             ])
             .split(area);
 
@@ -318,7 +320,7 @@ impl App {
             .scroll((self.conversation.scroll_offset(), 0));
         frame.render_widget(conv_widget, chunks[0]);
 
-        // Footer — sync from settings + session state
+        // Footer — sync from settings + session state (renders at the foot)
         {
             let s = self.settings();
             self.footer_data.model_id = s.model.clone();
@@ -329,7 +331,7 @@ impl App {
         self.footer_data.turn = self.turn;
         self.footer_data.tool_calls = self.tool_calls;
         self.footer_data.compactions = self.dashboard.compactions;
-        self.footer_data.render(chunks[1], frame, t.as_ref());
+        self.footer_data.render(chunks[3], frame, t.as_ref());
 
         // Hint line between footer and editor
         {
@@ -388,14 +390,14 @@ impl App {
         let editor_widget = Paragraph::new(display_text)
             .style(Style::default().fg(t.fg()).bg(t.surface_bg()))
             .block(editor_block);
-        frame.render_widget(editor_widget, chunks[3]);
+        frame.render_widget(editor_widget, chunks[1]);
 
         // Command palette popup (above editor when typing /)
         if !self.agent_active {
             let matches = self.matching_commands();
             if !matches.is_empty() {
                 let palette_height = matches.len().min(8) as u16 + 2; // +2 for borders
-                let editor_area = chunks[3];
+                let editor_area = chunks[1];
                 let palette_area = Rect {
                     x: editor_area.x,
                     y: editor_area.y.saturating_sub(palette_height),
@@ -423,7 +425,7 @@ impl App {
 
             // Position cursor in editor — no left border (Borders::TOP only),
             // so text starts at x=0 within the block's inner area (y+1 for top border).
-            let editor_area = chunks[3];
+            let editor_area = chunks[1];
             let cursor_x = editor_area.x + self.editor.cursor_position() as u16;
             let cursor_y = editor_area.y + 1; // +1 for top border
             frame.set_cursor_position(Position::new(
@@ -438,7 +440,7 @@ impl App {
         }
 
         // ── Post-render effects (tachyonfx) — each zone processed separately ──
-        self.effects.process(frame.buffer_mut(), chunks[0], chunks[1], chunks[3]);
+        self.effects.process(frame.buffer_mut(), chunks[0], chunks[3], chunks[1]);
     }
 
     /// Command registry: (name, description, subcommands).
@@ -1004,18 +1006,37 @@ pub async fn run_tui(
 
         if has_terminal_event {
             match event::read()? {
-                // ── Mouse scroll — natural direction (matches macOS touchpad) ──
+                // ── Mouse scroll ────────────────────────────────────────
+                // macOS natural scrolling inverts at the OS level BEFORE
+                // the terminal sees it. crossterm's ScrollUp means "the OS
+                // sent scroll-up" which, with natural scrolling, means the
+                // user swiped fingers DOWN (wanting to see newer content).
+                // So: ScrollUp → scroll toward bottom, ScrollDown → scroll toward top.
                 Event::Mouse(mouse) => {
                     match mouse.kind {
-                        // ScrollDown = fingers move down = content moves up = scroll toward end
-                        MouseEventKind::ScrollDown => {
+                        MouseEventKind::ScrollUp => {
                             app.conversation.scroll_down(3);
                         }
-                        // ScrollUp = fingers move up = content moves down = scroll toward start
-                        MouseEventKind::ScrollUp => {
+                        MouseEventKind::ScrollDown => {
                             app.conversation.scroll_up(3);
                         }
                         _ => {}
+                    }
+                }
+                // ── Paste — insert pasted text into editor ──────────
+                Event::Paste(text) => {
+                    if !app.agent_active {
+                        for c in text.chars() {
+                            // Skip control characters except newline
+                            if c == '\n' || c == '\r' {
+                                // For single-line editor, treat newline as submit
+                                // (user pasted a command and hit enter)
+                                continue;
+                            }
+                            if !c.is_control() {
+                                app.editor.insert(c);
+                            }
+                        }
                     }
                 }
                 Event::Key(key) => {
