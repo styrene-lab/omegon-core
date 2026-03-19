@@ -182,6 +182,10 @@ impl ToolCallAccum {
 }
 
 /// Process an SSE byte stream line by line, calling `on_data` for each `data: ` payload.
+/// SSE idle timeout — if no chunk arrives within this window, assume the
+/// connection is stalled and bail so the retry loop can re-attempt.
+const SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 async fn process_sse<F>(
     response: reqwest::Response,
     mut on_data: F,
@@ -192,18 +196,27 @@ where
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+    loop {
+        match tokio::time::timeout(SSE_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => {
+                let chunk = chunk?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(newline) = buffer.find('\n') {
-            let line = buffer[..newline].trim_end_matches('\r').to_string();
-            buffer = buffer[newline + 1..].to_string();
+                while let Some(newline) = buffer.find('\n') {
+                    let line = buffer[..newline].trim_end_matches('\r').to_string();
+                    buffer = buffer[newline + 1..].to_string();
 
-            if let Some(data) = line.strip_prefix("data: ")
-                && (data == "[DONE]" || !on_data(data)) {
-                    return Ok(());
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && (data == "[DONE]" || !on_data(data)) {
+                            return Ok(());
+                        }
                 }
+            }
+            Ok(None) => break, // stream ended
+            Err(_) => {
+                tracing::warn!("SSE stream idle for {}s — treating as stalled", SSE_IDLE_TIMEOUT.as_secs());
+                anyhow::bail!("SSE stream idle timeout ({}s with no data)", SSE_IDLE_TIMEOUT.as_secs());
+            }
         }
     }
     Ok(())

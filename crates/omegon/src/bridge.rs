@@ -337,8 +337,21 @@ impl LlmBridge for SubprocessBridge {
         let response_rx = self.response_rx.clone();
 
         tokio::spawn(async move {
+            let idle_timeout = std::time::Duration::from_secs(120);
             let mut rx = response_rx.lock().await;
-            while let Some(resp) = rx.recv().await {
+            loop {
+                let resp = match tokio::time::timeout(idle_timeout, rx.recv()).await {
+                    Ok(Some(resp)) => resp,
+                    Ok(None) => break, // channel closed
+                    Err(_) => {
+                        tracing::warn!("bridge stream idle for {}s — treating as stalled", idle_timeout.as_secs());
+                        let _ = event_tx.send(LlmEvent::Error {
+                            message: format!("Bridge stream idle timeout ({}s)", idle_timeout.as_secs()),
+                        }).await;
+                        break;
+                    }
+                };
+
                 if resp.id != req_id {
                     continue;
                 }

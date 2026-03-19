@@ -372,7 +372,14 @@ async fn compact_via_llm(
         .await?;
 
     let mut summary = String::new();
-    while let Some(event) = rx.recv().await {
+    let summary_idle = std::time::Duration::from_secs(120);
+    while let Some(event) = match tokio::time::timeout(summary_idle, rx.recv()).await {
+        Ok(e) => e,
+        Err(_) => {
+            tracing::warn!("summary stream idle timeout");
+            None
+        }
+    } {
         match event {
             LlmEvent::TextDelta { delta } => summary.push_str(&delta),
             LlmEvent::Done { .. } => break,
@@ -510,7 +517,17 @@ async fn consume_llm_stream(
         role: "assistant".into(),
     });
 
-    while let Some(event) = rx.recv().await {
+    let stream_idle_timeout = std::time::Duration::from_secs(120);
+    while let Some(event) = match tokio::time::timeout(stream_idle_timeout, rx.recv()).await {
+        Ok(event) => event,
+        Err(_) => {
+            let _ = events.send(AgentEvent::MessageEnd);
+            anyhow::bail!(
+                "LLM stream idle for {}s — connection may be stalled",
+                stream_idle_timeout.as_secs()
+            );
+        }
+    } {
         match event {
             LlmEvent::Start => {} // Initial partial message — ignored
             LlmEvent::TextStart => {}
