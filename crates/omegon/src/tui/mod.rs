@@ -573,6 +573,7 @@ impl App {
         ("chronos",  "date/time context",                      &["week", "month", "quarter", "relative", "iso", "epoch", "tz", "range", "all"]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
         ("dash",     "toggle dashboard panel / open web UI",  &["open"]),
+        ("vault",    "Vault status and management",           &["status", "configure", "init-policy"]),
         ("splash",   "replay splash animation",              &[]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
@@ -756,6 +757,70 @@ impl App {
                 // Set flag to replay splash on next draw cycle
                 self.replay_splash = true;
                 SlashResult::Handled
+            }
+
+            "vault" => {
+                match args {
+                    "" | "status" => {
+                        // Check Vault status via CLI
+                        let addr = std::env::var("VAULT_ADDR").unwrap_or_default();
+                        if addr.is_empty() {
+                            SlashResult::Display("Vault: not configured (VAULT_ADDR not set)\n\nUse `/vault configure` or set VAULT_ADDR".into())
+                        } else {
+                            match std::process::Command::new("vault").args(["status", "-format=json"]).output() {
+                                Ok(out) if out.status.success() => {
+                                    let body = String::from_utf8_lossy(&out.stdout);
+                                    let info = serde_json::from_str::<serde_json::Value>(&body).ok();
+                                    let sealed = info.as_ref().and_then(|v| v["sealed"].as_bool()).unwrap_or(true);
+                                    let version = info.as_ref().and_then(|v| v["version"].as_str()).unwrap_or("unknown");
+                                    let icon = if sealed { "🔒" } else { "🔓" };
+                                    SlashResult::Display(format!(
+                                        "Vault {icon}\n  Address:  {addr}\n  Status:   {}\n  Version:  {version}",
+                                        if sealed { "sealed" } else { "unsealed" },
+                                    ))
+                                }
+                                Ok(out) => {
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    if stderr.contains("sealed") || stderr.contains("Sealed") {
+                                        SlashResult::Display(format!("Vault 🔒\n  Address:  {addr}\n  Status:   sealed\n\nUse `/vault unseal` to provide unseal keys"))
+                                    } else {
+                                        SlashResult::Display(format!("Vault ✗\n  Address:  {addr}\n  Status:   unreachable\n  Error:    {}", stderr.chars().take(200).collect::<String>()))
+                                    }
+                                }
+                                Err(_) => SlashResult::Display(format!("Vault ✗\n  Address:  {addr}\n  Status:   vault CLI not found")),
+                            }
+                        }
+                    }
+                    "configure" => {
+                        SlashResult::Display(
+                            "Vault Configuration:\n\n\
+                             Set VAULT_ADDR to your Vault server address:\n\
+                             \n  export VAULT_ADDR=https://vault.example.com\n\
+                             \nAuthenticate with:\n\
+                             \n  vault login                  # interactive\n\
+                             \n  vault login -method=approle  # AppRole\n\
+                             \nOr create ~/.omegon/vault.json:\n\
+                             \n  {\"addr\": \"https://vault.example.com\", \"auth\": \"token\", \"allowed_paths\": [\"secret/data/omegon/*\"], \"denied_paths\": []}".into()
+                        )
+                    }
+                    "init-policy" => {
+                        SlashResult::Display(
+                            "# Omegon Agent Vault Policy\n\
+                             # Apply with: vault policy write omegon-agent omegon-policy.hcl\n\n\
+                             ```hcl\n\
+                             # Read/write agent-scoped secrets\n\
+                             path \"secret/data/omegon/*\" {\n  capabilities = [\"read\", \"create\", \"update\"]\n}\n\
+                             path \"secret/metadata/omegon/*\" {\n  capabilities = [\"read\", \"list\"]\n}\n\n\
+                             # Read-only access to shared infra secrets\n\
+                             path \"secret/data/bootstrap/*\" {\n  capabilities = [\"read\"]\n}\n\n\
+                             # Allow minting child tokens for cleave\n\
+                             path \"auth/token/create\" {\n  capabilities = [\"create\", \"update\"]\n  allowed_parameters = {\n    \"policies\" = [\"omegon-child\"]\n    \"ttl\" = [\"30m\"]\n    \"num_uses\" = [\"100\"]\n  }\n}\n\
+                             ```\n\n\
+                             Save to a file and apply: `vault policy write omegon-agent <file>`".into()
+                        )
+                    }
+                    _ => SlashResult::Display(format!("Unknown vault subcommand: {args}\nOptions: status, configure, init-policy")),
+                }
             }
 
             "exit" | "quit" => SlashResult::Quit,

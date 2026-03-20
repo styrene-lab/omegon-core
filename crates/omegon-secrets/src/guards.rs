@@ -54,6 +54,7 @@ const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern { pattern: "secrets.yaml", description: "Secrets configuration", action: Action::Warn },
     SensitivePattern { pattern: "secrets.yml", description: "Secrets configuration", action: Action::Warn },
     // Vault/keystore
+    SensitivePattern { pattern: "vault.json", description: "Vault configuration (may contain auth)", action: Action::Block },
     SensitivePattern { pattern: ".vault-token", description: "Vault token", action: Action::Block },
     SensitivePattern { pattern: "keystore.jks", description: "Java keystore", action: Action::Block },
     SensitivePattern { pattern: ".p12", description: "PKCS#12 certificate", action: Action::Block },
@@ -175,6 +176,22 @@ mod tests {
         let guard = PathGuard::new();
         let decision = guard.check("bash", &json!({"command": "security find-generic-password -s myapp -w"}));
         assert!(decision.is_some());
+    }
+
+    #[test]
+    fn block_vault_json() {
+        let guard = PathGuard::new();
+        let decision = guard.check("read", &json!({"path": "/home/user/.omegon/vault.json"}));
+        assert!(decision.is_some());
+        assert!(decision.unwrap().is_block());
+    }
+
+    #[test]
+    fn block_vault_token() {
+        let guard = PathGuard::new();
+        let decision = guard.check("read", &json!({"path": "/home/user/.vault-token"}));
+        assert!(decision.is_some());
+        assert!(decision.unwrap().is_block());
     }
 
     #[test]

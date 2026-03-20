@@ -725,6 +725,34 @@ impl Feature for LifecycleFeature {
 
     fn on_event(&mut self, event: &BusEvent) -> Vec<BusRequest> {
         match event {
+            BusEvent::SessionStart { .. } => {
+                // Check Vault health if configured
+                let mut requests = vec![];
+                if std::env::var("VAULT_ADDR").is_ok() || self.repo_path.join(".omegon/vault.json").exists() {
+                    match std::process::Command::new("vault")
+                        .args(["status", "-format=json"])
+                        .output()
+                    {
+                        Ok(out) => {
+                            let body = String::from_utf8_lossy(&out.stdout);
+                            let sealed = serde_json::from_str::<Value>(&body)
+                                .ok()
+                                .and_then(|v| v["sealed"].as_bool())
+                                .unwrap_or(true);
+                            if sealed {
+                                requests.push(BusRequest::Notify {
+                                    message: "Vault is sealed — secrets from Vault unavailable. Use /vault unseal".into(),
+                                    level: omegon_traits::NotifyLevel::Warning,
+                                });
+                            }
+                        }
+                        Err(_) => {
+                            // vault CLI not available or unreachable — silent skip
+                        }
+                    }
+                }
+                requests
+            }
             BusEvent::TurnEnd { .. } => {
                 self.turn_counter += 1;
                 // Refresh every 5 turns to pick up external changes
