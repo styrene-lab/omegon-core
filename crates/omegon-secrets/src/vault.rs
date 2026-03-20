@@ -20,9 +20,9 @@ use reqwest::{Client, Response};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use url::Url;
 
 /// Vault configuration loaded from vault.json or environment.
@@ -49,9 +49,10 @@ fn default_timeout() -> u64 {
 }
 
 /// Authentication method configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(tag = "method")]
 pub enum AuthConfig {
+    #[default]
     #[serde(rename = "token")]
     Token,
     #[serde(rename = "approle")]
@@ -73,11 +74,6 @@ fn default_k8s_token_path() -> String {
     "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self::Token
-    }
-}
 
 /// Vault seal status response.
 #[derive(Debug, Deserialize)]
@@ -114,10 +110,12 @@ pub struct KvV2Response {
 #[derive(Debug, Deserialize)]
 pub struct KvV2Data {
     pub data: HashMap<String, serde_json::Value>,
+    #[allow(dead_code)]
     pub metadata: KvV2Metadata,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct KvV2Metadata {
     pub version: u32,
     pub created_time: String,
@@ -146,8 +144,11 @@ pub struct CreateTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct TokenAuth {
     pub client_token: String,
+    #[allow(dead_code)]
     pub lease_duration: u64,
+    #[allow(dead_code)]
     pub renewable: bool,
+    #[allow(dead_code)]
     pub policies: Vec<String>,
 }
 
@@ -171,17 +172,15 @@ impl VaultConfig {
     /// Load configuration from vault.json in the config directory, or from environment.
     pub fn load_config(config_dir: &Path) -> Result<Option<VaultConfig>> {
         // First try VAULT_ADDR environment variable
-        if let Ok(addr) = std::env::var("VAULT_ADDR") {
-            if !addr.is_empty() {
-                info!("using VAULT_ADDR: {}", addr);
-                return Ok(Some(VaultConfig {
-                    addr,
-                    auth: AuthConfig::Token,
-                    allowed_paths: vec!["secret/data/*".to_string()],
-                    denied_paths: vec![],
-                    timeout_secs: default_timeout(),
-                }));
-            }
+        if let Ok(addr) = std::env::var("VAULT_ADDR") && !addr.is_empty() {
+            info!("using VAULT_ADDR: {}", addr);
+            return Ok(Some(VaultConfig {
+                addr,
+                auth: AuthConfig::Token,
+                allowed_paths: vec!["secret/data/*".to_string()],
+                denied_paths: vec![],
+                timeout_secs: default_timeout(),
+            }));
         }
 
         // Then try vault.json
@@ -236,26 +235,22 @@ impl VaultClient {
     /// 3. Configured auth method (AppRole, Kubernetes SA)
     pub async fn authenticate(&mut self) -> Result<()> {
         // 1. Check VAULT_TOKEN environment variable
-        if let Ok(token) = std::env::var("VAULT_TOKEN") {
-            if !token.is_empty() {
-                debug!("using VAULT_TOKEN environment variable");
-                self.token = Some(SecretString::from(token));
-                return Ok(());
-            }
+        if let Ok(token) = std::env::var("VAULT_TOKEN") && !token.is_empty() {
+            debug!("using VAULT_TOKEN environment variable");
+            self.token = Some(SecretString::from(token));
+            return Ok(());
         }
 
         // 2. Check ~/.vault-token file
         if let Some(home) = dirs::home_dir() {
             let token_file = home.join(".vault-token");
-            if token_file.exists() {
-                if let Ok(token) = std::fs::read_to_string(&token_file) {
-                    let token = token.trim();
-                    if !token.is_empty() {
-                        debug!("using token from ~/.vault-token");
-                        self.token = Some(SecretString::from(token.to_string()));
-                        return Ok(());
-                    }
-                }
+            if token_file.exists()
+                && let Ok(token) = std::fs::read_to_string(&token_file)
+                && !token.trim().is_empty()
+            {
+                debug!("using token from ~/.vault-token");
+                self.token = Some(SecretString::from(token.trim().to_string()));
+                return Ok(());
             }
         }
 
@@ -607,8 +602,8 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
         builder.add(Glob::new(pattern)
             .with_context(|| format!("invalid glob pattern: {}", pattern))?);
     }
-    Ok(builder.build()
-        .context("failed to build glob set")?)
+    builder.build()
+        .context("failed to build glob set")
 }
 
 #[cfg(test)]
