@@ -46,6 +46,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6.8", features = ["cors"] }
 futures-util = "0.3.32"
+base64 = "0.22"
 ansi-to-tui = "8.0"
 tui-tree-widget = "0.24"
 ratatui-toaster = "0.1"

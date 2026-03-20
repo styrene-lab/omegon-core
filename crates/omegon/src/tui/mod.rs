@@ -27,7 +27,7 @@ pub mod widgets;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -49,8 +49,10 @@ use self::editor::Editor;
 /// Messages from TUI to the agent coordinator.
 #[derive(Debug)]
 pub enum TuiCommand {
-    /// User submitted a prompt.
+    /// User submitted a prompt with optional image attachments.
     UserPrompt(String),
+    /// User submitted a prompt with image attachments (paths).
+    UserPromptWithImages(String, Vec<std::path::PathBuf>),
     /// User wants to quit (double Ctrl+C, or /exit).
     Quit,
     /// Switch the model for the next turn.
@@ -114,6 +116,8 @@ pub struct App {
     queued_prompt: Option<String>,
     /// Toast notification engine.
     toasts: ratatui_toaster::ToastEngine<()>,
+    /// Pending image attachment from clipboard paste.
+    pending_image: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +178,7 @@ impl App {
             toasts: ratatui_toaster::ToastEngineBuilder::new(ratatui::prelude::Rect::default())
                 .default_duration(std::time::Duration::from_secs(4))
                 .build(),
+            pending_image: None,
         }
     }
 
@@ -1025,6 +1030,125 @@ pub fn open_browser(url: &str) {
     { let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn(); }
 }
 
+/// Try to read image data from the system clipboard and save to a temp file.
+///
+/// Supports PNG, JPEG, TIFF, GIF, BMP, and WebP. On macOS uses `osascript`
+/// to probe clipboard info and `pbpaste` or AppleScript for extraction.
+/// On Linux uses `xclip`. Returns the temp file path on success.
+fn clipboard_image_to_temp() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        // Ask the clipboard what types are available
+        let info = std::process::Command::new("osascript")
+            .args(["-e", "clipboard info"])
+            .output()
+            .ok()?;
+        let info_str = String::from_utf8_lossy(&info.stdout);
+
+        // Map clipboard UTI → (extension, pasteboard type for AppleScript)
+        let formats: &[(&str, &str, &str)] = &[
+            ("public.png",          "png",  "«class PNGf»"),
+            ("public.jpeg",         "jpg",  "«class JPEG»"),
+            ("public.tiff",         "tiff", "«class TIFF»"),
+            ("com.compuserve.gif",  "gif",  "«class GIFf»"),
+            ("com.microsoft.bmp",   "bmp",  "«class BMP »"),
+            ("public.webp",         "webp", "«class PNGf»"), // WebP often comes as PNG on pasteboard
+        ];
+
+        let (ext, pb_type) = formats.iter()
+            .find(|(uti, _, _)| info_str.contains(uti))
+            .map(|(_, ext, pb)| (*ext, *pb))?;
+
+        // Read the raw image data via AppleScript
+        let script = format!(
+            "set imgData to the clipboard as {pb_type}\nreturn imgData"
+        );
+        let output = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .ok()?;
+
+        if !output.status.success() || output.stdout.is_empty() {
+            return None;
+        }
+
+        // osascript returns the data with a «data ....» wrapper — extract raw bytes
+        // Actually, osascript binary output is unreliable. Use a write-to-file approach instead.
+        let tmp_dir = std::env::temp_dir();
+        let filename = format!("omegon-clipboard-{}.{ext}", std::process::id());
+        let tmp_path = tmp_dir.join(&filename);
+
+        let write_script = format!(
+            r#"set imgData to the clipboard as {pb_type}
+set filePath to POSIX file "{}" as text
+set fileRef to open for access file filePath with write permission
+set eof fileRef to 0
+write imgData to fileRef
+close access fileRef"#,
+            tmp_path.display()
+        );
+
+        let result = std::process::Command::new("osascript")
+            .args(["-e", &write_script])
+            .output()
+            .ok()?;
+
+        if result.status.success() && tmp_path.exists() {
+            let meta = std::fs::metadata(&tmp_path).ok()?;
+            if meta.len() > 0 {
+                return Some(tmp_path);
+            }
+        }
+        let _ = std::fs::remove_file(&tmp_path);
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try each MIME type in order of preference
+        let types = &[
+            ("image/png", "png"),
+            ("image/jpeg", "jpg"),
+            ("image/gif", "gif"),
+            ("image/bmp", "bmp"),
+            ("image/webp", "webp"),
+            ("image/tiff", "tiff"),
+        ];
+
+        // Check what's available
+        let targets = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+            .output()
+            .ok()?;
+        let targets_str = String::from_utf8_lossy(&targets.stdout);
+
+        let (mime, ext) = types.iter()
+            .find(|(mime, _)| targets_str.contains(mime))
+            .copied()?;
+
+        let output = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", mime, "-o"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() || output.stdout.is_empty() {
+            return None;
+        }
+
+        let tmp_dir = std::env::temp_dir();
+        let filename = format!("omegon-clipboard-{}.{ext}", std::process::id());
+        let tmp_path = tmp_dir.join(&filename);
+
+        std::fs::write(&tmp_path, &output.stdout).ok()?;
+        Some(tmp_path)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 fn history_path(cwd: &str) -> std::path::PathBuf {
     let project_root = crate::setup::find_project_root(std::path::Path::new(cwd));
     project_root.join(".omegon").join("history")
@@ -1238,6 +1362,16 @@ pub async fn run_tui(
                 Event::Paste(ref text) => {
                     app.editor.textarea.insert_str(text);
                 }
+                // ── Ctrl+V: check for clipboard image ──────────
+                Event::Key(KeyEvent { code: KeyCode::Char('v'), modifiers: KeyModifiers::CONTROL, .. }) => {
+                    if let Some(path) = clipboard_image_to_temp() {
+                        app.conversation.push_image(path.clone(), "clipboard paste");
+                        app.show_toast("📎 Image pasted", ratatui_toaster::ToastType::Info);
+                        // Store the path for attachment on next prompt
+                        app.pending_image = Some(path);
+                    }
+                    // If no image, Ctrl+V is handled by crossterm as bracketed paste
+                }
                 Event::Key(key) => {
                 // ── Selector popup intercepts all keys when open ────
                 if app.selector.is_some() {
@@ -1417,7 +1551,11 @@ pub async fn run_tui(
                                 app.history.push(text.clone());
                                 app.history_idx = None;
                                 app.agent_active = true;
-                                let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
+                                if let Some(img) = app.pending_image.take() {
+                                    let _ = command_tx.send(TuiCommand::UserPromptWithImages(text, vec![img])).await;
+                                } else {
+                                    let _ = command_tx.send(TuiCommand::UserPrompt(text)).await;
+                                }
                             }
                         }
                     }

@@ -589,6 +589,82 @@ async fn run_interactive_command(cli: &Cli) -> anyhow::Result<()> {
                 }
             }
 
+            tui::TuiCommand::UserPromptWithImages(text, image_paths) => {
+                // Encode images and attach to the next LLM call
+                let mut images = Vec::new();
+                for path in &image_paths {
+                    if let Ok(data) = std::fs::read(path) {
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+                        let media_type = match ext {
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "webp" => "image/webp",
+                            "bmp" => "image/bmp",
+                            "tiff" | "tif" => "image/tiff",
+                            _ => "image/png",
+                        };
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        images.push(crate::bridge::ImageAttachment {
+                            data: b64,
+                            media_type: media_type.to_string(),
+                        });
+                    }
+                }
+                // Push user text (images go through the LLM message separately)
+                agent.conversation.push_user(text.clone());
+                // Store images for the next LLM call
+                agent.conversation.pending_images = images;
+
+                // Read current settings for this turn
+                let (model, max_turns) = {
+                    let s = shared_settings.lock().unwrap();
+                    (s.model.clone(), s.max_turns)
+                };
+
+                let extended_context = matches!(
+                    shared_settings.lock().map(|s| s.context_mode),
+                    Ok(settings::ContextMode::Extended)
+                );
+                let loop_config = r#loop::LoopConfig {
+                    max_turns,
+                    soft_limit_turns: if max_turns > 0 { max_turns * 2 / 3 } else { 0 },
+                    max_retries: cli.max_retries,
+                    retry_delay_ms: 2000,
+                    model,
+                    cwd: agent.cwd.clone(),
+                    extended_context,
+                    settings: Some(shared_settings.clone()),
+                    secrets: Some(agent.secrets.clone()),
+                };
+
+                let cancel = CancellationToken::new();
+                if let Ok(mut guard) = shared_cancel.lock() {
+                    *guard = Some(cancel.clone());
+                }
+
+                if let Err(e) = r#loop::run(
+                    bridge.as_ref(),
+                    &mut agent.bus,
+                    &mut agent.context_manager,
+                    &mut agent.conversation,
+                    &events_tx,
+                    cancel,
+                    &loop_config,
+                ).await {
+                    let user_msg = format_agent_error(&e);
+                    tracing::error!("Agent loop error: {e}");
+                    let _ = events_tx.send(AgentEvent::SystemNotification {
+                        message: user_msg,
+                    });
+                    let _ = events_tx.send(AgentEvent::AgentEnd);
+                }
+
+                if let Ok(mut guard) = shared_cancel.lock() {
+                    guard.take();
+                }
+            }
+
             tui::TuiCommand::UserPrompt(text) => {
                 agent.conversation.push_user(text);
 

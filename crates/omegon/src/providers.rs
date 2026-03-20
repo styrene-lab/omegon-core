@@ -258,7 +258,26 @@ impl AnthropicClient {
 
     fn build_messages(messages: &[LlmMessage]) -> Vec<Value> {
         messages.iter().map(|m| match m {
-            LlmMessage::User { content } => json!({"role": "user", "content": content}),
+            LlmMessage::User { content, images } => {
+                if images.is_empty() {
+                    json!({"role": "user", "content": content})
+                } else {
+                    // Build content blocks array: images first, then text
+                    let mut blocks = Vec::new();
+                    for img in images {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.media_type,
+                                "data": img.data,
+                            }
+                        }));
+                    }
+                    blocks.push(json!({"type": "text", "text": content}));
+                    json!({"role": "user", "content": blocks})
+                }
+            }
             LlmMessage::Assistant { text, thinking, tool_calls, raw } => {
                 // Prefer raw content blocks if available — they preserve provider-specific
                 // fields like thinking signatures that are required for round-tripping.
@@ -658,8 +677,17 @@ impl LlmBridge for OpenAIClient {
         let mut wire_msgs = vec![json!({"role": "system", "content": system_prompt})];
         for m in messages {
             match m {
-                LlmMessage::User { content } => {
-                    wire_msgs.push(json!({"role": "user", "content": content}));
+                LlmMessage::User { content, images } => {
+                    if images.is_empty() {
+                        wire_msgs.push(json!({"role": "user", "content": content}));
+                    } else {
+                        let mut blocks: Vec<Value> = images.iter().map(|img| json!({
+                            "type": "image_url",
+                            "image_url": { "url": format!("data:{};base64,{}", img.media_type, img.data) }
+                        })).collect();
+                        blocks.push(json!({"type": "text", "text": content}));
+                        wire_msgs.push(json!({"role": "user", "content": blocks}));
+                    }
                 }
                 LlmMessage::Assistant { text, tool_calls, .. } => {
                     let mut msg = json!({"role": "assistant"});
@@ -804,7 +832,7 @@ mod tests {
     #[test]
     fn anthropic_build_messages() {
         let messages = vec![
-            LlmMessage::User { content: "hello".into() },
+            LlmMessage::User { content: "hello".into(), images: vec![] },
         ];
         let wire = AnthropicClient::build_messages(&messages);
         assert_eq!(wire.len(), 1);

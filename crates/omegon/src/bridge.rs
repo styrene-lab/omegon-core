@@ -23,12 +23,25 @@ use tokio::sync::{mpsc, Mutex};
 // These types define what Omegon sends and receives.
 // The bridge JS translates to/from provider-specific formats.
 
+/// An image attachment on a user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// Base64-encoded image data.
+    pub data: String,
+    /// MIME type (image/png, image/jpeg, etc.)
+    pub media_type: String,
+}
+
 /// A message in the conversation — Omegon's format, not any provider's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role")]
 pub enum LlmMessage {
     #[serde(rename = "user")]
-    User { content: String },
+    User {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
+    },
 
     #[serde(rename = "assistant")]
     Assistant {
@@ -62,7 +75,7 @@ impl LlmMessage {
     /// Estimate character count for token budget calculations.
     pub fn char_count(&self) -> usize {
         match self {
-            LlmMessage::User { content } => content.len(),
+            LlmMessage::User { content, .. } => content.len(),
             LlmMessage::Assistant { text, thinking, tool_calls, .. } => {
                 let text_len: usize = text.iter().map(|t| t.len()).sum();
                 let think_len: usize = thinking.iter().map(|t| t.len()).sum();
@@ -417,12 +430,12 @@ mod tests {
 
     #[test]
     fn llm_message_user_round_trip() {
-        let msg = LlmMessage::User { content: "hello".into() };
+        let msg = LlmMessage::User { content: "hello".into(), images: vec![] };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""role":"user"#));
         let parsed: LlmMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            LlmMessage::User { content } => assert_eq!(content, "hello"),
+            LlmMessage::User { content, .. } => assert_eq!(content, "hello"),
             _ => panic!("wrong variant"),
         }
     }

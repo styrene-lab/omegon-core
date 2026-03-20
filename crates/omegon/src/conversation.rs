@@ -213,6 +213,9 @@ pub struct ConversationState {
     /// Compaction summary — if set, injected as the first message after compaction.
     /// Replaces evicted messages so the LLM has continuity.
     compaction_summary: Option<String>,
+
+    /// Pending image attachments from clipboard paste — consumed on next LLM call.
+    pub pending_images: Vec<crate::bridge::ImageAttachment>,
 }
 
 impl ConversationState {
@@ -223,6 +226,7 @@ impl ConversationState {
             decay_window: 10,
             referenced_turns: std::collections::HashSet::new(),
             compaction_summary: None,
+            pending_images: Vec::new(),
         }
     }
 
@@ -459,6 +463,7 @@ impl ConversationState {
                     "[Previous conversation summary]\n{summary}\n\n{}\n[End summary — continue from here]",
                     self.render_intent_for_injection()
                 ),
+                images: vec![],
             });
         }
 
@@ -477,7 +482,21 @@ impl ConversationState {
             }
         }
 
+        // Attach pending images to the last user message
+        if !self.pending_images.is_empty() {
+            if let Some(last_user) = messages.iter_mut().rev().find(|m| matches!(m, LlmMessage::User { .. })) {
+                if let LlmMessage::User { images, .. } = last_user {
+                    *images = self.pending_images.clone();
+                }
+            }
+        }
+
         messages
+    }
+
+    /// Clear pending images after they've been sent to the LLM.
+    pub fn clear_pending_images(&mut self) {
+        self.pending_images.clear();
     }
 
     /// Apply ambient captures from omg: tags.
@@ -598,6 +617,7 @@ impl ConversationState {
             // User messages are small — don't decay
             AgentMessage::User { text, .. } => LlmMessage::User {
                 content: text.clone(),
+                images: vec![],
             },
         }
     }
@@ -645,7 +665,7 @@ impl ConversationState {
             .map(|msg| {
                 let turn = last_turn;
                 match msg {
-                    LlmMessage::User { content } => AgentMessage::User { text: content, turn },
+                    LlmMessage::User { content, .. } => AgentMessage::User { text: content, turn },
                     LlmMessage::Assistant { text, thinking, tool_calls, raw } => {
                         AgentMessage::Assistant(
                             AssistantMessage {
@@ -683,6 +703,7 @@ impl ConversationState {
             decay_window: snapshot.decay_window,
             referenced_turns: std::collections::HashSet::new(),
             compaction_summary: snapshot.compaction_summary,
+            pending_images: Vec::new(),
         })
     }
 
@@ -775,6 +796,7 @@ impl ConversationState {
         match msg {
             AgentMessage::User { text, .. } => LlmMessage::User {
                 content: text.clone(),
+                images: vec![],
             },
             AgentMessage::Assistant(a, _) => LlmMessage::Assistant {
                 text: if a.text.is_empty() {
@@ -1077,7 +1099,7 @@ mod tests {
         // The LLM view should have the summary + the recent message
         let view = conv.build_llm_view();
         assert_eq!(view.len(), 2); // summary pseudo-message + recent
-        if let LlmMessage::User { content } = &view[0] {
+        if let LlmMessage::User { content, .. } = &view[0] {
             assert!(content.contains("Summary of old conversation"));
             assert!(content.contains("[Intent"));
         }

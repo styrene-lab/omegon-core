@@ -172,6 +172,7 @@ pub async fn run(
         let system_prompt =
             context.build_system_prompt(conversation.last_user_prompt(), conversation);
         let llm_messages = conversation.build_llm_view();
+        conversation.clear_pending_images();
 
         tracing::debug!(
             turn,
@@ -367,6 +368,7 @@ async fn compact_via_llm(
 
     let messages = vec![crate::bridge::LlmMessage::User {
         content: payload.to_string(),
+        images: vec![],
     }];
 
     let mut rx = bridge
