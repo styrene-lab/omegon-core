@@ -128,6 +128,12 @@ pub async fn run_cleave(
                 Ok(wt_path) => {
                     state.children[child_idx].worktree_path = Some(wt_path.to_string_lossy().to_string());
 
+                    // Initialize submodules in the worktree so children
+                    // can access files inside them
+                    if let Err(e) = worktree::submodule_init(&wt_path) {
+                        tracing::warn!(child = %label, "submodule init failed: {e}");
+                    }
+
                     // Read existing task file (written by TS with OpenSpec enrichment)
                     // or generate a basic one if absent
                     let task_path = workspace_path.join(format!("{}-task.md", child_idx));
@@ -138,7 +144,7 @@ pub async fn run_cleave(
                         let scope = &state.children[child_idx].scope;
                         let content = build_task_file(
                             child_idx, &label, description, scope, directive,
-                            &state.children, &guardrail_section,
+                            &state.children, &guardrail_section, repo_path,
                         );
                         std::fs::write(&task_path, &content)?;
                         content
@@ -161,6 +167,17 @@ pub async fn run_cleave(
             }
         }
         state.save(&state_path)?;
+
+        // ── Emit task inventories ────────────────────────────────────────
+        for info in &to_dispatch {
+            let task_count = progress::count_task_items(&info.prompt);
+            let scope_files = state.children[info.child_idx].scope.len();
+            progress::emit_progress(&ProgressEvent::ChildTaskInventory {
+                child: info.label.clone(),
+                total_tasks: task_count,
+                scope_files,
+            });
+        }
 
         // ── Dispatch children ───────────────────────────────────────────
         let mut handles = Vec::new();
@@ -212,7 +229,33 @@ pub async fn run_cleave(
                         "child completed"
                     );
 
-                    // Auto-commit any uncommitted changes in the worktree.
+                    // Auto-commit dirty submodules first — children often
+                    // write inside submodules but only the parent git sees
+                    // the pointer change. This commits the actual work inside
+                    // the submodule before the parent auto-commit runs.
+                    if let Some(wt) = &state.children[child_idx].worktree_path {
+                        match worktree::commit_dirty_submodules(
+                            Path::new(wt),
+                            &state.children[child_idx].label,
+                        ) {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    child = %state.children[child_idx].label,
+                                    submodules = n,
+                                    "auto-committed dirty submodules"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    child = %state.children[child_idx].label,
+                                    "submodule auto-commit failed: {e}"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Auto-commit any remaining uncommitted changes in the worktree.
                     let auto_committed = if let Some(wt) = &state.children[child_idx].worktree_path {
                         auto_commit_worktree(
                             Path::new(wt),
@@ -615,6 +658,7 @@ fn build_task_file(
     directive: &str,
     siblings: &[super::state::ChildState],
     guardrail_section: &str,
+    repo_path: &Path,
 ) -> String {
     let scope_list = scope
         .iter()
@@ -655,6 +699,10 @@ fn build_task_file(
         "Write tests for new functions and changed behavior — co-locate as *.test.ts"
     };
 
+    // Discover project context for this child's scope
+    let ctx = super::context::discover_child_context(repo_path, scope);
+    let context_sections = super::context::format_context_sections(&ctx);
+
     format!(
         r#"---
 task_id: {child_idx}
@@ -678,15 +726,15 @@ siblings: [{sibling_refs}]
 
 {dep_note}
 {sibling_section}
+{context_sections}
 {guardrail_section}
 ## Contract
 
 1. Only work on files within your scope
 2. {test_convention}
-3. Update the Result section below when done
-4. Commit your work with clear messages — do not push
-5. If the task is too complex, set status to NEEDS_DECOMPOSITION
+3. If the task is too complex, set status to NEEDS_DECOMPOSITION
 
+{finalization}
 ## Result
 
 **Status:** PENDING
@@ -704,6 +752,7 @@ siblings: [{sibling_refs}]
             .map(|s| format!("{}:{}", s.child_id, s.label))
             .collect::<Vec<_>>()
             .join(", "),
+        finalization = ctx.finalization,
     )
 }
 
@@ -763,7 +812,7 @@ mod tests {
         ];
         let guardrails = "## Project Guardrails\n\n1. **typecheck**: `tsc`\n";
 
-        let task = build_task_file(1, "beta", "Do beta work", &["tests/".into()], "Fix bugs", &siblings, guardrails);
+        let task = build_task_file(1, "beta", "Do beta work", &["tests/".into()], "Fix bugs", &siblings, guardrails, Path::new("/tmp/nonexistent"));
 
         // Frontmatter
         assert!(task.contains("task_id: 1"), "missing task_id");
@@ -799,7 +848,7 @@ mod tests {
             error: None, branch: None, worktree_path: None,
             backend: "native".into(), execute_model: None, duration_secs: None,
         }];
-        let task = build_task_file(0, "rust-child", "Fix Rust code", &["crates/omegon/".into()], "Fix", &siblings, "");
+        let task = build_task_file(0, "rust-child", "Fix Rust code", &["crates/omegon/".into()], "Fix", &siblings, "", Path::new("/tmp/nonexistent"));
         assert!(task.contains("#[test]"), "Rust scope should get #[test] convention, got: {}", task.lines().find(|l| l.contains("test")).unwrap_or("none"));
     }
 

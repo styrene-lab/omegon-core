@@ -120,6 +120,150 @@ pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Initialize submodules in a worktree.
+///
+/// Worktrees don't inherit submodule checkouts from the parent — this
+/// ensures children can access files inside submodules.
+pub fn submodule_init(worktree_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["submodule", "update", "--init", "--recursive"])
+        .current_dir(worktree_path)
+        .output()
+        .context("Failed to init submodules in worktree")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("submodule init warning: {}", stderr.trim());
+    } else {
+        tracing::info!(worktree = %worktree_path.display(), "submodules initialized");
+    }
+    Ok(())
+}
+
+/// Detect active submodules in a repo/worktree.
+///
+/// Returns a list of (submodule_name, submodule_path) pairs.
+pub fn detect_submodules(repo_path: &Path) -> Vec<(String, PathBuf)> {
+    let output = match Command::new("git")
+        .args(["submodule", "status"])
+        .current_dir(repo_path)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            // Format: " <sha1> <path> (<describe>)" or "+<sha1> <path> (<describe>)"
+            let trimmed = line.trim_start_matches([' ', '+', '-', 'U']);
+            let mut parts = trimmed.split_whitespace();
+            let _sha = parts.next()?;
+            let path = parts.next()?;
+            Some((path.to_string(), repo_path.join(path)))
+        })
+        .collect()
+}
+
+/// Commit dirty submodules in a worktree after a child finishes.
+///
+/// For each submodule that has uncommitted changes:
+/// 1. Stage and commit inside the submodule
+/// 2. Stage the updated submodule pointer in the parent
+/// 3. Commit the pointer update in the parent
+///
+/// Returns the number of submodules committed. Returns 0 (no-op) if
+/// no submodules are dirty.
+pub fn commit_dirty_submodules(worktree_path: &Path, child_label: &str) -> Result<usize> {
+    let submodules = detect_submodules(worktree_path);
+    if submodules.is_empty() {
+        return Ok(0);
+    }
+
+    let mut committed = 0;
+
+    for (name, sub_path) in &submodules {
+        if !sub_path.exists() {
+            continue;
+        }
+
+        // Check if submodule is dirty
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(sub_path)
+            .output()
+            .context(format!("Failed to check submodule status: {name}"))?;
+
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        if stdout.trim().is_empty() {
+            continue; // Clean — nothing to do
+        }
+
+        tracing::info!(
+            child = %child_label,
+            submodule = %name,
+            dirty_files = stdout.lines().count(),
+            "auto-committing dirty submodule"
+        );
+
+        // Stage all changes inside the submodule (.gitignore-aware)
+        let add_output = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(sub_path)
+            .output()
+            .context(format!("Failed to stage submodule changes: {name}"))?;
+
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            tracing::warn!(submodule = %name, "git add warning: {}", stderr.trim());
+        }
+
+        // Commit inside the submodule
+        let msg = format!("feat({child_label}): auto-commit from cleave child");
+        let commit_output = Command::new("git")
+            .args(["commit", "-m", &msg])
+            .current_dir(sub_path)
+            .output()
+            .context(format!("Failed to commit in submodule: {name}"))?;
+
+        if !commit_output.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_output.stderr);
+            if stderr.contains("nothing to commit") {
+                continue;
+            }
+            tracing::warn!(submodule = %name, "submodule commit warning: {}", stderr.trim());
+            continue;
+        }
+
+        // Stage the submodule pointer update in the parent
+        let _ = Command::new("git")
+            .args(["add", name])
+            .current_dir(worktree_path)
+            .output();
+
+        committed += 1;
+    }
+
+    // If any submodules were committed, commit the pointer updates in the parent
+    if committed > 0 {
+        let msg = format!("chore({child_label}): update submodule pointer(s)");
+        let _ = Command::new("git")
+            .args(["commit", "-m", &msg])
+            .current_dir(worktree_path)
+            .output();
+
+        tracing::info!(
+            child = %child_label,
+            submodules_committed = committed,
+            "submodule auto-commit complete"
+        );
+    }
+
+    Ok(committed)
+}
+
 #[derive(Debug)]
 pub enum MergeResult {
     Success,

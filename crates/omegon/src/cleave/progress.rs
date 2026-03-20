@@ -39,6 +39,21 @@ pub enum ProgressEvent {
         child: String,
         files: usize,
     },
+    /// Task inventory for a child — emitted at dispatch time.
+    ChildTaskInventory {
+        child: String,
+        total_tasks: usize,
+        scope_files: usize,
+    },
+    /// Periodic progress estimate for a child.
+    ChildProgress {
+        child: String,
+        turn: u32,
+        total_tasks: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        loc_written: Option<usize>,
+        elapsed_secs: f64,
+    },
     MergeStart,
     MergeResult {
         child: String,
@@ -128,6 +143,19 @@ fn extract_turn_number(s: &str) -> Option<u32> {
         return None;
     }
     num_str.parse().ok()
+}
+
+/// Count task checklist items in a task file.
+///
+/// Looks for `- [ ]` or `- [x]` markdown checkboxes.
+pub fn count_task_items(content: &str) -> usize {
+    content.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]")
+                || trimmed.starts_with("- [X]")
+        })
+        .count()
 }
 
 /// Strip ANSI escape sequences from a string.
