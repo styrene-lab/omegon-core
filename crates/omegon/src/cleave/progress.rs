@@ -56,6 +56,17 @@ pub enum ProgressEvent {
         loc_written: Option<usize>,
         elapsed_secs: f64,
     },
+    /// Test-architect completed — test plans generated for children.
+    TestArchitectComplete {
+        plans_generated: usize,
+    },
+    /// Post-merge coverage report.
+    CoverageReport {
+        total_planned: usize,
+        found: usize,
+        missing: usize,
+        coverage_percent: f64,
+    },
     MergeStart,
     MergeResult {
         child: String,
