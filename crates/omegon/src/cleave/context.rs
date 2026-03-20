@@ -76,6 +76,115 @@ pub fn format_context_sections(ctx: &ChildContext) -> String {
     sections
 }
 
+/// Structured testing directives extracted from enriched task content.
+#[derive(Debug, Default, Clone)]
+pub struct TestingDirectives {
+    /// Spec scenarios that must have passing tests.
+    pub spec_scenarios: Vec<String>,
+    /// Edge cases that must each have at least one test.
+    pub edge_cases: Vec<String>,
+}
+
+impl TestingDirectives {
+    /// Whether any testing directives are present.
+    pub fn is_empty(&self) -> bool {
+        self.spec_scenarios.is_empty() && self.edge_cases.is_empty()
+    }
+}
+
+/// Extract testing directives from enriched task file content
+/// (e.g., from an OpenSpec-generated tasks.md).
+///
+/// Looks for `### Testing Requirements` sections with two tiers:
+/// - `**Spec Scenarios (must pass):**` followed by `- item` lines
+/// - `**Edge Cases (must have tests):**` followed by `- item` lines
+pub fn extract_testing_directives(task_content: &str) -> TestingDirectives {
+    let mut directives = TestingDirectives::default();
+
+    // Find the Testing Requirements section
+    let Some(testing_start) = task_content.find("### Testing Requirements") else {
+        return directives;
+    };
+    let section = &task_content[testing_start..];
+
+    // Find end of section (next ## heading or end of content)
+    let section_end = section[1..]
+        .find("\n## ")
+        .map(|i| i + 1)
+        .unwrap_or(section.len());
+    let section = &section[..section_end];
+
+    let mut current_tier: Option<&str> = None;
+
+    for line in section.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("**Spec Scenarios") {
+            current_tier = Some("scenarios");
+            continue;
+        }
+        if trimmed.starts_with("**Edge Cases") {
+            current_tier = Some("edge_cases");
+            continue;
+        }
+        // Any other bold heading or section heading resets
+        if trimmed.starts_with("**") || trimmed.starts_with("##") {
+            current_tier = None;
+            continue;
+        }
+
+        if let Some(tier) = current_tier {
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                // Skip checkbox items (task lines like "- [ ] 1.3 Tests for...")
+                if !item.is_empty() && !item.starts_with("[ ]") && !item.starts_with("[x]") && !item.starts_with("[X]") {
+                    match tier {
+                        "scenarios" => directives.spec_scenarios.push(item.to_string()),
+                        "edge_cases" => directives.edge_cases.push(item.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    directives
+}
+
+/// Format testing directives as a markdown section for the task file.
+/// Returns empty string when no directives are present.
+pub fn format_testing_section(
+    directives: &TestingDirectives,
+    test_convention: &str,
+) -> String {
+    if directives.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("## Testing Requirements\n\n");
+
+    if !directives.spec_scenarios.is_empty() {
+        section.push_str("### Spec Scenarios (must pass)\n\n");
+        section.push_str("These scenarios from the spec MUST have corresponding passing tests:\n\n");
+        for s in &directives.spec_scenarios {
+            section.push_str(&format!("- {s}\n"));
+        }
+        section.push('\n');
+    }
+
+    if !directives.edge_cases.is_empty() {
+        section.push_str("### Edge Cases (must have tests)\n\n");
+        section.push_str("Each of these must have at least one test:\n\n");
+        for ec in &directives.edge_cases {
+            section.push_str(&format!("- {ec}\n"));
+        }
+        section.push('\n');
+    }
+
+    section.push_str(&format!("### Test Convention\n\n{test_convention}\n\n"));
+
+    section
+}
+
 /// Detect submodule names from `git submodule status`.
 /// Delegates to worktree::detect_submodules to avoid duplication.
 fn detect_submodule_names(repo_path: &Path) -> Vec<String> {
@@ -436,6 +545,73 @@ async fn test_async() {
         assert!(section.contains("Submodule commits"));
         assert!(section.contains("cd core"));
         assert!(section.contains("git add core"));
+    }
+
+    #[test]
+    fn extract_testing_directives_from_enriched_content() {
+        let content = r#"
+## 1. JWT token validation
+
+- [ ] 1.1 Valid token accepted
+- [ ] 1.2 Expired token rejected
+
+### Testing Requirements
+
+**Spec Scenarios (must pass):**
+- Valid token accepted
+- Expired token rejected
+
+**Edge Cases (must have tests):**
+- Empty token string → 401 with descriptive error
+- Token with invalid signature → 401, not 500
+
+- [ ] 1.3 Tests for JWT token validation (see Testing Requirements above)
+
+## 2. Refresh tokens
+"#;
+        let directives = extract_testing_directives(content);
+        assert_eq!(directives.spec_scenarios.len(), 2);
+        assert_eq!(directives.edge_cases.len(), 2);
+        assert_eq!(directives.spec_scenarios[0], "Valid token accepted");
+        assert!(directives.edge_cases[0].contains("Empty token"));
+    }
+
+    #[test]
+    fn extract_testing_directives_empty_when_no_section() {
+        let content = "## Task\n\n- [ ] Do something\n\n## Contract\n\n1. Be good\n";
+        let directives = extract_testing_directives(content);
+        assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn extract_testing_directives_handles_scenarios_only() {
+        let content = "### Testing Requirements\n\n**Spec Scenarios (must pass):**\n- Scenario A\n- Scenario B\n";
+        let directives = extract_testing_directives(content);
+        assert_eq!(directives.spec_scenarios.len(), 2);
+        assert_eq!(directives.edge_cases.len(), 0);
+    }
+
+    #[test]
+    fn format_testing_section_produces_markdown() {
+        let directives = TestingDirectives {
+            spec_scenarios: vec!["Read returns data".into(), "Write succeeds".into()],
+            edge_cases: vec!["Empty path → error".into()],
+        };
+        let section = format_testing_section(&directives, "Write #[test] functions");
+        assert!(section.contains("## Testing Requirements"));
+        assert!(section.contains("### Spec Scenarios (must pass)"));
+        assert!(section.contains("Read returns data"));
+        assert!(section.contains("### Edge Cases (must have tests)"));
+        assert!(section.contains("Empty path → error"));
+        assert!(section.contains("### Test Convention"));
+        assert!(section.contains("#[test]"));
+    }
+
+    #[test]
+    fn format_testing_section_empty_when_no_directives() {
+        let directives = TestingDirectives::default();
+        let section = format_testing_section(&directives, "Write tests");
+        assert!(section.is_empty());
     }
 
     #[test]

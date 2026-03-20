@@ -703,6 +703,21 @@ fn build_task_file(
     let ctx = super::context::discover_child_context(repo_path, scope);
     let context_sections = super::context::format_context_sections(&ctx);
 
+    // Testing section — includes convention and any directives from task content
+    let testing_section = if let Some(ref example) = ctx.test_example {
+        // When we have a test example, include it in a richer Testing Requirements section
+        let directives = super::context::TestingDirectives::default();
+        let mut ts = super::context::format_testing_section(&directives, test_convention);
+        if ts.is_empty() {
+            // No directives but still show convention
+            ts = format!("## Testing Requirements\n\n### Test Convention\n\n{test_convention}\n\n");
+        }
+        ts.push_str(&format!("Example from codebase:\n\n```rust\n{example}\n```\n\n"));
+        ts
+    } else {
+        format!("## Testing Requirements\n\n### Test Convention\n\n{test_convention}\n\n")
+    };
+
     format!(
         r#"---
 task_id: {child_idx}
@@ -728,10 +743,11 @@ siblings: [{sibling_refs}]
 {sibling_section}
 {context_sections}
 {guardrail_section}
+{testing_section}
 ## Contract
 
 1. Only work on files within your scope
-2. {test_convention}
+2. Follow the Testing Requirements section above
 3. If the task is too complex, set status to NEEDS_DECOMPOSITION
 
 {finalization}
