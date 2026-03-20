@@ -112,6 +112,8 @@ pub struct App {
     web_server_addr: Option<std::net::SocketAddr>,
     /// Prompt queued while agent was busy — sent on next AgentEnd.
     queued_prompt: Option<String>,
+    /// Toast notification engine.
+    toasts: ratatui_toaster::ToastEngine<()>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +171,9 @@ impl App {
             dashboard_refresh_turn: 0,
             web_server_addr: None,
             queued_prompt: None,
+            toasts: ratatui_toaster::ToastEngineBuilder::new(ratatui::prelude::Rect::default())
+                .default_duration(std::time::Duration::from_secs(4))
+                .build(),
         }
     }
 
@@ -535,6 +540,20 @@ impl App {
 
         // ── Post-render effects (tachyonfx) — each zone processed separately ──
         self.effects.process(frame.buffer_mut(), chunks[0], chunks[3], chunks[1]);
+
+        // ── Toast notifications — rendered last, on top of everything ──
+        self.toasts.set_area(frame.area());
+        frame.render_widget(&self.toasts, frame.area());
+    }
+
+    /// Show a transient toast notification.
+    fn show_toast(&mut self, message: &str, toast_type: ratatui_toaster::ToastType) {
+        use ratatui_toaster::{ToastBuilder, ToastPosition};
+        self.toasts.show_toast(
+            ToastBuilder::new(std::borrow::Cow::Owned(message.to_string()))
+                .toast_type(toast_type)
+                .position(ToastPosition::TopRight),
+        );
     }
 
     /// Command registry: (name, description, subcommands).
@@ -957,7 +976,14 @@ impl App {
                 self.conversation.push_lifecycle("⚡", &format!("Cleave {status}"));
             }
             AgentEvent::SystemNotification { message } => {
-                self.conversation.push_system(&message);
+                // Transient notifications → toast; persistent ones → conversation
+                if message.starts_with('⟳') || message.starts_with("Retrying") {
+                    self.show_toast(&message, ratatui_toaster::ToastType::Warning);
+                } else if message.starts_with('⚡') {
+                    self.show_toast(&message, ratatui_toaster::ToastType::Info);
+                } else {
+                    self.conversation.push_system(&message);
+                }
             }
             _ => {}
         }

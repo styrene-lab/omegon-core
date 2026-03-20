@@ -455,10 +455,40 @@ fn render_tool_card(
             } else {
                 Style::default().fg(t.muted()).bg(t.surface_bg())
             };
-            for line in &result_lines[..show] {
-                lines.push(Line::from(Span::styled(
-                    line.to_string(), result_style,
-                )));
+
+            // Try ANSI color parsing for tool output (cargo, git diff, etc.)
+            let joined = result_lines[..show].join("\n");
+            let has_ansi = joined.contains('\x1b');
+
+            if has_ansi {
+                use ansi_to_tui::IntoText as _;
+                if let Ok(text) = joined.into_text() {
+                    for line in text.lines {
+                        let spans: Vec<Span<'_>> = line.spans.into_iter().map(|mut s| {
+                            // Preserve ANSI foreground, apply surface_bg
+                            s.style = s.style.bg(t.surface_bg());
+                            // If no foreground was set by ANSI, use muted
+                            if s.style.fg.is_none() {
+                                s.style = s.style.fg(t.muted());
+                            }
+                            s
+                        }).collect();
+                        lines.push(Line::from(spans));
+                    }
+                } else {
+                    // ANSI parse failed — fall back to plain
+                    for line in &result_lines[..show] {
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(), result_style,
+                        )));
+                    }
+                }
+            } else {
+                for line in &result_lines[..show] {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(), result_style,
+                    )));
+                }
             }
         }
 
@@ -889,5 +919,49 @@ mod tests {
         let h_expanded = seg_expanded.height(80, &Alpharius);
         assert!(h_expanded > h_collapsed,
             "expanded ({h_expanded}) should be taller than collapsed ({h_collapsed})");
+    }
+
+    #[test]
+    fn ansi_colored_tool_output_preserves_colors() {
+        // Simulate cargo output with ANSI red error
+        let ansi_result = "\x1b[31merror\x1b[0m: expected `;`\n  --> src/main.rs:5:10";
+        let seg = Segment::ToolCard {
+            id: "t1".into(),
+            name: "bash".into(),
+            args_summary: Some("cargo check".into()),
+            detail_args: Some("cargo check".into()),
+            result_summary: None,
+            detail_result: Some(ansi_result.into()),
+            is_error: false,
+            complete: true,
+            expanded: false,
+        };
+        let (area, mut buf) = make_buf(80, 12);
+        seg.render(area, &mut buf, &Alpharius);
+        let text = buf_text(&buf, area);
+        // The ANSI escape should be parsed, not rendered as raw escape
+        assert!(!text.contains("\x1b"), "ANSI escapes should be parsed, not raw: {text}");
+        assert!(text.contains("error"), "should contain error text: {text}");
+        assert!(text.contains("main.rs"), "should contain file reference: {text}");
+    }
+
+    #[test]
+    fn non_ansi_tool_output_renders_plain() {
+        let plain_result = "hello world\nline 2";
+        let seg = Segment::ToolCard {
+            id: "t1".into(),
+            name: "bash".into(),
+            args_summary: Some("echo hi".into()),
+            detail_args: Some("echo hi".into()),
+            result_summary: None,
+            detail_result: Some(plain_result.into()),
+            is_error: false,
+            complete: true,
+            expanded: false,
+        };
+        let (area, mut buf) = make_buf(80, 10);
+        seg.render(area, &mut buf, &Alpharius);
+        let text = buf_text(&buf, area);
+        assert!(text.contains("hello world"), "should render plain text: {text}");
     }
 }
