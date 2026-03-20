@@ -1,12 +1,15 @@
-//! Secret resolution — env vars, keyring, shell commands.
+//! Secret resolution — env vars, keyring, shell commands, Vault.
 //!
 //! Uses the `keyring` crate for cross-platform credential store access
 //! (macOS Keychain, Windows Credential Manager, Linux Secret Service).
 //! Secret values are wrapped in `secrecy::SecretString` and zeroized on drop.
 
 use crate::recipes::RecipeStore;
+use crate::vault::VaultClient;
 use secrecy::{ExposeSecret, SecretString};
 use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Well-known environment variables that commonly contain secrets.
 pub const WELL_KNOWN_SECRET_ENVS: &[&str] = &[
@@ -29,7 +32,7 @@ pub const WELL_KNOWN_SECRET_ENVS: &[&str] = &[
 /// Omegon's keyring service name — used for cross-platform credential storage.
 const KEYRING_SERVICE: &str = "omegon";
 
-/// Resolve a secret by name. Priority: env var > recipe.
+/// Resolve a secret by name. Priority: env var > recipe (including vault:).
 /// Returns a SecretString that auto-zeroizes on drop.
 pub fn resolve_secret(name: &str, recipes: &RecipeStore) -> Option<SecretString> {
     // 1. Check environment variable
@@ -55,6 +58,7 @@ pub fn resolve_secret(name: &str, recipes: &RecipeStore) -> Option<SecretString>
 /// - `keyring:service_name` — cross-platform keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager)
 /// - `keychain:service_name` — alias for keyring (backward compat with macOS-only shell-out)
 /// - `file:/path/to/file` — read first line of file
+/// - `vault:path#key` — read from Vault KV v2 (async resolution in SecretsManager)
 pub fn execute_recipe(name: &str, recipe: &str) -> Option<SecretString> {
     let (kind, payload) = recipe.split_once(':')?;
 
@@ -114,8 +118,49 @@ pub fn execute_recipe(name: &str, recipe: &str) -> Option<SecretString> {
             }
         }
 
+        "vault" => {
+            // Vault recipes are handled asynchronously in SecretsManager
+            // This function is for synchronous resolution only
+            tracing::warn!(recipe = recipe, "vault recipes require async resolution");
+            None
+        }
+
         _ => {
             tracing::warn!(kind = kind, "unknown secret recipe kind");
+            None
+        }
+    }
+}
+
+/// Resolve a secret from Vault using the vault: recipe format.
+/// Format: "vault:path#key" where path is the Vault path and key is the field name.
+pub async fn resolve_vault_secret(
+    vault_client: Option<&VaultClient>, 
+    recipe: &str
+) -> Option<SecretString> {
+    let vault_client = vault_client?;
+    
+    // Parse vault:path#key format
+    let (_kind, payload) = recipe.split_once(':')?;
+    let (path, key) = payload.split_once('#')?;
+
+    match vault_client.read(path).await {
+        Ok(data) => {
+            if let Some(value) = data.get(key) {
+                if let Some(str_value) = value.as_str() {
+                    Some(SecretString::from(str_value.to_string()))
+                } else {
+                    // Try to serialize non-string values as JSON
+                    let json_value = serde_json::to_string(value).ok()?;
+                    Some(SecretString::from(json_value))
+                }
+            } else {
+                tracing::warn!(path = path, key = key, "key not found in vault secret");
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = path, "failed to read from vault");
             None
         }
     }
@@ -183,5 +228,33 @@ mod tests {
     fn unknown_recipe_kind() {
         let val = execute_recipe("test", "unknown:something");
         assert_eq!(val.map(|s| s.expose_secret().to_string()), None);
+    }
+
+    #[tokio::test]
+    async fn resolve_vault_secret_test() {
+        use crate::vault::{VaultClient, VaultConfig, AuthConfig};
+        use mockito::Server;
+        use secrecy::SecretString;
+
+        let mut server = Server::new_async().await;
+        let _m = server.mock("GET", "/v1/secret/data/omegon/api-keys")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": {"data": {"anthropic": "sk-ant-test123"}, "metadata": {"version": 1, "created_time": "2024-01-01T00:00:00Z", "destroyed": false}}}"#)
+            .create_async().await;
+
+        let config = VaultConfig {
+            addr: server.url(),
+            auth: AuthConfig::Token,
+            allowed_paths: vec!["secret/data/*".to_string()],
+            denied_paths: vec![],
+            timeout_secs: 5,
+        };
+
+        let mut client = VaultClient::new(config).unwrap();
+        client.token = Some(SecretString::from("hvs.test"));
+
+        let secret = resolve_vault_secret(Some(&client), "vault:secret/data/omegon/api-keys#anthropic").await;
+        assert_eq!(secret.map(|s| s.expose_secret().to_string()), Some("sk-ant-test123".to_string()));
     }
 }

@@ -17,18 +17,21 @@ mod guards;
 mod recipes;
 mod redact;
 mod resolve;
+mod vault;
 
 pub use audit::AuditLog;
 pub use guards::{GuardDecision, PathGuard};
 pub use recipes::{Recipe, RecipeStore};
 pub use redact::Redactor;
-pub use resolve::{store_in_keyring, delete_from_keyring};
+pub use resolve::{store_in_keyring, delete_from_keyring, resolve_vault_secret};
+pub use vault::{AuthConfig, VaultClient, VaultConfig};
 
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex;
 
-/// Central secrets manager — owns the redaction set, recipes, and guards.
+/// Central secrets manager — owns the redaction set, recipes, guards, and Vault client.
 pub struct SecretsManager {
     /// Resolved secret values for redaction (name → SecretString).
     /// Values are zeroized when dropped.
@@ -41,6 +44,8 @@ pub struct SecretsManager {
     path_guard: PathGuard,
     /// Audit log
     audit: AuditLog,
+    /// Vault client (optional, only if vault.json exists or VAULT_ADDR set)
+    vault_client: Arc<Mutex<Option<VaultClient>>>,
 }
 
 impl SecretsManager {
@@ -56,6 +61,7 @@ impl SecretsManager {
             recipes,
             path_guard,
             audit,
+            vault_client: Arc::new(Mutex::new(None)),
         };
 
         // Pre-resolve all known secrets into the redaction set
@@ -64,10 +70,107 @@ impl SecretsManager {
         Ok(mgr)
     }
 
+    /// Initialize Vault client if configuration is found.
+    /// This is separate from `new()` because it requires async context.
+    pub async fn init_vault(&self, config_dir: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(config) = VaultConfig::load_config(config_dir)? {
+            tracing::info!(addr = %config.addr, "initializing vault client");
+            
+            match VaultClient::new(config) {
+                Ok(mut client) => {
+                    // Attempt authentication
+                    if let Err(e) = client.authenticate().await {
+                        tracing::warn!(error = %e, "vault authentication failed - vault recipes will return None");
+                    } else {
+                        tracing::info!("vault client authenticated successfully");
+                    }
+                    
+                    *self.vault_client.lock().await = Some(client);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to create vault client");
+                }
+            }
+        } else {
+            tracing::debug!("no vault configuration found - vault recipes disabled");
+        }
+        
+        Ok(())
+    }
+
+    /// Get a reference to the vault client for direct access.
+    pub async fn vault_client(&self) -> Option<VaultClient> {
+        self.vault_client.lock().await.clone()
+    }
+
+    /// Check vault health and return status info for /whoami.
+    pub async fn vault_status(&self) -> Option<String> {
+        let client = self.vault_client.lock().await;
+        if let Some(ref vault) = *client {
+            match vault.health().await {
+                Ok(health) => {
+                    if health.sealed {
+                        Some("vault: sealed".to_string())
+                    } else {
+                        Some(format!("vault: active ({})", vault.server_addr()))
+                    }
+                }
+                Err(_) => Some("vault: unreachable".to_string()),
+            }
+        } else {
+            None
+        }
+    }
+
     /// Resolve a secret by name. Checks env vars first, then recipes.
+    /// For vault: recipes, this will try async resolution and fall back to None.
     pub fn resolve(&self, name: &str) -> Option<String> {
         resolve::resolve_secret(name, &self.recipes)
             .map(|s| s.expose_secret().to_string())
+    }
+
+    /// Resolve a secret by name with async vault support.
+    /// This is the preferred method for vault: recipes.
+    pub async fn resolve_async(&self, name: &str) -> Option<String> {
+        // 1. Check environment variable first
+        if let Ok(val) = std::env::var(name) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+
+        // 2. Check recipe store
+        if let Some(recipe) = self.recipes.get(name) {
+            if recipe.starts_with("vault:") {
+                // Handle vault recipes asynchronously
+                let client = self.vault_client.lock().await;
+                if let Some(ref vault) = *client {
+                    if let Some(secret) = resolve_vault_secret(Some(vault), recipe).await {
+                        let value = secret.expose_secret().to_string();
+                        
+                        // Add to redaction set
+                        {
+                            let mut set = self.redaction_set.write().unwrap();
+                            set.insert(name.to_string(), secret);
+                            // Rebuild redactor with new value
+                            let new_redactor = Redactor::build(&set);
+                            *self.redactor.write().unwrap() = new_redactor;
+                        }
+                        
+                        return Some(value);
+                    }
+                } else {
+                    tracing::warn!(recipe = recipe, "vault recipe requested but no vault client available");
+                }
+                return None;
+            } else {
+                // Handle non-vault recipes synchronously
+                return resolve::execute_recipe(name, recipe)
+                    .map(|s| s.expose_secret().to_string());
+            }
+        }
+
+        None
     }
 
     /// Redact all known secret values from a string.
