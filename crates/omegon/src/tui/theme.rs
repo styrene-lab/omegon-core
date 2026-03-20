@@ -205,10 +205,10 @@ pub struct Alpharius;
 
 impl Theme for Alpharius {
     fn bg(&self) -> Color { Color::Rgb(2, 3, 10) }
-    fn card_bg(&self) -> Color { Color::Rgb(8, 14, 26) }
-    fn surface_bg(&self) -> Color { Color::Rgb(10, 16, 32) }
-    fn border(&self) -> Color { Color::Rgb(26, 68, 88) }
-    fn border_dim(&self) -> Color { Color::Rgb(12, 24, 40) }
+    fn card_bg(&self) -> Color { Color::Rgb(14, 22, 36) }
+    fn surface_bg(&self) -> Color { Color::Rgb(18, 28, 44) }
+    fn border(&self) -> Color { Color::Rgb(30, 72, 92) }
+    fn border_dim(&self) -> Color { Color::Rgb(18, 38, 56) }
 
     fn fg(&self) -> Color { Color::Rgb(196, 216, 228) }
     fn muted(&self) -> Color { Color::Rgb(96, 120, 136) }
