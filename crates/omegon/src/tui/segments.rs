@@ -208,11 +208,11 @@ fn render_assistant_text(
     if let Some(cell) = buf.cell_mut((area.x, area.y)) {
         cell.set_symbol(" ");
     }
-    if area.x + 1 < area.right() {
-        if let Some(cell) = buf.cell_mut((area.x + 1, area.y)) {
-            cell.set_symbol("│");
-            cell.set_style(Style::default().fg(t.border_dim()));
-        }
+    if area.x + 1 < area.right()
+        && let Some(cell) = buf.cell_mut((area.x + 1, area.y))
+    {
+        cell.set_symbol("│");
+        cell.set_style(Style::default().fg(t.border_dim()));
     }
 
     let inner = Rect {
@@ -517,15 +517,12 @@ fn render_tool_card(
         .render(card_inner, buf);
 
     // ── Post-render: OSC 8 hyperlinks for file paths ────────────
-    if matches!(name, "read" | "edit" | "write") {
-        if let Some(args) = detail_args {
-            let file_path = args.lines().next().unwrap_or(args).trim();
-            if !file_path.is_empty() && card_inner.height > 0 {
-                let url = if file_path.starts_with('/') {
-                    format!("file://{file_path}")
-                } else {
-                    format!("file://{file_path}")
-                };
+    if matches!(name, "read" | "edit" | "write")
+        && let Some(args) = detail_args
+    {
+        let file_path = args.lines().next().unwrap_or(args).trim();
+        if !file_path.is_empty() && card_inner.height > 0 {
+                let url = format!("file://{file_path}");
                 let link_area = Rect {
                     x: card_inner.x,
                     y: card_inner.y, // first line is the file path
@@ -536,7 +533,6 @@ fn render_tool_card(
                     .style(Style::default().fg(t.accent_muted()).bg(bg).add_modifier(Modifier::UNDERLINED));
                 link.render(link_area, buf);
             }
-        }
     }
 }
 

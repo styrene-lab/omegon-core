@@ -123,10 +123,10 @@ impl Editor {
     }
 
     pub fn accept_search(&mut self, history: &[String]) {
-        if let EditorMode::ReverseSearch { match_idx: Some(idx), .. } = &self.mode {
-            if let Some(entry) = history.get(*idx) {
-                self.set_text(entry);
-            }
+        if let EditorMode::ReverseSearch { match_idx: Some(idx), .. } = &self.mode
+            && let Some(entry) = history.get(*idx)
+        {
+            self.set_text(entry);
         }
         self.mode = EditorMode::Normal;
     }

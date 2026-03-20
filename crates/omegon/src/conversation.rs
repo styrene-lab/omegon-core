@@ -483,12 +483,10 @@ impl ConversationState {
         }
 
         // Attach pending images to the last user message
-        if !self.pending_images.is_empty() {
-            if let Some(last_user) = messages.iter_mut().rev().find(|m| matches!(m, LlmMessage::User { .. })) {
-                if let LlmMessage::User { images, .. } = last_user {
-                    *images = self.pending_images.clone();
-                }
-            }
+        if !self.pending_images.is_empty()
+            && let Some(LlmMessage::User { images, .. }) = messages.iter_mut().rev().find(|m| matches!(m, LlmMessage::User { .. }))
+        {
+            *images = self.pending_images.clone();
         }
 
         messages
