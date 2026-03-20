@@ -473,7 +473,7 @@ impl App {
 
         let editor_block = Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(t.border()).bg(t.surface_bg()))
+            .border_style(Style::default().fg(t.border_dim()).bg(t.surface_bg()))
             .title(editor_title);
 
         let display_text = if editor_content.is_empty() {

@@ -164,17 +164,37 @@ impl Segment {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn render_user_prompt(text: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme) {
+    if area.width < 3 || area.height == 0 { return; }
+
+    // Subtle tinted background for the user prompt region
+    let bg = t.user_msg_bg();
     let block = Block::default()
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(area);
+        .style(Style::default().bg(bg));
     block.render(area, buf);
 
+    // Accent bar on the left edge
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_symbol("▎");
+            cell.set_style(Style::default().fg(t.accent()).bg(bg));
+        }
+    }
+
+    // Content area — offset by 2 for the accent bar + space
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(3),
+        height: area.height,
+    };
+
     let content = Line::from(vec![
-        Span::styled("▸ ", t.style_accent_bold()),
-        Span::styled(text.to_string(), t.style_user_input()),
+        Span::styled("▸ ", Style::default().fg(t.accent()).bg(bg)),
+        Span::styled(text.to_string(), Style::default().fg(t.fg()).bg(bg).add_modifier(Modifier::BOLD)),
     ]);
     Paragraph::new(content)
         .wrap(Wrap { trim: false })
+        .style(Style::default().bg(bg))
         .render(inner, buf);
 }
 
@@ -182,38 +202,57 @@ fn render_assistant_text(
     text: &str, thinking: &str, complete: bool,
     area: Rect, buf: &mut Buffer, t: &dyn Theme,
 ) {
-    let block = Block::default()
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(area);
-    block.render(area, buf);
+    if area.width < 3 || area.height == 0 { return; }
+
+    // Subtle left gutter — dim accent dot on first line only
+    if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+        cell.set_symbol(" ");
+    }
+    if area.x + 1 < area.right() {
+        if let Some(cell) = buf.cell_mut((area.x + 1, area.y)) {
+            cell.set_symbol("│");
+            cell.set_style(Style::default().fg(t.border_dim()));
+        }
+    }
+
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(3),
+        height: area.height,
+    };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Thinking block — collapsible, distinct visual treatment
+    // Thinking block — collapsed summary with line count
     if !thinking.is_empty() {
         let think_lines: Vec<&str> = thinking.lines().collect();
-        let show = think_lines.len().min(8);
+        let show = think_lines.len().min(6);
         lines.push(Line::from(vec![
-            Span::styled("◌ ", Style::default().fg(t.accent_muted())),
-            Span::styled("thinking", Style::default().fg(t.accent_muted()).add_modifier(Modifier::ITALIC)),
+            Span::styled("◌ ", Style::default().fg(t.border())),
+            Span::styled("thinking ", Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC)),
             Span::styled(
-                format!(" ({} lines)", think_lines.len()),
-                Style::default().fg(t.dim()),
+                format!("({} lines)", think_lines.len()),
+                Style::default().fg(t.border_dim()),
             ),
         ]));
         for line in think_lines.iter().take(show) {
             lines.push(Line::from(Span::styled(
                 format!("  {line}"),
-                Style::default().fg(t.dim()).add_modifier(Modifier::ITALIC),
+                Style::default().fg(t.border()).add_modifier(Modifier::ITALIC),
             )));
         }
         if think_lines.len() > show {
             lines.push(Line::from(Span::styled(
-                format!("  … {} more lines", think_lines.len() - show),
-                Style::default().fg(t.border()),
+                format!("  ⋯ {} more", think_lines.len() - show),
+                Style::default().fg(t.border_dim()),
             )));
         }
-        lines.push(Line::from(""));
+        // Visual separator between thinking and response
+        lines.push(Line::from(Span::styled(
+            "  ─ ─ ─",
+            Style::default().fg(t.border_dim()),
+        )));
     }
 
     // Assistant text with markdown structural highlighting
@@ -586,33 +625,54 @@ fn render_table_line<'a>(line: &str, is_header: bool, t: &dyn Theme) -> Line<'a>
 }
 
 fn render_system(text: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme) {
+    if area.width < 3 || area.height == 0 { return; }
+
+    let bg = t.card_bg();
     let block = Block::default()
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(area);
+        .style(Style::default().bg(bg));
     block.render(area, buf);
+
+    // Accent bar on left edge — muted cyan for system messages
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_symbol("▎");
+            cell.set_style(Style::default().fg(t.accent_muted()).bg(bg));
+        }
+    }
+
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(3),
+        height: area.height,
+    };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let style = if i == 0 && line.starts_with('Ω') {
-            t.style_accent_bold()
+            Style::default().fg(t.accent()).bg(bg).add_modifier(Modifier::BOLD)
+        } else if i == 0 && (line.starts_with('⚠') || line.starts_with('⟳')) {
+            Style::default().fg(t.warning()).bg(bg)
         } else if line.starts_with("  ▸") || line.starts_with("  /") || line.starts_with("  Ctrl") {
-            Style::default().fg(t.muted())
+            Style::default().fg(t.muted()).bg(bg)
         } else {
-            Style::default().fg(t.accent_muted())
+            Style::default().fg(t.accent_muted()).bg(bg)
         };
         lines.push(Line::from(Span::styled(line.to_string(), style)));
     }
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
+        .style(Style::default().bg(bg))
         .render(inner, buf);
 }
 
 fn render_lifecycle(icon: &str, text: &str, area: Rect, buf: &mut Buffer, t: &dyn Theme) {
+    if area.width < 4 || area.height == 0 { return; }
     let line = Line::from(vec![
-        Span::styled(" │ ", Style::default().fg(t.border_dim())),
-        Span::styled(format!("{icon} "), Style::default().fg(t.accent_muted())),
-        Span::styled(text.to_string(), Style::default().fg(t.muted())),
+        Span::styled("  ", Style::default()),
+        Span::styled(format!("{icon} "), Style::default().fg(t.border())),
+        Span::styled(text.to_string(), Style::default().fg(t.dim())),
     ]);
     Paragraph::new(line).render(area, buf);
 }
@@ -652,11 +712,15 @@ fn render_image_placeholder(
 }
 
 fn render_separator(area: Rect, buf: &mut Buffer, t: &dyn Theme) {
-    if area.height == 0 { return; }
-    let line = Line::from(Span::styled(
-        " ".repeat(area.width as usize),
-        Style::default().fg(t.border_dim()),
-    ));
+    if area.height == 0 || area.width < 4 { return; }
+    // Thin ruled divider with faded edges
+    let pad = 2;
+    let rule_w = (area.width as usize).saturating_sub(pad * 2);
+    let line = Line::from(vec![
+        Span::styled(" ".repeat(pad), Style::default()),
+        Span::styled("─".repeat(rule_w), Style::default().fg(t.border_dim())),
+        Span::styled(" ".repeat(pad), Style::default()),
+    ]);
     Paragraph::new(line).render(area, buf);
 }
 

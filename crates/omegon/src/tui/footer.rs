@@ -134,43 +134,36 @@ impl FooterData {
         }
         lines.push(Line::from(bar_spans));
 
-        // Model line
-        let model_short = short_model(&self.model_id);
-        lines.push(Line::from(vec![
-            Span::styled("▸ ", Style::default().fg(t.accent())),
-            Span::styled(
-                format!("{}/{}", self.model_provider, model_short),
-                Style::default().fg(t.muted()),
-            ),
-        ]));
-
         let widget = Paragraph::new(lines).style(Style::default().bg(t.card_bg()));
         frame.render_widget(widget, inner);
     }
 
     fn render_model_card(&self, area: Rect, frame: &mut Frame, t: &dyn Theme) {
-        let block = Self::card_block("models", t);
+        let block = Self::card_block("model", t);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let model_short = short_model(&self.model_id);
-        let source = if self.model_provider == "local" { "local" } else { "cloud" };
-        let source_color = if source == "local" { t.accent() } else { t.muted() };
+        let source_icon = if self.model_provider == "local" { "⚡" } else { "☁" };
+        let source_color = if self.model_provider == "local" { t.accent() } else { t.dim() };
+        let auth_icon = if self.is_oauth { "●" } else { "○" };
+        let auth_color = if self.is_oauth { t.success() } else { t.muted() };
+
         lines.push(Line::from(vec![
-            Span::styled("Driver ", Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
-            Span::styled(model_short.to_string(), Style::default().fg(t.muted())),
-            Span::styled(" · ", Style::default().fg(t.dim())),
-            Span::styled(source.to_string(), Style::default().fg(source_color)),
-            Span::styled(" · ", Style::default().fg(t.dim())),
-            Span::styled("active", Style::default().fg(t.success())),
+            Span::styled(format!("{source_icon} "), Style::default().fg(source_color)),
+            Span::styled(model_short.to_string(), Style::default().fg(t.fg()).add_modifier(Modifier::BOLD)),
         ]));
 
-        let auth_type = if self.is_oauth { "subscription" } else { "api-key" };
         lines.push(Line::from(vec![
-            Span::styled("Auth ", Style::default().fg(t.dim())),
-            Span::styled(auth_type, Style::default().fg(t.muted())),
+            Span::styled(format!("{auth_icon} "), Style::default().fg(auth_color)),
+            Span::styled(
+                if self.is_oauth { "subscription" } else { "api key" },
+                Style::default().fg(t.muted()),
+            ),
+            Span::styled(" · ", Style::default().fg(t.border_dim())),
+            Span::styled(self.model_provider.clone(), Style::default().fg(t.dim())),
         ]));
 
         let widget = Paragraph::new(lines).style(Style::default().bg(t.card_bg()));
