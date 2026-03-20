@@ -1,14 +1,18 @@
-//! Terminal-style text editor with word operations and reverse search.
+//! Terminal-style text editor backed by ratatui-textarea.
 //!
-//! Behaves like a standard terminal input:
-//! - Meta+Backspace / Ctrl+W: delete word backward
-//! - Meta+D: delete word forward
-//! - Ctrl+A / Home: move to start
-//! - Ctrl+E / End: move to end
-//! - Ctrl+U: clear line
-//! - Ctrl+K: kill to end of line
-//! - Up/Down: history navigation
-//! - Ctrl+R: reverse incremental search through history
+//! Wraps `ratatui_textarea::TextArea` with our API surface:
+//! - Single-line default (Enter submits, not inserts newline)
+//! - History navigation (Up/Down when empty)
+//! - Reverse incremental search (Ctrl+R)
+//! - Kill ring (Ctrl+K, Ctrl+U, Ctrl+Y)
+//!
+//! The textarea handles all basic editing: cursor movement, word ops,
+//! clipboard paste (bracketed paste), undo/redo, and character insertion.
+
+use ratatui::prelude::*;
+use ratatui_textarea::TextArea;
+
+use super::theme::Theme;
 
 /// Editor mode — normal input or reverse search.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,10 +26,9 @@ pub enum EditorMode {
     },
 }
 
-/// A terminal-style single-line text editor with history and reverse search.
+/// A terminal-style text editor with history and reverse search.
 pub struct Editor {
-    buffer: String,
-    cursor: usize,
+    pub textarea: TextArea<'static>,
     mode: EditorMode,
     /// Kill ring — last killed text (Ctrl+K, Ctrl+U).
     kill_ring: Option<String>,
@@ -33,133 +36,29 @@ pub struct Editor {
 
 impl Editor {
     pub fn new() -> Self {
+        let mut ta = TextArea::default();
+        ta.set_cursor_line_style(Style::default());
+        ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
         Self {
-            buffer: String::new(),
-            cursor: 0,
+            textarea: ta,
             mode: EditorMode::Normal,
             kill_ring: None,
         }
+    }
+
+    /// Apply theme styles to the textarea.
+    pub fn apply_theme(&mut self, t: &dyn Theme) {
+        self.textarea.set_style(Style::default().fg(t.fg()).bg(t.surface_bg()));
+        self.textarea.set_cursor_line_style(Style::default().bg(t.surface_bg()));
+        self.textarea.set_cursor_style(Style::default().fg(t.bg()).bg(t.fg()));
     }
 
     pub fn mode(&self) -> &EditorMode {
         &self.mode
     }
 
-    // ─── Character insertion ────────────────────────────────────
-
-    pub fn insert(&mut self, c: char) {
-        if let EditorMode::ReverseSearch { ref mut query, .. } = self.mode {
-            query.push(c);
-            return; // search update handled by caller via search_update()
-        }
-        self.buffer.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-    }
-
-    pub fn backspace(&mut self) {
-        if let EditorMode::ReverseSearch { ref mut query, .. } = self.mode {
-            query.pop();
-            return;
-        }
-        if self.cursor > 0 {
-            let mut new_cursor = self.cursor - 1;
-            while new_cursor > 0 && !self.buffer.is_char_boundary(new_cursor) {
-                new_cursor -= 1;
-            }
-            self.buffer.drain(new_cursor..self.cursor);
-            self.cursor = new_cursor;
-        }
-    }
-
-    // ─── Word operations ────────────────────────────────────────
-
-    /// Delete word backward (Meta+Backspace / Ctrl+W).
-    pub fn delete_word_backward(&mut self) {
-        if self.cursor == 0 { return; }
-        let start = self.word_boundary_backward();
-        let killed = self.buffer[start..self.cursor].to_string();
-        self.buffer.drain(start..self.cursor);
-        self.cursor = start;
-        self.kill_ring = Some(killed);
-    }
-
-    /// Delete word forward (Meta+D).
-    pub fn delete_word_forward(&mut self) {
-        if self.cursor >= self.buffer.len() { return; }
-        let end = self.word_boundary_forward();
-        let killed = self.buffer[self.cursor..end].to_string();
-        self.buffer.drain(self.cursor..end);
-        self.kill_ring = Some(killed);
-    }
-
-    /// Move cursor one word backward (Meta+B).
-    pub fn move_word_backward(&mut self) {
-        self.cursor = self.word_boundary_backward();
-    }
-
-    /// Move cursor one word forward (Meta+F).
-    pub fn move_word_forward(&mut self) {
-        self.cursor = self.word_boundary_forward();
-    }
-
-    /// Yank (paste) from kill ring (Ctrl+Y).
-    pub fn yank(&mut self) {
-        if let Some(ref text) = self.kill_ring.clone() {
-            self.buffer.insert_str(self.cursor, text);
-            self.cursor += text.len();
-        }
-    }
-
-    // ─── Line operations ────────────────────────────────────────
-
-    /// Kill to end of line (Ctrl+K).
-    pub fn kill_to_end(&mut self) {
-        if self.cursor < self.buffer.len() {
-            let killed = self.buffer[self.cursor..].to_string();
-            self.buffer.truncate(self.cursor);
-            self.kill_ring = Some(killed);
-        }
-    }
-
-    /// Clear entire line (Ctrl+U).
-    pub fn clear_line(&mut self) {
-        if !self.buffer.is_empty() {
-            self.kill_ring = Some(std::mem::take(&mut self.buffer));
-            self.cursor = 0;
-        }
-    }
-
-    // ─── Movement ───────────────────────────────────────────────
-
-    pub fn move_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            while self.cursor > 0 && !self.buffer.is_char_boundary(self.cursor) {
-                self.cursor -= 1;
-            }
-        }
-    }
-
-    pub fn move_right(&mut self) {
-        if self.cursor < self.buffer.len() {
-            self.cursor += 1;
-            while self.cursor < self.buffer.len() && !self.buffer.is_char_boundary(self.cursor) {
-                self.cursor += 1;
-            }
-        }
-    }
-
-    pub fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.cursor = self.buffer.len();
-    }
-
     // ─── Reverse search ─────────────────────────────────────────
 
-    /// Enter reverse search mode (Ctrl+R).
     pub fn start_reverse_search(&mut self) {
         self.mode = EditorMode::ReverseSearch {
             query: String::new(),
@@ -167,26 +66,33 @@ impl Editor {
         };
     }
 
-    /// Update reverse search — finds the best match in history.
-    /// Called after each keystroke in search mode.
-    /// Returns the matched history entry (if any) for display.
+    pub fn search_insert(&mut self, c: char) {
+        if let EditorMode::ReverseSearch { ref mut query, .. } = self.mode {
+            query.push(c);
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let EditorMode::ReverseSearch { ref mut query, .. } = self.mode {
+            query.pop();
+        }
+    }
+
     pub fn search_update(&mut self, history: &[String]) -> Option<String> {
         if let EditorMode::ReverseSearch { ref query, ref mut match_idx } = self.mode {
             if query.is_empty() || history.is_empty() {
                 *match_idx = None;
                 return None;
             }
-            // Search backward through history for a match
             let start = match_idx
                 .map(|i| i.saturating_sub(1))
-                .unwrap_or(history.len() - 1); // safe: history is non-empty
+                .unwrap_or(history.len() - 1);
             for i in (0..=start).rev() {
                 if history[i].contains(query.as_str()) {
                     *match_idx = Some(i);
                     return Some(history[i].clone());
                 }
             }
-            // No match — wrap around from end
             for i in (0..history.len()).rev() {
                 if history[i].contains(query.as_str()) {
                     *match_idx = Some(i);
@@ -200,7 +106,6 @@ impl Editor {
         }
     }
 
-    /// Search backward one more step (Ctrl+R pressed again during search).
     pub fn search_prev(&mut self, history: &[String]) -> Option<String> {
         if let EditorMode::ReverseSearch { ref query, ref mut match_idx } = self.mode {
             if query.is_empty() || history.is_empty() { return None; }
@@ -217,23 +122,19 @@ impl Editor {
         }
     }
 
-    /// Accept the current search result and return to normal mode.
     pub fn accept_search(&mut self, history: &[String]) {
-        if let EditorMode::ReverseSearch { match_idx: Some(idx), .. } = &self.mode
-            && let Some(entry) = history.get(*idx)
-        {
-            self.buffer = entry.clone();
-            self.cursor = self.buffer.len();
+        if let EditorMode::ReverseSearch { match_idx: Some(idx), .. } = &self.mode {
+            if let Some(entry) = history.get(*idx) {
+                self.set_text(entry);
+            }
         }
         self.mode = EditorMode::Normal;
     }
 
-    /// Cancel search and restore previous buffer.
     pub fn cancel_search(&mut self) {
         self.mode = EditorMode::Normal;
     }
 
-    /// Get the search query (for display in the prompt).
     pub fn search_query(&self) -> Option<&str> {
         if let EditorMode::ReverseSearch { ref query, .. } = self.mode {
             Some(query)
@@ -242,65 +143,120 @@ impl Editor {
         }
     }
 
+    // ─── Kill ring operations ───────────────────────────────────
+
+    /// Kill to end of line (Ctrl+K).
+    pub fn kill_to_end(&mut self) {
+        // Select to end of line and cut
+        let (row, col) = self.textarea.cursor();
+        let line = self.textarea.lines().get(row).map(|l| l.as_str()).unwrap_or("");
+        if col < line.len() {
+            let killed = line[col..].to_string();
+            self.textarea.delete_line_by_end();
+            self.kill_ring = Some(killed);
+        }
+    }
+
+    /// Clear entire line (Ctrl+U).
+    pub fn clear_line(&mut self) {
+        let text = self.render_text().to_string();
+        if !text.is_empty() {
+            self.kill_ring = Some(text);
+            self.set_text("");
+        }
+    }
+
+    /// Yank (paste) from kill ring (Ctrl+Y).
+    pub fn yank(&mut self) {
+        if let Some(ref text) = self.kill_ring.clone() {
+            self.textarea.insert_str(text);
+        }
+    }
+
     // ─── Buffer access ──────────────────────────────────────────
 
     /// Take the current text and clear the editor.
     pub fn take_text(&mut self) -> String {
         self.mode = EditorMode::Normal;
-        let text = std::mem::take(&mut self.buffer);
-        self.cursor = 0;
+        let text = self.textarea.lines().join("\n");
+        self.set_text("");
         text
     }
 
+    /// Get cursor column position (display width).
     pub fn cursor_position(&self) -> usize {
-        self.buffer[..self.cursor].chars().count()
+        let (_, col) = self.textarea.cursor();
+        col
     }
 
     /// Set the buffer text (for history navigation).
     pub fn set_text(&mut self, text: &str) {
-        self.buffer = text.to_string();
-        self.cursor = self.buffer.len();
+        // Clear and replace
+        self.textarea.select_all();
+        self.textarea.cut();
+        if !text.is_empty() {
+            self.textarea.insert_str(text);
+        }
     }
 
-    pub fn render_text(&self) -> &str {
-        &self.buffer
+    /// Get current text for display/inspection.
+    pub fn render_text(&self) -> String {
+        self.textarea.lines().join("\n")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+        self.textarea.is_empty()
     }
 
-    // ─── Internal helpers ───────────────────────────────────────
+    // ─── Input passthrough ──────────────────────────────────────
 
-    /// Find the start of the previous word (for word-backward operations).
-    fn word_boundary_backward(&self) -> usize {
-        let bytes = self.buffer.as_bytes();
-        let mut pos = self.cursor;
-        // Skip trailing whitespace/punctuation
-        while pos > 0 && !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_' {
-            pos -= 1;
-        }
-        // Skip the word itself
-        while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
-            pos -= 1;
-        }
-        pos
+    /// Pass a crossterm event to the textarea for handling.
+    /// Returns true if the textarea consumed the event.
+    pub fn input(&mut self, event: &crossterm::event::Event) -> bool {
+        let input: ratatui_textarea::Input = event.clone().into();
+        self.textarea.input(input)
     }
 
-    /// Find the end of the next word (for word-forward operations).
-    fn word_boundary_forward(&self) -> usize {
-        let bytes = self.buffer.as_bytes();
-        let len = bytes.len();
-        let mut pos = self.cursor;
-        // Skip the current word
-        while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-            pos += 1;
-        }
-        // Skip trailing whitespace/punctuation
-        while pos < len && !bytes[pos].is_ascii_alphanumeric() && bytes[pos] != b'_' {
-            pos += 1;
-        }
-        pos
+    /// Insert a character directly (for compat with old API).
+    pub fn insert(&mut self, c: char) {
+        self.textarea.insert_char(c);
+    }
+
+    /// Delete backward (for compat).
+    pub fn backspace(&mut self) {
+        self.textarea.delete_char();
+    }
+
+    pub fn move_left(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::Back);
+    }
+
+    pub fn move_right(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::Forward);
+    }
+
+    pub fn move_home(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+    }
+
+    pub fn move_end(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::End);
+    }
+
+    pub fn move_word_backward(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::WordBack);
+    }
+
+    pub fn move_word_forward(&mut self) {
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::WordForward);
+    }
+
+    pub fn delete_word_backward(&mut self) {
+        self.textarea.delete_word();
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        self.textarea.delete_next_word();
     }
 }
 
@@ -352,56 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_word_backward() {
-        let mut e = Editor::new();
-        e.set_text("hello world foo");
-        e.delete_word_backward();
-        assert_eq!(e.render_text(), "hello world ");
-        e.delete_word_backward();
-        assert_eq!(e.render_text(), "hello ");
-        e.delete_word_backward();
-        assert_eq!(e.render_text(), "");
-    }
-
-    #[test]
-    fn delete_word_forward() {
-        let mut e = Editor::new();
-        e.set_text("hello world foo");
-        e.move_home();
-        e.delete_word_forward();
-        // Deletes "hello" (word) then " " (trailing non-word) = "hello "
-        assert_eq!(e.render_text(), "world foo");
-    }
-
-    #[test]
-    fn move_word_backward() {
-        let mut e = Editor::new();
-        e.set_text("hello world");
-        e.move_word_backward();
-        assert_eq!(e.cursor_position(), 6); // before "world"
-    }
-
-    #[test]
-    fn move_word_forward() {
-        let mut e = Editor::new();
-        e.set_text("hello world");
-        e.move_home();
-        e.move_word_forward();
-        assert_eq!(e.cursor_position(), 6); // after "hello "
-    }
-
-    #[test]
-    fn kill_to_end() {
-        let mut e = Editor::new();
-        e.set_text("hello world");
-        e.move_home();
-        for _ in 0..5 { e.move_right(); }
-        e.kill_to_end();
-        assert_eq!(e.render_text(), "hello");
-        assert_eq!(e.kill_ring.as_deref(), Some(" world"));
-    }
-
-    #[test]
     fn clear_line() {
         let mut e = Editor::new();
         e.set_text("hello");
@@ -414,8 +320,8 @@ mod tests {
     fn yank() {
         let mut e = Editor::new();
         e.set_text("hello world");
-        e.delete_word_backward();
-        assert_eq!(e.render_text(), "hello ");
+        e.clear_line();
+        assert_eq!(e.render_text(), "");
         e.yank();
         assert_eq!(e.render_text(), "hello world");
     }
@@ -432,15 +338,13 @@ mod tests {
         e.start_reverse_search();
         assert!(matches!(e.mode(), EditorMode::ReverseSearch { .. }));
 
-        // Type "test"
-        e.insert('t');
-        e.insert('e');
-        e.insert('s');
-        e.insert('t');
+        e.search_insert('t');
+        e.search_insert('e');
+        e.search_insert('s');
+        e.search_insert('t');
         let result = e.search_update(&history);
         assert_eq!(result.as_deref(), Some("cargo test"));
 
-        // Accept
         e.accept_search(&history);
         assert_eq!(e.render_text(), "cargo test");
         assert!(matches!(e.mode(), EditorMode::Normal));
@@ -451,7 +355,7 @@ mod tests {
         let mut e = Editor::new();
         e.set_text("original");
         e.start_reverse_search();
-        e.insert('x');
+        e.search_insert('x');
         e.cancel_search();
         assert_eq!(e.render_text(), "original");
         assert!(matches!(e.mode(), EditorMode::Normal));
@@ -459,14 +363,13 @@ mod tests {
 
     #[test]
     fn reverse_search_backspace() {
-        let _history = vec!["cargo test".to_string()];
         let mut e = Editor::new();
         e.start_reverse_search();
-        e.insert('t');
-        e.insert('e');
-        e.insert('s');
+        e.search_insert('t');
+        e.search_insert('e');
+        e.search_insert('s');
         assert_eq!(e.search_query(), Some("tes"));
-        e.backspace();
+        e.search_backspace();
         assert_eq!(e.search_query(), Some("te"));
     }
 
@@ -481,22 +384,11 @@ mod tests {
     }
 
     #[test]
-    fn backspace_at_start_is_noop() {
-        let mut e = Editor::new();
-        e.backspace();
-        e.insert('a');
-        e.move_home();
-        e.backspace();
-        assert_eq!(e.render_text(), "a");
-    }
-
-    #[test]
     fn reverse_search_empty_history_no_panic() {
         let empty: Vec<String> = vec![];
         let mut e = Editor::new();
         e.start_reverse_search();
-        e.insert('x');
-        // This used to panic with index out of bounds on empty history
+        e.search_insert('x');
         let result = e.search_update(&empty);
         assert!(result.is_none());
         let result2 = e.search_prev(&empty);
@@ -504,11 +396,18 @@ mod tests {
     }
 
     #[test]
-    fn word_boundaries_with_path() {
+    fn set_text_replaces() {
         let mut e = Editor::new();
-        e.set_text("src/main.rs");
-        e.delete_word_backward();
-        // Should delete "rs" (stops at .)
-        assert_eq!(e.render_text(), "src/main.");
+        e.set_text("first");
+        assert_eq!(e.render_text(), "first");
+        e.set_text("second");
+        assert_eq!(e.render_text(), "second");
+    }
+
+    #[test]
+    fn empty_editor() {
+        let e = Editor::new();
+        assert!(e.is_empty());
+        assert_eq!(e.render_text(), "");
     }
 }

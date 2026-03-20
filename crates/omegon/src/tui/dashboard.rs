@@ -68,6 +68,7 @@ impl DashboardHandles {
                 let mut counts = StatusCounts { total: nodes.len(), ..Default::default() };
                 state.implementing_nodes.clear();
                 state.actionable_nodes.clear();
+                state.all_nodes.clear();
 
                 for node in nodes.values() {
                     match node.status {
@@ -85,8 +86,13 @@ impl DashboardHandles {
                         title: node.title.clone(),
                         status: node.status,
                         open_questions: node.open_questions.len(),
+                        parent: node.parent.clone(),
                     };
 
+                    // Collect active nodes for tree view
+                    if !matches!(node.status, NodeStatus::Implemented) {
+                        state.all_nodes.push(summary.clone());
+                    }
                     if matches!(node.status, NodeStatus::Implementing) {
                         state.implementing_nodes.push(summary.clone());
                     }
@@ -118,6 +124,10 @@ pub struct DashboardState {
     pub status_counts: StatusCounts,
     pub implementing_nodes: Vec<NodeSummary>,
     pub actionable_nodes: Vec<NodeSummary>,
+    /// All nodes for tree rendering (active statuses only).
+    pub all_nodes: Vec<NodeSummary>,
+    /// Tree widget selection state.
+    pub tree_state: tui_tree_widget::TreeState<String>,
     // Context gauge
     pub context_used_pct: f32,
     pub context_window_k: usize,
@@ -140,6 +150,7 @@ pub struct NodeSummary {
     pub title: String,
     pub status: NodeStatus,
     pub open_questions: usize,
+    pub parent: Option<String>,
 }
 
 #[derive(Clone)]
@@ -261,38 +272,54 @@ impl DashboardState {
             lines.push(Line::from(""));
         }
 
-        // ─── Implementing Nodes ─────────────────────────────────
-        if !self.implementing_nodes.is_empty() {
-            lines.push(widgets::section_divider("implementing", inner_w, t));
-            for node in self.implementing_nodes.iter().take(5) {
-                let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
+        // ─── Active Nodes (tree view) ────────────────────────────
+        if !self.all_nodes.is_empty() {
+            lines.push(widgets::section_divider("nodes", inner_w, t));
+            // Build a flat tree view with indentation based on parent-child
+            let roots: Vec<&NodeSummary> = self.all_nodes.iter()
+                .filter(|n| {
+                    // Root if no parent, or parent is not in our active set
+                    n.parent.is_none() || !self.all_nodes.iter().any(|p| Some(&p.id) == n.parent.as_ref())
+                })
+                .collect();
+
+            fn render_tree_node<'a>(
+                node: &NodeSummary, depth: usize, all: &[NodeSummary],
+                lines: &mut Vec<Line<'a>>, inner_w: usize, t: &dyn Theme, limit: &mut usize,
+            ) {
+                if *limit == 0 { return; }
+                *limit -= 1;
+                let indent = "  ".repeat(depth + 1);
+                let (icon, color) = match node.status {
+                    NodeStatus::Implementing => ("⚙", t.warning()),
+                    NodeStatus::Decided => ("●", t.success()),
+                    NodeStatus::Exploring => ("◐", t.accent()),
+                    NodeStatus::Blocked => ("✕", t.error()),
+                    _ => ("○", t.dim()),
+                };
+                let max_id = inner_w.saturating_sub(indent.len() + 3);
+                let label = widgets::truncate_str(&node.id, max_id, "…");
                 lines.push(Line::from(vec![
-                    Span::styled("  ⚙ ", Style::default().fg(t.warning())),
+                    Span::styled(indent, Style::default()),
+                    Span::styled(format!("{icon} "), Style::default().fg(color)),
                     Span::styled(label.to_string(), Style::default().fg(t.fg())),
                 ]));
+                // Render children
+                let children: Vec<&NodeSummary> = all.iter()
+                    .filter(|n| n.parent.as_deref() == Some(&node.id))
+                    .collect();
+                for child in children {
+                    render_tree_node(child, depth + 1, all, lines, inner_w, t, limit);
+                }
             }
-            if self.implementing_nodes.len() > 5 {
-                lines.push(Line::from(Span::styled(
-                    format!("  +{} more", self.implementing_nodes.len() - 5),
-                    Style::default().fg(t.dim()),
-                )));
-            }
-            lines.push(Line::from(""));
-        }
 
-        // ─── Actionable (Decided) Nodes ─────────────────────────
-        if !self.actionable_nodes.is_empty() {
-            lines.push(widgets::section_divider("ready", inner_w, t));
-            for node in self.actionable_nodes.iter().take(5) {
-                let label = widgets::truncate_str(&node.id, inner_w.saturating_sub(6), "…");
-                lines.push(Line::from(vec![
-                    Span::styled("  ● ", Style::default().fg(t.success())),
-                    Span::styled(label.to_string(), Style::default().fg(t.accent_muted())),
-                ]));
+            let mut limit = 20_usize; // cap total displayed
+            for root in &roots {
+                render_tree_node(root, 0, &self.all_nodes, &mut lines, inner_w, t, &mut limit);
             }
-            if self.actionable_nodes.len() > 5 {
+            if limit == 0 && self.all_nodes.len() > 20 {
                 lines.push(Line::from(Span::styled(
-                    format!("  +{} more", self.actionable_nodes.len() - 5),
+                    format!("  … +{} more", self.all_nodes.len().saturating_sub(20)),
                     Style::default().fg(t.dim()),
                 )));
             }
@@ -565,10 +592,12 @@ mod tests {
     fn dashboard_with_implementing_nodes() {
         let mut state = DashboardState::default();
         state.status_counts.total = 10;
-        state.implementing_nodes = vec![
-            NodeSummary { id: "rust-tui".into(), title: "Rust TUI".into(), status: NodeStatus::Implementing, open_questions: 2 },
-            NodeSummary { id: "web-dash".into(), title: "Web Dashboard".into(), status: NodeStatus::Implementing, open_questions: 0 },
+        let nodes = vec![
+            NodeSummary { id: "rust-tui".into(), title: "Rust TUI".into(), status: NodeStatus::Implementing, open_questions: 2, parent: None },
+            NodeSummary { id: "web-dash".into(), title: "Web Dashboard".into(), status: NodeStatus::Implementing, open_questions: 0, parent: Some("rust-tui".into()) },
         ];
+        state.implementing_nodes = nodes.clone();
+        state.all_nodes = nodes;
         let backend = TestBackend::new(36, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| {

@@ -409,6 +409,13 @@ fn render_tool_card(
                     Span::styled(args.to_string(), Style::default().fg(t.dim()).bg(bg)),
                 ]));
             }
+            "read" | "write" => {
+                // File path — will be rendered as clickable link post-render
+                lines.push(Line::from(Span::styled(
+                    args.to_string(),
+                    Style::default().fg(t.accent_muted()).bg(bg).add_modifier(Modifier::UNDERLINED),
+                )));
+            }
             _ => {
                 lines.push(Line::from(Span::styled(
                     args.to_string(),
@@ -508,6 +515,29 @@ fn render_tool_card(
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .render(card_inner, buf);
+
+    // ── Post-render: OSC 8 hyperlinks for file paths ────────────
+    if matches!(name, "read" | "edit" | "write") {
+        if let Some(args) = detail_args {
+            let file_path = args.lines().next().unwrap_or(args).trim();
+            if !file_path.is_empty() && card_inner.height > 0 {
+                let url = if file_path.starts_with('/') {
+                    format!("file://{file_path}")
+                } else {
+                    format!("file://{file_path}")
+                };
+                let link_area = Rect {
+                    x: card_inner.x,
+                    y: card_inner.y, // first line is the file path
+                    width: card_inner.width.min(file_path.len() as u16),
+                    height: 1,
+                };
+                let link = hyperrat::Link::new(file_path, url)
+                    .style(Style::default().fg(t.accent_muted()).bg(bg).add_modifier(Modifier::UNDERLINED));
+                link.render(link_area, buf);
+            }
+        }
+    }
 }
 
 /// Attempt syntax highlighting for tool result text.

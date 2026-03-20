@@ -451,6 +451,9 @@ impl App {
             frame.render_widget(hint, chunks[2]);
         }
 
+        // Apply theme to textarea each frame (in case theme changed)
+        self.editor.apply_theme(t.as_ref());
+
         // Editor — shows reverse search prompt when active
         let (editor_title, editor_content) = if let editor::EditorMode::ReverseSearch { ref query, ref match_idx } = *self.editor.mode() {
             let match_text = match_idx
@@ -481,15 +484,17 @@ impl App {
             .border_style(Style::default().fg(t.accent_muted()).bg(t.surface_bg()))
             .title(editor_title);
 
-        let display_text = if editor_content.is_empty() {
-            self.editor.render_text().to_string()
+        if !editor_content.is_empty() {
+            // Reverse search mode — show the matched text
+            let editor_widget = Paragraph::new(editor_content)
+                .style(Style::default().fg(t.fg()).bg(t.surface_bg()))
+                .block(editor_block);
+            frame.render_widget(editor_widget, chunks[1]);
         } else {
-            editor_content
-        };
-        let editor_widget = Paragraph::new(display_text)
-            .style(Style::default().fg(t.fg()).bg(t.surface_bg()))
-            .block(editor_block);
-        frame.render_widget(editor_widget, chunks[1]);
+            // Normal mode — render the textarea widget directly
+            self.editor.textarea.set_block(editor_block);
+            frame.render_widget(&self.editor.textarea, chunks[1]);
+        }
 
         // Command palette popup (above editor when typing /)
         if !self.agent_active {
@@ -522,15 +527,7 @@ impl App {
                 frame.render_widget(palette, palette_area);
             }
 
-            // Position cursor in editor — no left border (Borders::TOP only),
-            // so text starts at x=0 within the block's inner area (y+1 for top border).
-            let editor_area = chunks[1];
-            let cursor_x = editor_area.x + self.editor.cursor_position() as u16;
-            let cursor_y = editor_area.y + 1; // +1 for top border
-            frame.set_cursor_position(Position::new(
-                cursor_x.min(editor_area.right().saturating_sub(1)),
-                cursor_y,
-            ));
+            // Textarea renders its own cursor via cursor_style
         }
 
         // Selector popup (overlays everything when active)
@@ -1237,14 +1234,9 @@ pub async fn run_tui(
                         _ => {}
                     }
                 }
-                // ── Paste — insert pasted text into editor ──────────
-                Event::Paste(text) => {
-                    for c in text.chars() {
-                        if c == '\n' || c == '\r' { continue; }
-                        if !c.is_control() {
-                            app.editor.insert(c);
-                        }
-                    }
+                // ── Paste — pass directly to textarea ──────────
+                Event::Paste(ref text) => {
+                    app.editor.textarea.insert_str(text);
                 }
                 Event::Key(key) => {
                 // ── Selector popup intercepts all keys when open ────
@@ -1274,11 +1266,11 @@ pub async fn run_tui(
                             app.editor.search_prev(&app.history);
                         }
                         KeyCode::Char(c) => {
-                            app.editor.insert(c);
+                            app.editor.search_insert(c);
                             app.editor.search_update(&app.history);
                         }
                         KeyCode::Backspace => {
-                            app.editor.backspace();
+                            app.editor.search_backspace();
                             app.editor.search_update(&app.history);
                         }
                         KeyCode::Enter => {
