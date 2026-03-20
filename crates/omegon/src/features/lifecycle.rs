@@ -726,12 +726,17 @@ impl Feature for LifecycleFeature {
     fn on_event(&mut self, event: &BusEvent) -> Vec<BusRequest> {
         match event {
             BusEvent::SessionStart { .. } => {
-                // Check Vault health if configured
+                // Check Vault health if configured — with a short timeout
+                // to avoid blocking the event loop.
                 let mut requests = vec![];
                 if std::env::var("VAULT_ADDR").is_ok() || self.repo_path.join(".omegon/vault.json").exists() {
                     match std::process::Command::new("vault")
                         .args(["status", "-format=json"])
-                        .output()
+                        .env("VAULT_CLIENT_TIMEOUT", "5")
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|child| child.wait_with_output())
                     {
                         Ok(out) => {
                             let body = String::from_utf8_lossy(&out.stdout);

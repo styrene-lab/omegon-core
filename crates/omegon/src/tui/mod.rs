@@ -573,7 +573,7 @@ impl App {
         ("chronos",  "date/time context",                      &["week", "month", "quarter", "relative", "iso", "epoch", "tz", "range", "all"]),
         ("migrate",  "import from other tools",               &["auto", "claude-code", "pi", "codex", "cursor", "aider"]),
         ("dash",     "toggle dashboard panel / open web UI",  &["open"]),
-        ("vault",    "Vault status and management",           &["status", "configure", "init-policy"]),
+        ("vault",    "Vault status and management",           &["status", "unseal", "login", "configure", "init-policy"]),
         ("splash",   "replay splash animation",              &[]),
         ("exit",     "quit (or double Ctrl+C)",              &[]),
     ];
@@ -791,6 +791,30 @@ impl App {
                             }
                         }
                     }
+                    "unseal" => {
+                        // TODO: implement masked multi-key input mode
+                        // For now, direct operators to the vault CLI
+                        SlashResult::Display(
+                            "Vault Unseal:\n\n\
+                             Masked unseal input is not yet implemented in the TUI.\n\
+                             Use the vault CLI directly:\n\
+                             \n  vault operator unseal\n\
+                             \nThis will prompt for unseal keys without echoing them.\n\
+                             Repeat until the threshold is met.".into()
+                        )
+                    }
+                    "login" => {
+                        // TODO: implement interactive token/AppRole credential entry
+                        SlashResult::Display(
+                            "Vault Login:\n\n\
+                             Interactive login is not yet implemented in the TUI.\n\
+                             Use the vault CLI:\n\
+                             \n  vault login                         # token (interactive)\n\
+                             \n  vault login -method=approle \\       # AppRole\n\
+                               role_id=<role> secret_id=<secret>\n\
+                             \nThe token will be stored in ~/.vault-token automatically.".into()
+                        )
+                    }
                     "configure" => {
                         SlashResult::Display(
                             "Vault Configuration:\n\n\
@@ -819,7 +843,7 @@ impl App {
                              Save to a file and apply: `vault policy write omegon-agent <file>`".into()
                         )
                     }
-                    _ => SlashResult::Display(format!("Unknown vault subcommand: {args}\nOptions: status, configure, init-policy")),
+                    _ => SlashResult::Display(format!("Unknown vault subcommand: {args}\nOptions: status, unseal, login, configure, init-policy")),
                 }
             }
 

@@ -71,28 +71,17 @@ pub fn format_context_sections(ctx: &ChildContext) -> String {
         sections.push_str("\n```\n\n");
     }
 
-    sections.push_str(&ctx.finalization);
-
+    // Note: finalization is NOT included here — the orchestrator's
+    // task file template places it after the Contract section.
     sections
 }
 
 /// Detect submodule names from `git submodule status`.
+/// Delegates to worktree::detect_submodules to avoid duplication.
 fn detect_submodule_names(repo_path: &Path) -> Vec<String> {
-    let output = match Command::new("git")
-        .args(["submodule", "status"])
-        .current_dir(repo_path)
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return vec![],
-    };
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start_matches([' ', '+', '-', 'U']);
-            trimmed.split_whitespace().nth(1).map(|s| s.to_string())
-        })
+    super::worktree::detect_submodules(repo_path)
+        .into_iter()
+        .map(|(name, _path)| name)
         .collect()
 }
 
@@ -236,18 +225,37 @@ fn sample_test_convention(repo_path: &Path, scope: &[String]) -> Option<String> 
 }
 
 /// Find a single test function from a directory of Rust source files.
+/// Searches recursively up to 3 levels deep.
 fn find_test_sample(src_dir: &Path) -> Option<String> {
+    find_test_sample_recursive(src_dir, src_dir, 0)
+}
+
+fn find_test_sample_recursive(src_dir: &Path, root: &Path, depth: usize) -> Option<String> {
+    if depth > 3 { return None; }
     let entries = std::fs::read_dir(src_dir).ok()?;
 
+    // First pass: check .rs files in this directory
+    let mut subdirs = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "rs") {
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path.extension().is_some_and(|e| e == "rs") {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Some(sample) = extract_first_test(&content) {
-                    let relative = path.file_name()?.to_string_lossy();
+                    let relative = path.strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy();
                     return Some(format!("// From {relative}\n{sample}"));
                 }
             }
+        }
+    }
+
+    // Second pass: recurse into subdirectories
+    for subdir in subdirs {
+        if let Some(sample) = find_test_sample_recursive(&subdir, root, depth + 1) {
+            return Some(sample);
         }
     }
     None
@@ -255,6 +263,9 @@ fn find_test_sample(src_dir: &Path) -> Option<String> {
 
 /// Extract the first #[test] or #[tokio::test] function from source code.
 /// Returns at most 30 lines to stay within token budget.
+///
+/// Uses brace counting on code outside string literals and comments
+/// to find the function boundary.
 fn extract_first_test(source: &str) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
     let mut start = None;
@@ -272,8 +283,8 @@ fn extract_first_test(source: &str) -> Option<String> {
         }
 
         if let Some(s) = start {
-            brace_depth += trimmed.chars().filter(|&c| c == '{').count() as i32;
-            brace_depth -= trimmed.chars().filter(|&c| c == '}').count() as i32;
+            // Count braces outside string literals and comments
+            brace_depth += count_braces_outside_strings(trimmed);
 
             if brace_depth <= 0 && i > s {
                 let end = (i + 1).min(s + 30); // cap at 30 lines
@@ -283,6 +294,44 @@ fn extract_first_test(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Count net braces ({/}) in a line, ignoring those inside string literals
+/// and after line comments.
+fn count_braces_outside_strings(line: &str) -> i32 {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut in_raw_string = false;
+    let mut prev = '\0';
+
+    for ch in line.chars() {
+        // Skip line comments
+        if !in_string && !in_raw_string && prev == '/' && ch == '/' {
+            // Undo the '/' we might have counted (we didn't — it's not a brace)
+            break;
+        }
+
+        if !in_raw_string && ch == '"' && prev != '\\' {
+            in_string = !in_string;
+        }
+
+        // Rough raw string detection: r#" ... "#
+        if !in_string && prev == '#' && ch == '"' {
+            in_raw_string = true;
+        } else if in_raw_string && prev == '"' && ch == '#' {
+            in_raw_string = false;
+        }
+
+        if !in_string && !in_raw_string {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    depth
 }
 
 /// Build finalization section with submodule-aware instructions.

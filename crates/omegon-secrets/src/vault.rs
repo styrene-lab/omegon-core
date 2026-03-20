@@ -152,14 +152,13 @@ pub struct TokenAuth {
 }
 
 /// Vault HTTP client with authentication and path enforcement.
-#[derive(Clone)]
 pub struct VaultClient {
     /// Base Vault server URL
-    pub(crate) base_url: Url,
+    base_url: Url,
     /// HTTP client with configured timeout
     client: Client,
     /// Current Vault token (zeroized on drop)
-    pub(crate) token: Option<SecretString>,
+    token: Option<SecretString>,
     /// Configuration
     config: VaultConfig,
     /// Path allowlist matcher
@@ -230,39 +229,6 @@ impl VaultClient {
             denied_paths,
         })
     }
-
-    /// Load configuration from vault.json in the config directory, or from environment.
-    pub fn load_config(config_dir: &Path) -> Result<Option<VaultConfig>> {
-        // First try VAULT_ADDR environment variable
-        if let Ok(addr) = std::env::var("VAULT_ADDR") {
-            if !addr.is_empty() {
-                info!("using VAULT_ADDR: {}", addr);
-                return Ok(Some(VaultConfig {
-                    addr,
-                    auth: AuthConfig::Token,
-                    allowed_paths: vec!["secret/data/*".to_string()],
-                    denied_paths: vec![],
-                    timeout_secs: default_timeout(),
-                }));
-            }
-        }
-
-        // Then try vault.json
-        let vault_config_path = config_dir.join("vault.json");
-        if vault_config_path.exists() {
-            let content = std::fs::read_to_string(&vault_config_path)
-                .context("failed to read vault.json")?;
-            let config: VaultConfig = serde_json::from_str(&content)
-                .context("invalid vault.json format")?;
-            debug!("loaded vault config from {}", vault_config_path.display());
-            Ok(Some(config))
-        } else {
-            // No configuration found
-            Ok(None)
-        }
-    }
-
-    /// Authenticate with Vault using the configured auth method.
     ///
     /// Priority order:
     /// 1. VAULT_TOKEN environment variable
@@ -383,6 +349,11 @@ impl VaultClient {
         Ok(())
     }
 
+    /// Set the token directly (e.g., from VAULT_TOKEN env).
+    pub fn set_token(&mut self, token: SecretString) {
+        self.token = Some(token);
+    }
+
     /// Check if the client has a valid token.
     pub fn is_authenticated(&self) -> bool {
         self.token.is_some()
@@ -422,9 +393,14 @@ impl VaultClient {
     }
 
     /// Submit an unseal key.
-    pub async fn unseal(&self, key: &str) -> Result<SealStatus> {
+    /// Submit an unseal key.
+    ///
+    /// Takes a `SecretString` to ensure unseal keys are never held as
+    /// plain strings in agent-visible memory. This method is intended
+    /// for TUI-only use — the agent loop should never call it.
+    pub async fn unseal(&self, key: &SecretString) -> Result<SealStatus> {
         let url = self.base_url.join("v1/sys/unseal")?;
-        let data = serde_json::json!({ "key": key });
+        let data = serde_json::json!({ "key": key.expose_secret() });
         
         let response = self.client
             .post(url)
@@ -440,11 +416,9 @@ impl VaultClient {
 
     /// Look up information about the current token.
     pub async fn token_lookup(&self) -> Result<TokenInfo> {
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
         let url = self.base_url.join("v1/auth/token/lookup-self")?;
-        let response = self.authenticated_request(&url, |req| req.get(url.clone())).await?;
+        let response = self.authenticated_request(|req| req.get(url.clone())).await?;
 
         let data: serde_json::Value = response.json().await?;
         let token_data = &data["data"];
@@ -463,8 +437,6 @@ impl VaultClient {
 
     /// Renew the current token.
     pub async fn token_renew(&self, increment: Option<&str>) -> Result<TokenInfo> {
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
         let url = self.base_url.join("v1/auth/token/renew-self")?;
         let mut data = serde_json::Map::new();
@@ -472,7 +444,7 @@ impl VaultClient {
             data.insert("increment".to_string(), serde_json::Value::String(inc.to_string()));
         }
 
-        let response = self.authenticated_request(&url, |req| {
+        let response = self.authenticated_request(|req| {
             req.post(url.clone()).json(&data)
         }).await?;
 
@@ -487,7 +459,10 @@ impl VaultClient {
                 .iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect(),
-            creation_time: chrono::Utc::now().timestamp(),
+            creation_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
         })
     }
 
@@ -496,11 +471,9 @@ impl VaultClient {
         // Enforce path allowlist/denylist
         self.check_path_allowed(path)?;
 
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
         let url = self.base_url.join(&format!("v1/{}", path))?;
-        let response = self.authenticated_request(&url, |req| req.get(url.clone())).await?;
+        let response = self.authenticated_request(|req| req.get(url.clone())).await?;
 
         if response.status().is_success() {
             let kv_response: KvV2Response = response.json().await
@@ -520,13 +493,11 @@ impl VaultClient {
         // Enforce path allowlist/denylist
         self.check_path_allowed(path)?;
 
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
         let payload = serde_json::json!({ "data": data });
         let url = self.base_url.join(&format!("v1/{}", path))?;
         
-        let response = self.authenticated_request(&url, |req| {
+        let response = self.authenticated_request(|req| {
             req.post(url.clone()).json(&payload)
         }).await?;
 
@@ -544,11 +515,11 @@ impl VaultClient {
         // Enforce path allowlist/denylist
         self.check_path_allowed(path)?;
 
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
-        let url = self.base_url.join(&format!("v1/{}?list=true", path))?;
-        let response = self.authenticated_request(&url, |req| req.get(url.clone())).await?;
+        let url = self.base_url.join(&format!("v1/{}", path))?;
+        let response = self.authenticated_request(|req| {
+            req.request(reqwest::Method::from_bytes(b"LIST").unwrap(), url.clone())
+        }).await?;
 
         if response.status().is_success() {
             let list_response: serde_json::Value = response.json().await?;
@@ -572,8 +543,6 @@ impl VaultClient {
         ttl: Option<String>,
         use_limit: Option<u32>,
     ) -> Result<String> {
-        let _token = self.token.as_ref()
-            .ok_or_else(|| anyhow!("no token available"))?;
 
         let request = CreateTokenRequest {
             policies,
@@ -583,7 +552,7 @@ impl VaultClient {
         };
 
         let url = self.base_url.join("v1/auth/token/create")?;
-        let response = self.authenticated_request(&url, |req| {
+        let response = self.authenticated_request(|req| {
             req.post(url.clone()).json(&request)
         }).await?;
 
@@ -614,7 +583,7 @@ impl VaultClient {
     }
 
     /// Make an authenticated HTTP request to Vault.
-    async fn authenticated_request<F>(&self, _url: &Url, builder: F) -> Result<Response>
+    async fn authenticated_request<F>(&self, builder: F) -> Result<Response>
     where
         F: FnOnce(&Client) -> reqwest::RequestBuilder,
     {
@@ -706,7 +675,7 @@ mod tests {
 
         let config = test_config(&server.url());
         let client = VaultClient::new(config).unwrap();
-        let status = client.unseal("test-key").await.unwrap();
+        let status = client.unseal(&SecretString::from("test-key")).await.unwrap();
 
         assert!(status.sealed);
         assert_eq!(status.progress, 1);
@@ -716,7 +685,7 @@ mod tests {
     async fn test_path_allowlist_enforcement() {
         let config = test_config("http://localhost:8200");
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.test"));
+        client.set_token(SecretString::from("hvs.test"));
 
         // Allowed path should pass
         assert!(client.check_path_allowed("secret/data/omegon/api-keys").is_ok());
@@ -741,7 +710,7 @@ mod tests {
 
         let config = test_config(&server.url());
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.test"));
+        client.set_token(SecretString::from("hvs.test"));
 
         let data = client.read("secret/data/omegon/api-keys").await.unwrap();
         assert_eq!(data.get("anthropic").unwrap().as_str().unwrap(), "sk-ant-test123");
@@ -757,7 +726,7 @@ mod tests {
 
         let config = test_config(&server.url());
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.test"));
+        client.set_token(SecretString::from("hvs.test"));
 
         let mut data = HashMap::new();
         data.insert("key".to_string(), serde_json::Value::String("value".to_string()));
@@ -776,12 +745,45 @@ mod tests {
 
         let config = test_config(&server.url());
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.test"));
+        client.set_token(SecretString::from("hvs.test"));
 
         let info = client.token_lookup().await.unwrap();
         assert_eq!(info.ttl, 3600);
         assert!(info.renewable);
         assert!(info.policies.contains(&"omegon".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_secrets() {
+        let mut server = Server::new_async().await;
+        let _m = server.mock("LIST", "/v1/secret/metadata/omegon/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": {"keys": ["api-keys", "tokens", "config"]}}"#)
+            .create_async().await;
+
+        let config = VaultConfig {
+            addr: server.url(),
+            auth: AuthConfig::Token,
+            allowed_paths: vec!["secret/data/omegon/*".to_string(), "secret/metadata/omegon/*".to_string()],
+            denied_paths: vec![],
+            timeout_secs: 5,
+        };
+        let mut client = VaultClient::new(config).unwrap();
+        client.set_token(SecretString::from("hvs.test"));
+
+        let keys = client.list("secret/metadata/omegon/").await.unwrap();
+        assert_eq!(keys, vec!["api-keys", "tokens", "config"]);
+    }
+
+    #[tokio::test]
+    async fn test_list_disallowed_path() {
+        let config = test_config("http://localhost:8200");
+        let mut client = VaultClient::new(config).unwrap();
+        client.set_token(SecretString::from("hvs.test"));
+
+        let err = client.list("secret/metadata/other/").await.unwrap_err();
+        assert!(err.to_string().contains("not in allowlist"));
     }
 
     #[tokio::test]
@@ -795,7 +797,7 @@ mod tests {
 
         let config = test_config(&server.url());
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.parent"));
+        client.set_token(SecretString::from("hvs.parent"));
 
         let child_token = client.mint_child_token(
             Some(vec!["omegon-child".to_string()]),
@@ -808,14 +810,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_approle_auth() {
-        // Set up keyring entry for test — skip if keyring unavailable
-        let entry = match keyring::Entry::new("omegon", "vault-approle-test-secret") {
+        // Use a unique keyring key per test run to avoid polluting real keyring
+        let test_key = format!("vault-test-approle-{}", std::process::id());
+
+        // Set up keyring entry — skip if keyring unavailable (CI, headless)
+        let entry = match keyring::Entry::new("omegon", &test_key) {
             Ok(e) => e,
-            Err(_) => return, // skip on platforms without keyring
+            Err(_) => return,
         };
         if entry.set_password("secret123").is_err() {
-            return; // skip if keyring write fails (CI, headless)
+            return;
         }
+
+        // Ensure cleanup runs even on panic
+        struct KeyringCleanup(keyring::Entry);
+        impl Drop for KeyringCleanup {
+            fn drop(&mut self) { let _ = self.0.delete_credential(); }
+        }
+        let _cleanup = KeyringCleanup(keyring::Entry::new("omegon", &test_key).unwrap());
 
         let mut server = Server::new_async().await;
         let _m = server.mock("POST", "/v1/auth/approle/login")
@@ -828,7 +840,7 @@ mod tests {
             addr: server.url(),
             auth: AuthConfig::AppRole {
                 role_id: "test-role".to_string(),
-                secret_id_key: "vault-approle-test-secret".to_string(),
+                secret_id_key: test_key.clone(),
             },
             allowed_paths: vec![],
             denied_paths: vec![],
@@ -836,12 +848,8 @@ mod tests {
         };
 
         let mut client = VaultClient::new(config).unwrap();
-        // Use the test keyring service name
-        client.authenticate_approle("test-role", "vault-approle-test-secret").await.unwrap();
+        client.authenticate_approle("test-role", &test_key).await.unwrap();
 
         assert!(client.is_authenticated());
-
-        // Cleanup
-        let _ = entry.delete_credential();
     }
 }

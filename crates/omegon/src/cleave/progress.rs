@@ -46,6 +46,8 @@ pub enum ProgressEvent {
         scope_files: usize,
     },
     /// Periodic progress estimate for a child.
+    /// Reserved for future use — not yet emitted by the orchestrator.
+    #[allow(dead_code)]
     ChildProgress {
         child: String,
         turn: u32,
@@ -147,15 +149,27 @@ fn extract_turn_number(s: &str) -> Option<u32> {
 
 /// Count task checklist items in a task file.
 ///
-/// Looks for `- [ ]` or `- [x]` markdown checkboxes.
+/// Looks for `- [ ]` or `- [x]` markdown checkboxes, but stops
+/// at the "## Result" or "## Contract" sections to avoid counting
+/// template checkboxes.
 pub fn count_task_items(content: &str) -> usize {
-    content.lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]")
-                || trimmed.starts_with("- [X]")
-        })
-        .count()
+    let mut count = 0;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Stop counting at structural template sections
+        if trimmed.starts_with("## Result")
+            || trimmed.starts_with("## Contract")
+            || trimmed.starts_with("## Finalization")
+        {
+            break;
+        }
+        if trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]")
+            || trimmed.starts_with("- [X]")
+        {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Strip ANSI escape sequences from a string.

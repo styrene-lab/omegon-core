@@ -249,16 +249,26 @@ pub fn commit_dirty_submodules(worktree_path: &Path, child_label: &str) -> Resul
     // If any submodules were committed, commit the pointer updates in the parent
     if committed > 0 {
         let msg = format!("chore({child_label}): update submodule pointer(s)");
-        let _ = Command::new("git")
-            .args(["commit", "-m", &msg])
+        let pointer_commit = Command::new("git")
+            .args(["commit", "-m", &msg, "--allow-empty"])
             .current_dir(worktree_path)
-            .output();
+            .output()
+            .context("failed to commit submodule pointer updates")?;
 
-        tracing::info!(
-            child = %child_label,
-            submodules_committed = committed,
-            "submodule auto-commit complete"
-        );
+        if !pointer_commit.status.success() {
+            let stderr = String::from_utf8_lossy(&pointer_commit.stderr);
+            tracing::warn!(
+                child = %child_label,
+                "submodule pointer commit failed: {}",
+                stderr.trim()
+            );
+        } else {
+            tracing::info!(
+                child = %child_label,
+                submodules_committed = committed,
+                "submodule auto-commit complete"
+            );
+        }
     }
 
     Ok(committed)

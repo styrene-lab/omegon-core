@@ -98,9 +98,9 @@ impl SecretsManager {
         Ok(())
     }
 
-    /// Get a reference to the vault client for direct access.
-    pub async fn vault_client(&self) -> Option<VaultClient> {
-        self.vault_client.lock().await.clone()
+    /// Get a locked reference to the vault client for direct access.
+    pub async fn vault_client(&self) -> tokio::sync::MutexGuard<'_, Option<VaultClient>> {
+        self.vault_client.lock().await
     }
 
     /// Check vault health and return status info for /whoami.

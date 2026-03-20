@@ -252,7 +252,7 @@ mod tests {
         };
 
         let mut client = VaultClient::new(config).unwrap();
-        client.token = Some(SecretString::from("hvs.test"));
+        client.set_token(SecretString::from("hvs.test"));
 
         let secret = resolve_vault_secret(Some(&client), "vault:secret/data/omegon/api-keys#anthropic").await;
         assert_eq!(secret.map(|s| s.expose_secret().to_string()), Some("sk-ant-test123".to_string()));
